@@ -565,8 +565,26 @@ a {
 .gradient-spotlight-magenta { background: linear-gradient(155deg, var(--gradient-magenta), #8e2fb8); }
 
 
-/* Sign-in options Apple's guideline 4.8 doesn't allow without Sign in with Apple. */
+/* Sign-in options Apple's guideline 4.8 doesn't allow without Sign in with
+   Apple. data-desktop is set in both apps (desktop and iPhone). */
 [data-desktop] .web-only { display: none !important; }
+/* What can't work on a phone: recording the computer's audio, and links
+   that only make sense on a computer. */
+[data-mobile-app] .not-on-phone-app { display: none !important; }
+/* The iPhone app draws edge to edge (it sets viewport-fit=cover): pages start
+   below the clock, a bar in the page's own color sits behind the status bar
+   so nothing scrolls under it, and full-height screens leave room for it. */
+.status-bar-backdrop { display: none; }
+[data-mobile-app] body { padding-top: env(safe-area-inset-top); }
+[data-mobile-app] .min-h-dvh,
+[data-mobile-app] .min-h-screen { min-height: calc(100dvh - env(safe-area-inset-top)); }
+[data-mobile-app] .status-bar-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 70;
+  height: env(safe-area-inset-top);
+}
 
 /* ---------- customizable dashboard (DashboardGrid) ----------
    react-grid-layout positions widgets with transforms; these make every

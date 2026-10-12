@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { startLocalCapture } from "@/app/(app)/deals/new/actions";
+import { useInDesktopApp } from "@/lib/native-shell";
 
 type Template = { id: string; name: string };
 
@@ -16,13 +17,10 @@ export const LOCAL_CAPTURE_EVENT = "sealme:local-capture-changed";
 
 export default function LocalCaptureForm({ templates }: { templates: Template[] }) {
   const router = useRouter();
-  const [isTauri, setIsTauri] = useState<boolean | null>(null);
+  const isTauri = useInDesktopApp();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
-  }, []);
 
   async function handleSubmit(formData: FormData) {
     setBusy(true);

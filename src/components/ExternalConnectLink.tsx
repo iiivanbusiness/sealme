@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, type ReactNode, type MouseEvent } from "react";
+import { type ReactNode, type MouseEvent } from "react";
+import { useInDesktopApp } from "@/lib/native-shell";
 
 // A plain <a href="/api/..."> works fine in a normal browser, but the
 // desktop app's webview is locked to app.sealme.net (see
@@ -22,11 +23,7 @@ export default function ExternalConnectLink({
   style?: React.CSSProperties;
   children: ReactNode;
 }) {
-  const [isTauri, setIsTauri] = useState(false);
-
-  useEffect(() => {
-    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
-  }, []);
+  const isTauri = useInDesktopApp();
 
   async function handleClick(e: MouseEvent<HTMLAnchorElement>) {
     if (!isTauri) return; // plain <a> navigates normally in a real browser

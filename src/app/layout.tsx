@@ -52,6 +52,7 @@ const THEME_INIT_SCRIPT = `
     if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
   } catch (e) {}
   if ("__TAURI_INTERNALS__" in window) document.documentElement.setAttribute("data-desktop", "");
+  if ("__SEALME_MOBILE__" in window || navigator.userAgent.indexOf("SealMeMobile") !== -1) document.documentElement.setAttribute("data-mobile-app", "");
 `;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -63,7 +64,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <Script id="theme-init" strategy="beforeInteractive">{THEME_INIT_SCRIPT}</Script>
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {/* Only shown in the iPhone app, behind the status bar (globals.css). */}
+        <div className="status-bar-backdrop sm-theme" aria-hidden="true" />
+        {children}
+      </body>
     </html>
   );
 }

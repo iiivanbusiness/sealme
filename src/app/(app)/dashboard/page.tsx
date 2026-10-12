@@ -383,10 +383,10 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         </div>
       </div>
       <div className="flex gap-2.5">
-        <a href="https://meet.google.com" target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm">
+        <a href="https://meet.google.com" target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm not-on-phone-app">
           Google Meet
         </a>
-        <a href="https://zoom.us" target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm">
+        <a href="https://zoom.us" target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm not-on-phone-app">
           Zoom
         </a>
         <Link href="/deals/new" className="btn btn-primary">

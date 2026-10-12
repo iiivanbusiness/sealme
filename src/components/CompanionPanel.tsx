@@ -6,6 +6,7 @@ import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureFo
 import CallHighlightsList, { type CallHighlightItem } from "./CallHighlightsList";
 import RecentNotesList, { type RecentNoteItem } from "./RecentNotesList";
 import ClientText from "@/components/ClientText";
+import { useInDesktopApp } from "@/lib/native-shell";
 
 type Session = { dealId: string; token: string; startedAt: number };
 type StopResult = { ok: boolean; error?: string };
@@ -101,7 +102,7 @@ function formatEventTime(iso: string): string {
 // background, by design.
 export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { upcomingEvents: UpcomingEvent[]; fastPoll?: boolean }) {
   const searchParams = useSearchParams();
-  const [isTauri, setIsTauri] = useState<boolean | null>(null);
+  const isTauri = useInDesktopApp();
   const [session, setSession] = useState<Session | null>(null);
   const [dealState, setDealState] = useState<DealState | null>(null);
   const [notes, setNotes] = useState<RecentNoteItem[] | null>(null);
@@ -117,7 +118,6 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
   const hadSessionRef = useRef(false);
 
   useEffect(() => {
-    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
     const initial = readSession();
     setSession(initial);
     hadSessionRef.current = Boolean(initial);

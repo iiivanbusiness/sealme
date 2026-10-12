@@ -22,11 +22,11 @@ function Field({ label, name, placeholder, required }: { label: string; name: st
   );
 }
 
-function ModeTab({ href, active, children }: { href: string; active: boolean; children: React.ReactNode }) {
+function ModeTab({ href, active, className = "", children }: { href: string; active: boolean; className?: string; children: React.ReactNode }) {
   return (
     <Link
       href={href}
-      className="btn btn-sm whitespace-nowrap"
+      className={`btn btn-sm whitespace-nowrap ${className}`}
       style={active ? { background: "var(--primary)", color: "var(--on-primary)" } : { background: "var(--surface-1)", border: "1px solid var(--hairline)", color: "var(--ink-muted)" }}
     >
       {children}
@@ -66,7 +66,7 @@ export default async function NewDealPage({
     </div>
 
     <div className="mb-5 flex flex-wrap gap-2">
-      <ModeTab href="/deals/new?mode=local" active={isLocal}>Record locally</ModeTab>
+      <ModeTab href="/deals/new?mode=local" active={isLocal} className="not-on-phone-app">Record locally</ModeTab>
       <ModeTab href="/deals/new" active={isTranscript}>Recording or transcript</ModeTab>
       <ModeTab href="/deals/new?mode=manual" active={isManual}>Enter manually</ModeTab>
     </div>

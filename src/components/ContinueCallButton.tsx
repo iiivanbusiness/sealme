@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { continueLocalCapture } from "@/app/(app)/deals/new/actions";
 import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureForm";
+import { useInDesktopApp } from "@/lib/native-shell";
 
 // Attaches a follow-up recording to an existing deal — same native-capture
 // flow as LocalCaptureForm, just without the client-name/template fields
@@ -11,13 +12,9 @@ import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureFo
 // app; the deal page itself hides this section entirely outside Tauri.
 export default function ContinueCallButton({ dealId }: { dealId: string }) {
   const router = useRouter();
-  const [isTauri, setIsTauri] = useState<boolean | null>(null);
+  const isTauri = useInDesktopApp();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
-  }, []);
 
   async function handleClick() {
     setBusy(true);

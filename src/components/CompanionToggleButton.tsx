@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import { useInDesktopApp } from "@/lib/native-shell";
 
 // Manual toggle for the floating icon rail (see desktop-app's
 // toggle_companion_rail command) — collapses the main window and shows the
@@ -11,14 +12,15 @@ import { useEffect, useState } from "react";
 // offering the floating rail there yet, so this stays macOS-only until
 // that changes.
 export default function CompanionToggleButton() {
-  const [isTauri, setIsTauri] = useState(false);
-  const [isWindows, setIsWindows] = useState(false);
+  const isTauri = useInDesktopApp();
+  // Same no-subscription read as useInDesktopApp: the platform never changes.
+  const isWindows = useSyncExternalStore(
+    () => () => {},
+    () => navigator.userAgent.includes("Windows"),
+    () => false,
+  );
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
-    setIsWindows(typeof navigator !== "undefined" && navigator.userAgent.includes("Windows"));
-  }, []);
 
   if (!isTauri || isWindows) return null;
 

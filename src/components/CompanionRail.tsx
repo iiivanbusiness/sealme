@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureForm";
+import { useInDesktopApp } from "@/lib/native-shell";
 
 type View = "live" | "calendar" | "notes";
 type Session = { dealId: string; token: string; startedAt: number };
@@ -63,11 +64,10 @@ function Icon({ view }: { view: View | "back" }) {
 // select_companion_view). Content only ever appears once a view is picked
 // here; this window has no content of its own beyond the 4 buttons.
 export default function CompanionRail() {
-  const [isTauri, setIsTauri] = useState(false);
+  const isTauri = useInDesktopApp();
   const hadSessionRef = useRef(false);
 
   useEffect(() => {
-    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
     hadSessionRef.current = Boolean(readSession());
 
     // Same "notice a call just started" auto-open as before, just relocated
