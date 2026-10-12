@@ -1,0 +1,341 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		12703623F00C9D8E8E426B7A /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DBB0C3DFD3D08EE60C53B909 /* WebKit.framework */; };
+		1FE9FA92C1073039960B5FA8 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4659886C15511C2BFC4565C7 /* CoreGraphics.framework */; };
+		41DE8E9D3FD33563724D1DCD /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B0749C236CB2A0899426A0D /* QuartzCore.framework */; };
+		4C205421B44AE36A1885C684 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 9F2133657A5EFF24EC0CF98E /* assets */; };
+		4DA6724F0C9C1D7F4428D185 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8F0BEA0CAC5313FD9C71D36A /* UIKit.framework */; };
+		6B4B7DB90022A06A3775C45A /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 148DA187A05258324D740F51 /* main.mm */; };
+		71866D5CF1341BA137BB4063 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E647B494B57D0B06962139A /* MetalKit.framework */; };
+		7CA4EDFA5A1B76B87AE173BD /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3DBF575BCB97C0868C30F0E2 /* Metal.framework */; };
+		971516A523FE39E831CEF6D4 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 348DE78181E6E0EE7B56C161 /* LaunchScreen.storyboard */; };
+		BC24EE546E580D11745AEFDF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AB71B9F67D3610DFC824A868 /* Assets.xcassets */; };
+		D161823120B3165F9D3E47C7 /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A373CBD45915D0B3A2E33A09 /* libapp.a */; };
+		D75CA446ACF1ECDDA213B775 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DA8307B27071FA511A257DE3 /* Security.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0418B18B7C54AD78BEECFB0F /* sealme-mobile_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "sealme-mobile_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		148DA187A05258324D740F51 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		1A5F8EA2CD81D1225126FDDA /* sealme-mobile_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "sealme-mobile_iOS.entitlements"; sourceTree = "<group>"; };
+		2F5B074F666AD0AFCB173C03 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		348DE78181E6E0EE7B56C161 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		3DBF575BCB97C0868C30F0E2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		4659886C15511C2BFC4565C7 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		4E647B494B57D0B06962139A /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		5C10FAF948DA74DD08E7E43C /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		6B0749C236CB2A0899426A0D /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		7F16C8133BB1AC0B048684C7 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		88E36717FC0E4E6DBE980490 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		8F0BEA0CAC5313FD9C71D36A /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		9F2133657A5EFF24EC0CF98E /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		A373CBD45915D0B3A2E33A09 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		AB71B9F67D3610DFC824A868 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		DA8307B27071FA511A257DE3 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		DBB0C3DFD3D08EE60C53B909 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		6B05F89F56CB07E13AF82218 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D161823120B3165F9D3E47C7 /* libapp.a in Frameworks */,
+				1FE9FA92C1073039960B5FA8 /* CoreGraphics.framework in Frameworks */,
+				7CA4EDFA5A1B76B87AE173BD /* Metal.framework in Frameworks */,
+				71866D5CF1341BA137BB4063 /* MetalKit.framework in Frameworks */,
+				41DE8E9D3FD33563724D1DCD /* QuartzCore.framework in Frameworks */,
+				D75CA446ACF1ECDDA213B775 /* Security.framework in Frameworks */,
+				4DA6724F0C9C1D7F4428D185 /* UIKit.framework in Frameworks */,
+				12703623F00C9D8E8E426B7A /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		717763597438265D2D5A8888 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0418B18B7C54AD78BEECFB0F /* sealme-mobile_iOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8444588BF9C6D8D7C3BFEAEF /* src */ = {
+			isa = PBXGroup;
+			children = (
+				88E36717FC0E4E6DBE980490 /* lib.rs */,
+				5C10FAF948DA74DD08E7E43C /* main.rs */,
+			);
+			name = src;
+			path = ../../src;
+			sourceTree = "<group>";
+		};
+		847FCD7AC277254A30F57716 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				CF417B39A1A096C8565962EE /* sealme-mobile */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		89A69292FEFFDA440A59248F /* bindings */ = {
+			isa = PBXGroup;
+			children = (
+				7F16C8133BB1AC0B048684C7 /* bindings.h */,
+			);
+			path = bindings;
+			sourceTree = "<group>";
+		};
+		8BC6D20C48FE78C82F59093A /* Externals */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Externals;
+			sourceTree = "<group>";
+		};
+		92324C13DB85053A6B963237 /* sealme-mobile_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				2F5B074F666AD0AFCB173C03 /* Info.plist */,
+				1A5F8EA2CD81D1225126FDDA /* sealme-mobile_iOS.entitlements */,
+			);
+			path = "sealme-mobile_iOS";
+			sourceTree = "<group>";
+		};
+		B50F2677586B96872F5B3DC9 = {
+			isa = PBXGroup;
+			children = (
+				9F2133657A5EFF24EC0CF98E /* assets */,
+				AB71B9F67D3610DFC824A868 /* Assets.xcassets */,
+				348DE78181E6E0EE7B56C161 /* LaunchScreen.storyboard */,
+				8BC6D20C48FE78C82F59093A /* Externals */,
+				92324C13DB85053A6B963237 /* sealme-mobile_iOS */,
+				847FCD7AC277254A30F57716 /* Sources */,
+				8444588BF9C6D8D7C3BFEAEF /* src */,
+				DD531CF565E0AEF4BE83DF38 /* Frameworks */,
+				717763597438265D2D5A8888 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		CF417B39A1A096C8565962EE /* sealme-mobile */ = {
+			isa = PBXGroup;
+			children = (
+				148DA187A05258324D740F51 /* main.mm */,
+				89A69292FEFFDA440A59248F /* bindings */,
+			);
+			path = "sealme-mobile";
+			sourceTree = "<group>";
+		};
+		DD531CF565E0AEF4BE83DF38 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				4659886C15511C2BFC4565C7 /* CoreGraphics.framework */,
+				A373CBD45915D0B3A2E33A09 /* libapp.a */,
+				3DBF575BCB97C0868C30F0E2 /* Metal.framework */,
+				4E647B494B57D0B06962139A /* MetalKit.framework */,
+				6B0749C236CB2A0899426A0D /* QuartzCore.framework */,
+				DA8307B27071FA511A257DE3 /* Security.framework */,
+				8F0BEA0CAC5313FD9C71D36A /* UIKit.framework */,
+				DBB0C3DFD3D08EE60C53B909 /* WebKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		656F78C020C383772179706A /* sealme-mobile_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A47FC23701768A08D3F1D2B /* Build configuration list for PBXNativeTarget "sealme-mobile_iOS" */;
+			buildPhases = (
+				858875B737E042E2EEA0CBB9 /* Build Rust Code */,
+				68CA16450013E185AE3B3D53 /* Sources */,
+				D5534077358486D0FA89BD46 /* Resources */,
+				6B05F89F56CB07E13AF82218 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "sealme-mobile_iOS";
+			packageProductDependencies = (
+			);
+			productName = "sealme-mobile_iOS";
+			productReference = 0418B18B7C54AD78BEECFB0F /* sealme-mobile_iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CEDDA97D4AA2388CB29DB949 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = 167B0016337C61041E0B7A0A /* Build configuration list for PBXProject "sealme-mobile" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B50F2677586B96872F5B3DC9;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 717763597438265D2D5A8888 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				656F78C020C383772179706A /* sealme-mobile_iOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D5534077358486D0FA89BD46 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BC24EE546E580D11745AEFDF /* Assets.xcassets in Resources */,
+				971516A523FE39E831CEF6D4 /* LaunchScreen.storyboard in Resources */,
+				4C205421B44AE36A1885C684 /* assets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		858875B737E042E2EEA0CBB9 /* Build Rust Code */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Code";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a",
+				"$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "npm run -- tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		68CA16450013E185AE3B3D53 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6B4B7DB90022A06A3775C45A /* main.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		16F698634049E994AFCC2327 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				CODE_SIGN_ENTITLEMENTS = "sealme-mobile_iOS/sealme-mobile_iOS.entitlements";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "sealme-mobile_iOS/Info.plist";
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = net.sealme.app;
+				PRODUCT_NAME = "SealMe";
+				VALID_ARCHS = arm64;
+			};
+			name = debug;
+		};
+		296E30F34CFF05B28AF1FFAD /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = release;
+		};
+		5F488A080451ECB79E00EC61 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = debug;
+		};
+		E0D1AC3B22744189DC8398B1 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				CODE_SIGN_ENTITLEMENTS = "sealme-mobile_iOS/sealme-mobile_iOS.entitlements";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "sealme-mobile_iOS/Info.plist";
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = net.sealme.app;
+				PRODUCT_NAME = "SealMe";
+				VALID_ARCHS = arm64;
+			};
+			name = release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		167B0016337C61041E0B7A0A /* Build configuration list for PBXProject "sealme-mobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F488A080451ECB79E00EC61 /* debug */,
+				296E30F34CFF05B28AF1FFAD /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		9A47FC23701768A08D3F1D2B /* Build configuration list for PBXNativeTarget "sealme-mobile_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				16F698634049E994AFCC2327 /* debug */,
+				E0D1AC3B22744189DC8398B1 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = CEDDA97D4AA2388CB29DB949 /* Project object */;
+}

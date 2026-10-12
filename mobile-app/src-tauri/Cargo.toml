@@ -1,0 +1,26 @@
+[package]
+name = "sealme-mobile"
+version = "0.1.0"
+description = "SealMe for iPhone"
+authors = ["SealMe"]
+edition = "2021"
+
+[lib]
+# The _lib suffix keeps the lib name apart from the bin name (a Cargo quirk on Windows).
+name = "sealme_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Loads http://localhost:3000 instead of app.sealme.net (simulator only).
+dev-server = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"

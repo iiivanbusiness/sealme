@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "The SealMe web app in the main window",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://app.sealme.net/*", "http://localhost:3000/*"]
+  },
+  "permissions": ["core:default"]
+}
