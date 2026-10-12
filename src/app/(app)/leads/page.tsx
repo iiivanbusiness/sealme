@@ -3,6 +3,7 @@ import { after } from "next/server";
 import { prisma } from "@/lib/db";
 import { workspaceCampaigns } from "@/lib/campaigns";
 import { requireProspecting } from "@/lib/prospecting";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import { currentUserWithRole } from "@/lib/permissions";
 import { leadAccess } from "@/lib/lead-visibility";
 import { isLeadStage, LEAD_INTEREST_LABEL, LEAD_STAGE_CHIP, LEAD_STAGE_LABEL } from "@/lib/lead-stages";
@@ -48,7 +49,7 @@ export default async function LeadsPage({
   // Opening Leads pulls anything new from a connected CRM (when it's due),
   // after the page has gone out so it never slows the page down.
   after(() => syncCrmLeadsIfDue(workspace, { budgetMs: 40_000 }));
-  const access = await leadAccess(user);
+  const [access, phone] = await Promise.all([leadAccess(user), isPhoneApp()]);
   const params = await searchParams;
   // A rep only ever sees their own leads, so the tabs and owner filter are
   // a manager's view.
@@ -117,13 +118,16 @@ export default async function LeadsPage({
         <div>
           <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Leads</h1>
           <div className="mt-1 text-[14px]" style={{ color: "var(--ink-muted)" }}>
-            {total.toLocaleString("en-US")} {total === 1 ? "lead" : "leads"}. {access.canViewAll ? "Prospects you call before they become deals" : "Your prospects, before they become deals"}
+            {total.toLocaleString("en-US")} {total === 1 ? "lead" : "leads"}. {phone ? (access.canViewAll ? "The team's clients and prospects" : "Your clients and prospects") : access.canViewAll ? "Prospects you call before they become deals" : "Your prospects, before they become deals"}
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Link href="/leads/import" className="btn btn-secondary">
-            Import
-          </Link>
+          {/* Importing a spreadsheet is a job for a computer. */}
+          {!phone && (
+            <Link href="/leads/import" className="btn btn-secondary">
+              Import
+            </Link>
+          )}
           <Link href="/leads/new" className="btn btn-primary">
             + Add lead
           </Link>

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Inter, Baloo_2 } from "next/font/google";
 import Script from "next/script";
+import { PHONE_APP_MARKER } from "@/lib/phone-app";
 import "./globals.css";
 
 const geist = Geist({
@@ -52,7 +53,7 @@ const THEME_INIT_SCRIPT = `
     if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
   } catch (e) {}
   if ("__TAURI_INTERNALS__" in window) document.documentElement.setAttribute("data-desktop", "");
-  if ("__SEALME_MOBILE__" in window || navigator.userAgent.indexOf("SealMeMobile") !== -1) document.documentElement.setAttribute("data-mobile-app", "");
+  if ("__SEALME_MOBILE__" in window || navigator.userAgent.indexOf("${PHONE_APP_MARKER}") !== -1) document.documentElement.setAttribute("data-mobile-app", "");
 `;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

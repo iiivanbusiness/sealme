@@ -15,7 +15,8 @@ type LeadOption = { id: string; name: string; company: string | null };
 // read and a contract drafted, or (Notes only) the call is written up on a
 // lead and nothing else. On the Notes page it's notes only (notesOnly:
 // `action` writes the call up, no templates, no choice to make), and
-// `back` is where the person lands after.
+// `back` is where the person lands after. `phone` (the iPhone app) words
+// the file picker for a phone, where nothing is dragged in.
 export default function CallUploadForm({
   templates,
   action,
@@ -23,6 +24,7 @@ export default function CallUploadForm({
   searchLeads,
   notesOnly = false,
   back,
+  phone = false,
 }: {
   templates: { id: string; name: string }[];
   action: (formData: FormData) => Promise<void>;
@@ -30,6 +32,7 @@ export default function CallUploadForm({
   searchLeads?: (q: string) => Promise<LeadOption[]>;
   notesOnly?: boolean;
   back?: string;
+  phone?: boolean;
 }) {
   const [need, setNeed] = useState<"contract" | "notes">("contract");
   const notes = notesOnly || (need === "notes" && Boolean(notesAction));
@@ -153,9 +156,11 @@ export default function CallUploadForm({
               className="flex flex-col items-center gap-2.5 rounded-[14px] border border-dashed px-5 py-8 text-center transition-colors"
               style={{ borderColor: dragging ? "var(--accent-blue)" : "var(--hairline)", background: dragging ? "var(--canvas)" : undefined }}
             >
-              <div className="text-[14px] font-medium">Drop the call recording here</div>
+              <div className="text-[14px] font-medium">{phone ? "Add the call recording" : "Drop the call recording here"}</div>
               <div className="max-w-[380px] text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
-                Video or audio from Zoom, Meet, Teams or your phone: MP4, MOV, M4A, MP3, WAV or WEBM. SealMe turns it into a transcript you can check before anything else happens.
+                {phone
+                  ? "A video from Photos or a recording from Files. SealMe turns it into a transcript you can check before anything else happens."
+                  : "Video or audio from Zoom, Meet, Teams or your phone: MP4, MOV, M4A, MP3, WAV or WEBM. SealMe turns it into a transcript you can check before anything else happens."}
               </div>
               <button type="button" onClick={() => recordingInput.current?.click()} className="btn btn-secondary btn-sm mt-1">
                 Choose a file

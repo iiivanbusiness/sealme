@@ -23,23 +23,27 @@ const MATCHES_SHOWN = 8;
 
 // One call in the Calls inbox: say what it should become (notes only, or
 // notes and a contract), pick who it was with (or let the call make a new
-// lead), then Process or Discard.
+// lead), then Process or Discard. notesOnly (the iPhone app, which has no
+// contracts) leaves out the choice.
 export default function PendingCallCard({
   call,
   leads,
   processAction,
   discardAction,
+  notesOnly = false,
 }: {
   call: PendingCall;
   leads: LeadOption[];
   processAction: (input: { leadId: string; mode?: string }) => Promise<void>;
   discardAction: () => Promise<void>;
+  notesOnly?: boolean;
 }) {
   const router = useRouter();
+  const wantsContract = call.mode === "sales" && !notesOnly;
   // Notes only: SealMe finds the client's lead from the call by default.
-  const [leadId, setLeadId] = useState(call.leadId ?? (call.mode === "sales" ? "" : "new"));
+  const [leadId, setLeadId] = useState(call.leadId ?? (wantsContract ? "" : "new"));
   // Most calls only need notes; a contract is the exception.
-  const [need, setNeed] = useState<"notes" | "contract">(call.mode === "sales" ? "contract" : "notes");
+  const [need, setNeed] = useState<"notes" | "contract">(wantsContract ? "contract" : "notes");
   const isNew = leadId === "new";
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -101,24 +105,26 @@ export default function PendingCallCard({
       {!processing && (
         <>
           <div className="flex flex-wrap items-end gap-2.5">
-            <div className="flex-none">
-              <span className="mb-1 block text-[12px]" style={{ color: "var(--ink-muted)" }}>What you need</span>
-              <div className="flex rounded-full p-[3px] text-[12.5px]" style={{ background: "var(--surface-2)" }} role="radiogroup" aria-label="What you need">
-                {(["notes", "contract"] as const).map((n) => (
-                  <button
-                    key={n}
-                    type="button"
-                    role="radio"
-                    aria-checked={need === n}
-                    onClick={() => setNeed(n)}
-                    className="rounded-full px-3 py-1.5 font-medium"
-                    style={need === n ? { background: "var(--surface-1)", color: "var(--ink)", boxShadow: "0 0 0 1px var(--hairline)" } : { color: "var(--ink-muted)" }}
-                  >
-                    {n === "notes" ? "Notes only" : "Notes and contract"}
-                  </button>
-                ))}
+            {!notesOnly && (
+              <div className="flex-none">
+                <span className="mb-1 block text-[12px]" style={{ color: "var(--ink-muted)" }}>What you need</span>
+                <div className="flex rounded-full p-[3px] text-[12.5px]" style={{ background: "var(--surface-2)" }} role="radiogroup" aria-label="What you need">
+                  {(["notes", "contract"] as const).map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      role="radio"
+                      aria-checked={need === n}
+                      onClick={() => setNeed(n)}
+                      className="rounded-full px-3 py-1.5 font-medium"
+                      style={need === n ? { background: "var(--surface-1)", color: "var(--ink)", boxShadow: "0 0 0 1px var(--hairline)" } : { color: "var(--ink-muted)" }}
+                    >
+                      {n === "notes" ? "Notes only" : "Notes and contract"}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
             <div className="relative min-w-[220px] flex-1">
               <label className="mb-1 block text-[12px]" style={{ color: "var(--ink-muted)" }}>Lead</label>
               {selected && !open ? (
@@ -198,7 +204,7 @@ export default function PendingCallCard({
             {isNew && need === "contract" && <span className="text-[12px]" style={{ color: "var(--ink-muted)" }}>For a contract, pick the lead it&apos;s for.</span>}
             {leadId && !(isNew && need === "contract") && (
               <span className="text-[12px]" style={{ color: "var(--ink-muted)" }}>
-                {need === "notes" ? "SealMe writes the notes on the lead and sets up the next step. No contract." : "SealMe writes the notes and drafts the contract for you to check."}
+                {need === "notes" ? `SealMe writes the notes on the lead and sets up the next step.${notesOnly ? "" : " No contract."}` : "SealMe writes the notes and drafts the contract for you to check."}
               </span>
             )}
           </div>

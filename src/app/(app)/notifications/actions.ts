@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { scheduleWebhookRetries } from "@/lib/webhooks";
+import { isPhoneApp } from "@/lib/phone-app-server";
 
 export type NotificationItem = {
   id: string;
@@ -28,9 +29,13 @@ export async function getUnreadNotifications(): Promise<{ unreadCount: number; i
   const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
   if (!user) return { unreadCount: 0, items: [] };
 
+  // The iPhone app has no contracts, so no contract or review news either.
+  const mine = (await isPhoneApp())
+    ? { userId: user.id, NOT: [{ type: { startsWith: "contract." } }, { type: { startsWith: "review." } }] }
+    : { userId: user.id };
   const [unreadCount, rows] = await Promise.all([
-    prisma.notification.count({ where: { userId: user.id, readAt: null } }),
-    prisma.notification.findMany({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, take: 10 }),
+    prisma.notification.count({ where: { ...mine, readAt: null } }),
+    prisma.notification.findMany({ where: mine, orderBy: { createdAt: "desc" }, take: 10 }),
   ]);
 
   return {

@@ -5,11 +5,15 @@ import { signIn } from "@/lib/auth";
 import ThemeToggle from "@/components/ThemeToggle";
 import BrandLogo from "@/components/BrandLogo";
 import GoogleIcon from "@/components/GoogleIcon";
+import { phoneAppViewport } from "@/lib/phone-app-server";
 
 const ERROR_MESSAGE: Record<string, string> = {
   CredentialsSignin: "Wrong email, password, or 2FA code.",
 };
 const DEFAULT_ERROR_MESSAGE = "Something went wrong signing you in. Please try again.";
+
+// The iPhone app opens here when signed out.
+export const generateViewport = phoneAppViewport;
 
 export default async function LoginPage({
   searchParams,

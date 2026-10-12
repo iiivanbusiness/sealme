@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireWorkspace } from "@/lib/workspace";
 import { isAdminEmail } from "@/lib/admin";
 import { navGroupsFor, mobilePrimaryItems } from "@/lib/nav-config";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import ThemeToggle from "./ThemeToggle";
 import CompanionToggleButton from "./CompanionToggleButton";
 import BrandLogo from "./BrandLogo";
@@ -46,7 +47,7 @@ function initials(name: string): string {
 }
 
 export default async function AppShell({ children }: { children: React.ReactNode }) {
-  const [workspace, session] = await Promise.all([requireWorkspace(), auth()]);
+  const [workspace, session, phone] = await Promise.all([requireWorkspace(), auth(), isPhoneApp()]);
   const workspaceName = workspace.name;
   const isAdmin = isAdminEmail(session?.user?.email);
 
@@ -54,13 +55,13 @@ export default async function AppShell({ children }: { children: React.ReactNode
     ? await prisma.user.findUnique({ where: { email: session.user.email }, select: { aiDisclosureAcknowledgedAt: true, timezone: true, role: { select: { canManageTeam: true } } } })
     : null;
   const { unreadCount, items: notificationItems } = await getUnreadNotifications();
-  const groups = navGroupsFor({ prospecting: workspace.prospectingEnabled, admin: isAdmin, manager: Boolean(currentUser?.role?.canManageTeam) });
+  const groups = navGroupsFor({ prospecting: workspace.prospectingEnabled, admin: isAdmin, manager: Boolean(currentUser?.role?.canManageTeam), phone });
   const withIcon = (item: { href: string; label: string }) => {
     const Icon = NAV_ICONS[item.href];
     return { href: item.href, label: item.label, icon: <Icon /> };
   };
   const navGroups = groups.map((g) => ({ label: g.label, collapsible: g.collapsible, items: g.items.map(withIcon) }));
-  const mobileItems = mobilePrimaryItems(groups, workspace.prospectingEnabled).map(withIcon);
+  const mobileItems = mobilePrimaryItems(groups, { prospecting: workspace.prospectingEnabled, phone }).map(withIcon);
 
   const navLinks = <SidebarNav groups={navGroups} />;
 
@@ -75,10 +76,13 @@ export default async function AppShell({ children }: { children: React.ReactNode
         </div>
         <span className="truncate text-[13px] font-medium" style={{ color: "var(--ink)" }}>{workspaceName}</span>
       </div>
-      {/* Brings the setup guide back after it was hidden. */}
-      <Link href="/dashboard?guide=open#setup" className="rounded-[10px] px-3 py-2 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
-        Setup guide
-      </Link>
+      {/* Brings the setup guide back after it was hidden. Setting up is
+          done on a computer, so the iPhone app has no guide. */}
+      {!phone && (
+        <Link href="/dashboard?guide=open#setup" className="rounded-[10px] px-3 py-2 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
+          Setup guide
+        </Link>
+      )}
       <form
         action={async () => {
           "use server";
@@ -130,14 +134,16 @@ export default async function AppShell({ children }: { children: React.ReactNode
             </Suspense>
             {children}
           </main>
-          <AppFooter />
+          {/* The website's footer; the iPhone app goes without. */}
+          {!phone && <AppFooter />}
         </div>
       </div>
 
       {currentUser && <AiDisclosureModal show={!currentUser.aiDisclosureAcknowledgedAt} />}
       <TimezoneSync stored={currentUser?.timezone ?? null} />
 
-      <FaqChatWidget prospecting={workspace.prospectingEnabled} />
+      {/* Over the content on a phone screen; the app has Feedback in the menu. */}
+      {!phone && <FaqChatWidget prospecting={workspace.prospectingEnabled} />}
 
       <MobileNav
         items={mobileItems}

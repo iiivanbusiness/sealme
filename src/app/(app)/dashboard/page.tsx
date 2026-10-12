@@ -11,6 +11,7 @@ import DealStatusFolders from "@/components/dashboard/DealStatusFolders";
 import DealValueHeroCard from "@/components/dashboard/DealValueHeroCard";
 import GlowRingStat from "@/components/dashboard/GlowRingStat";
 import DashboardGrid from "@/components/dashboard/DashboardGrid";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import { currentUserWithRole } from "@/lib/permissions";
 import { normalizeDashboard } from "@/lib/dashboard-widgets";
 import { hideGetStarted, saveDashboardLayout } from "./actions";
@@ -75,6 +76,33 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const canAssign = prospecting ? (await leadAccess(user)).canAssign : false;
   const tz = prospecting ? await cookieTimeZone() : "UTC";
   let subtitle = "Everything happening across your workspace";
+
+  // The iPhone app: how the day is going and the to-do list. Contracts and
+  // the setup guide stay on the computer (see phone-app.ts).
+  if (await isPhoneApp()) {
+    const params = await searchParams;
+    const today = prospecting
+      ? await todaySection({ workspaceId, me: user, tz, view: params.todo, queue: params.queue === "1", canAssign, phoneInGuide: false, phone: true })
+      : null;
+    if (today) subtitle = `${new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: tz }).format(now)} · ${today.sentence}`;
+    return (
+      <>
+        <div className="mb-6 flex flex-wrap items-baseline justify-between gap-4">
+          <div>
+            <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>{hello}</h1>
+            <div className="mt-1 text-[14px]" style={{ color: "var(--ink-muted)" }}>{subtitle}</div>
+          </div>
+          {prospecting && (
+            <Link href="/notes" className="btn btn-primary">
+              + Add a call
+            </Link>
+          )}
+        </div>
+        {today && <div id="todo">{today.block}</div>}
+      </>
+    );
+  }
+
   const { where: visibility } = await dealVisibilityFilter();
 
   const in90Days = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);

@@ -1,15 +1,16 @@
 import { useSyncExternalStore } from "react";
+import { PHONE_APP_MARKER } from "@/lib/phone-app";
 
 // Where the page is running: a browser, the desktop app (Tauri on Mac and
 // Windows) or the iPhone app (Tauri on iOS, which sets
 // window.__SEALME_MOBILE__ before any page script runs and adds
-// "SealMeMobile" to its user agent). Both apps expose
+// PHONE_APP_MARKER to its user agent). Both apps expose
 // __TAURI_INTERNALS__, so the desktop-only features (Record locally, the
 // companion window, continuing a captured call) check inDesktopApp, not
 // just for Tauri. Client-side only: on the server both are false.
 export function inMobileApp(): boolean {
   if (typeof window === "undefined") return false;
-  return "__SEALME_MOBILE__" in window || navigator.userAgent.includes("SealMeMobile");
+  return "__SEALME_MOBILE__" in window || navigator.userAgent.includes(PHONE_APP_MARKER);
 }
 
 export function inDesktopApp(): boolean {

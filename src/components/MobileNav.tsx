@@ -92,7 +92,7 @@ export default function MobileNav({ items, drawerContent }: { items: MobileNavIt
       </nav>
 
       {open && (
-        <div className="fixed inset-0 z-50 flex md:hidden">
+        <div className="mobile-drawer fixed inset-0 z-50 flex md:hidden">
           <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.45)" }} onClick={() => setOpen(false)} />
           <div className="relative ml-auto flex h-full w-[264px] flex-none">
             <GlassPanel className="mobile-nav-glass flex h-full w-full rounded-none px-3.5 py-[22px]">{drawerContent}</GlassPanel>

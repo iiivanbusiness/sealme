@@ -1,4 +1,6 @@
 import type { NextAuthConfig } from "next-auth";
+import { NextResponse } from "next/server";
+import { isPhoneAppUserAgent, phoneAppRedirect } from "@/lib/phone-app";
 
 export const authConfig = {
   pages: { signIn: "/login" },
@@ -42,7 +44,10 @@ export const authConfig = {
         request.nextUrl.pathname.startsWith("/support") ||
         request.nextUrl.pathname.startsWith("/api/client-error");
       if (isPublic) return true;
-      return !!auth?.user;
+      if (!auth?.user) return false;
+      // What only works on a computer isn't in the iPhone app.
+      const phoneTo = isPhoneAppUserAgent(request.headers.get("user-agent")) ? phoneAppRedirect(request.nextUrl.pathname) : null;
+      return phoneTo ? NextResponse.redirect(new URL(phoneTo, request.nextUrl)) : true;
     },
   },
 } satisfies NextAuthConfig;

@@ -578,6 +578,7 @@ a {
 [data-mobile-app] body { padding-top: env(safe-area-inset-top); }
 [data-mobile-app] .min-h-dvh,
 [data-mobile-app] .min-h-screen { min-height: calc(100dvh - env(safe-area-inset-top)); }
+[data-mobile-app] .mobile-drawer { top: env(safe-area-inset-top); }
 [data-mobile-app] .status-bar-backdrop {
   display: block;
   position: fixed;

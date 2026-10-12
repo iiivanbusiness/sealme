@@ -46,7 +46,9 @@ type Me = { id: string; name: string; phoneVerifiedAt: Date | null; taskDigestEm
 //   view  "me", "team", or a teammate's id; whoever hands out work starts on
 //         the team, everyone else only has their own
 //   queue working through one's own cold calls, one after another
-export async function todaySection(o: { workspaceId: string; me: Me; tz: string; view: string | undefined; queue: boolean; canAssign: boolean; phoneInGuide: boolean }) {
+// In the iPhone app (phone), the two contract numbers make way for notes
+// and new leads.
+export async function todaySection(o: { workspaceId: string; me: Me; tz: string; view: string | undefined; queue: boolean; canAssign: boolean; phoneInGuide: boolean; phone?: boolean }) {
   const { workspaceId, me, tz, canAssign } = o;
   const now = new Date();
   const today = dayInZone(now, tz);
@@ -91,6 +93,15 @@ export async function todaySection(o: { workspaceId: string; me: Me; tz: string;
     canAssign ? prisma.lead.count({ where: { workspaceId, ownerId: null, stage: { notIn: ["converted", "lost"] }, tasks: { none: { status: "open" } } } }) : 0,
   ]);
   const myApprovals = approvals.filter((s) => s.contract.reviewSteps[0]?.id === s.id).map((s) => s.contract.deal);
+  const ledBy = subject ? { ownerId: subject.id } : {};
+  const [notesThisWeek, notesLastWeek, leadsThisWeek, leadsLastWeek] = o.phone
+    ? await Promise.all([
+        prisma.phoneCall.count({ where: { workspaceId, ...calledBy, status: "processed", notes: { not: null }, processedAt: { gte: weekStart } } }),
+        prisma.phoneCall.count({ where: { workspaceId, ...calledBy, status: "processed", notes: { not: null }, processedAt: { gte: lastWeekStart, lt: weekStart } } }),
+        prisma.lead.count({ where: { workspaceId, ...ledBy, createdAt: { gte: weekStart } } }),
+        prisma.lead.count({ where: { workspaceId, ...ledBy, createdAt: { gte: lastWeekStart, lt: weekStart } } }),
+      ])
+    : [0, 0, 0, 0];
 
   // How a to-do reads.
   const who = (p: { id: string; name: string } | null) => (p ? (p.id === me.id ? "you" : firstName(p.name)) : "nobody");
@@ -294,12 +305,19 @@ export async function todaySection(o: { workspaceId: string; me: Me; tz: string;
   const stats = [
     { label: `${whose} today`, value: n(callsToday), sub: versus(callsToday, callsYesterday, "yesterday") },
     { label: "Meetings booked this week", value: n(meetingsThisWeek), sub: versus(meetingsThisWeek, meetingsLastWeek, "last week") },
-    {
-      label: "Waiting on you",
-      value: n(waitingCount),
-      sub: [myApprovals.length && plural(myApprovals.length, "approval", "approvals"), myDeals && plural(myDeals, "contract", "contracts"), callsToCheck && plural(callsToCheck, "call", "calls")].filter(Boolean).join(" · ") || "Nothing right now",
-    },
-    { label: "Signed this month", value: money(signedValue), sub: plural(signed.length, "contract", "contracts") },
+    ...(o.phone
+      ? [
+          { label: "Notes this week", value: n(notesThisWeek), sub: versus(notesThisWeek, notesLastWeek, "last week") },
+          { label: "New leads this week", value: n(leadsThisWeek), sub: versus(leadsThisWeek, leadsLastWeek, "last week") },
+        ]
+      : [
+          {
+            label: "Waiting on you",
+            value: n(waitingCount),
+            sub: [myApprovals.length && plural(myApprovals.length, "approval", "approvals"), myDeals && plural(myDeals, "contract", "contracts"), callsToCheck && plural(callsToCheck, "call", "calls")].filter(Boolean).join(" · ") || "Nothing right now",
+          },
+          { label: "Signed this month", value: money(signedValue), sub: plural(signed.length, "contract", "contracts") },
+        ]),
   ];
 
   // Calls per weekday this week; the weekend only when someone called.

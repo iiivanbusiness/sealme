@@ -8,6 +8,7 @@ import PhoneNumberSettings from "@/components/PhoneNumberSettings";
 import { isTelnyxConfigured } from "@/lib/telnyx";
 import { countryFromLocale } from "@/lib/phone-input";
 import { headers } from "next/headers";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import DeleteAccountSettings from "@/components/DeleteAccountSettings";
 import RolesManager from "@/components/RolesManager";
 import RoleSelect from "@/components/RoleSelect";
@@ -72,6 +73,56 @@ function Toggle({ on, field }: { on: boolean; field: "requireApproval" | "notify
   );
 }
 
+// The person's own settings: their phone number (for calls), two-factor
+// and deleting the account. All the iPhone app shows.
+async function PersonalSettings({
+  user,
+  prospecting,
+}: {
+  user: { phone: string | null; phoneVerifiedAt: Date | null; passwordHash: string | null; twoFactorEnabled: boolean };
+  prospecting: boolean;
+}) {
+  return (
+    <>
+      {prospecting && (
+        <div id="phone" className="glass-card glass-card-solid card-hover mb-4 max-w-[600px] scroll-mt-24">
+          <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
+            <h2 className="text-[15px] font-medium">Your phone number</h2>
+          </div>
+          <div className="px-[22px] py-4">
+            <PhoneNumberSettings
+              phone={user.phone}
+              verified={Boolean(user.phoneVerifiedAt)}
+              canVerify={isTelnyxConfigured()}
+              country={countryFromLocale((await headers()).get("accept-language")?.split(",")[0])?.code ?? "US"}
+            />
+          </div>
+        </div>
+      )}
+
+      {user.passwordHash && (
+        <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
+          <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
+            <h2 className="text-[15px] font-medium">Two-factor authentication</h2>
+          </div>
+          <div className="px-[22px] py-4">
+            <TwoFactorSettings enabled={user.twoFactorEnabled} />
+          </div>
+        </div>
+      )}
+
+      <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
+        <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
+          <h2 className="text-[15px] font-medium">Delete account</h2>
+        </div>
+        <div className="px-[22px] py-4">
+          <DeleteAccountSettings hasPassword={Boolean(user.passwordHash)} />
+        </div>
+      </div>
+    </>
+  );
+}
+
 // "Sync now" for CRM leads runs as an action on this page.
 export const maxDuration = 60;
 
@@ -95,6 +146,21 @@ export default async function SettingsPage({
   ]);
   if (!workspace) return null;
   const currentUser = workspace.users.find((u) => u.email === session?.user?.email);
+  // The iPhone app: only the person's own settings. The workspace, the team
+  // and connected apps are set up on a computer.
+  if (await isPhoneApp()) {
+    return (
+      <>
+        <div className="mb-6">
+          <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Settings</h1>
+          <div className="mt-1 text-[14px]" style={{ color: "var(--ink-muted)" }}>
+            Your account. The workspace, the team and connected apps are set up on a computer.
+          </div>
+        </div>
+        {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} />}
+      </>
+    );
+  }
   const canManageTeam = Boolean(currentUser?.role?.canManageTeam);
   const canManageWorkspacePerm = Boolean(currentUser?.role?.canManageWorkspace);
   const notifyEmail = workspace.users.map((u) => u.email).join(", ") || "your account email";
@@ -498,43 +564,7 @@ export default async function SettingsPage({
 
     {canManageWorkspacePerm && <DeveloperSettingsLink />}
 
-    {currentUser && workspace.prospectingEnabled && (
-      <div id="phone" className="glass-card glass-card-solid card-hover mb-4 max-w-[600px] scroll-mt-24">
-        <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
-          <h2 className="text-[15px] font-medium">Your phone number</h2>
-        </div>
-        <div className="px-[22px] py-4">
-          <PhoneNumberSettings
-            phone={currentUser.phone}
-            verified={Boolean(currentUser.phoneVerifiedAt)}
-            canVerify={isTelnyxConfigured()}
-            country={countryFromLocale((await headers()).get("accept-language")?.split(",")[0])?.code ?? "US"}
-          />
-        </div>
-      </div>
-    )}
-
-    {currentUser?.passwordHash && (
-      <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
-        <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
-          <h2 className="text-[15px] font-medium">Two-factor authentication</h2>
-        </div>
-        <div className="px-[22px] py-4">
-          <TwoFactorSettings enabled={currentUser.twoFactorEnabled} />
-        </div>
-      </div>
-    )}
-
-    {currentUser && (
-      <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
-        <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
-          <h2 className="text-[15px] font-medium">Delete account</h2>
-        </div>
-        <div className="px-[22px] py-4">
-          <DeleteAccountSettings hasPassword={Boolean(currentUser.passwordHash)} />
-        </div>
-      </div>
-    )}
+    {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} />}
 
     <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
       <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { requireProspecting } from "@/lib/prospecting";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import { leadAccess } from "@/lib/lead-visibility";
 import { cookieTimeZone } from "@/lib/viewer-time";
 import { CALL_OUTCOME_CHIP, CALL_OUTCOME_LABEL } from "@/lib/call-outcomes";
@@ -30,7 +31,7 @@ function formatUsd(usd: number): string {
 
 export default async function CallsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
   const workspace = await requireProspecting();
-  const access = await leadAccess();
+  const [access, phone] = await Promise.all([leadAccess(), isPhoneApp()]);
   const seesAll = access.canViewAll || access.canAssign;
   const timeZone = await cookieTimeZone();
   const tab = (await searchParams).tab === "history" ? "history" : "pending";
@@ -138,6 +139,7 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
                 leads={leads.map((l) => ({ id: l.id, name: l.name, detail: l.company ?? l.phone ?? "" }))}
                 processAction={processCall.bind(null, c.id)}
                 discardAction={discardCall.bind(null, c.id)}
+                notesOnly={phone}
               />
             ))
           )}
@@ -156,7 +158,7 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
               const skipped = (c.extracted as { skipped?: string } | null)?.skipped;
               const chip =
                 c.status === "processed" && c.mode === "sales"
-                  ? { cls: "chip-success", label: "Sales call · deal created" }
+                  ? { cls: "chip-success", label: phone ? "Sales call" : "Sales call · deal created" }
                   : c.status === "processed" && c.outcome
                   ? { cls: CALL_OUTCOME_CHIP[c.outcome] ?? "chip-neutral", label: CALL_OUTCOME_LABEL[c.outcome] ?? c.outcome }
                   : c.status === "skipped"
@@ -181,7 +183,7 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
                     </span>
                   </div>
                   {c.summary && <div className="text-[13px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{c.summary}</div>}
-                  {c.mode === "sales" && c.dealId && (
+                  {c.mode === "sales" && c.dealId && !phone && (
                     <div>
                       <Link href={`/deals/${c.dealId}`} className="text-[12.5px] font-medium" style={{ color: "var(--accent-blue)" }}>
                         Open the deal →

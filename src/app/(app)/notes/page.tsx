@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { requireProspecting } from "@/lib/prospecting";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import { leadAccess } from "@/lib/lead-visibility";
 import { workspaceCampaigns } from "@/lib/campaigns";
 import { overviewFromCall } from "@/lib/lead-overview";
@@ -31,7 +32,7 @@ function day(date: Date): string {
 // the ones with a written-up call, newest first.
 export default async function NotesPage({ searchParams }: { searchParams: Promise<{ q?: string; campaign?: string; added?: string }> }) {
   const workspace = await requireProspecting();
-  const access = await leadAccess();
+  const [access, phone] = await Promise.all([leadAccess(), isPhoneApp()]);
   const { q, campaign, added } = await searchParams;
   const term = q?.trim().slice(0, 100) ?? "";
 
@@ -82,13 +83,13 @@ export default async function NotesPage({ searchParams }: { searchParams: Promis
       <div className="mb-5">
         <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Notes</h1>
         <div className="mt-1 text-[14px]" style={{ color: "var(--ink-muted)" }}>
-          Add a call and get its notes. No deal, no contract. Every call with a client goes on that client&apos;s file.
+          Add a call and get its notes.{phone ? "" : " No deal, no contract."} Every call with a client goes on that client&apos;s file.
         </div>
       </div>
 
       <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,560px)_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-3">
-          <CallUploadForm templates={[]} action={createNotesFromTranscript} searchLeads={searchTodoLeads} notesOnly back="/notes" />
+          <CallUploadForm templates={[]} action={createNotesFromTranscript} searchLeads={searchTodoLeads} notesOnly back="/notes" phone={phone} />
           {(processing.length > 0 || failed.length > 0 || added) && (
             <div className="card flex max-w-[560px] flex-col gap-1.5 px-5 py-4 text-[13px]" role="status">
               {(processing.length > 0 || justDone > 0) && <RefreshWhile />}

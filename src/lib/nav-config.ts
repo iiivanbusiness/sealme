@@ -25,10 +25,21 @@ const ITEM = {
 } satisfies Record<string, NavItem>;
 export const ADMIN_ITEM: NavItem = { href: "/admin", label: "Admin" };
 
-export function navGroupsFor({ prospecting, admin, manager = false }: { prospecting: boolean; admin: boolean; manager?: boolean }): NavGroup[] {
+export function navGroupsFor({ prospecting, admin, manager = false, phone = false }: { prospecting: boolean; admin: boolean; manager?: boolean; phone?: boolean }): NavGroup[] {
   // The Dashboard is the day (a rep's tasks, or the team's for managers),
   // so there's no separate Today.
-  const workspace = [ITEM.analytics, ...(prospecting && manager ? [ITEM.team] : []), ITEM.settings, ITEM.feedback, ...(admin ? [ADMIN_ITEM] : [])];
+  const people = [...(prospecting && manager ? [ITEM.team] : []), ITEM.settings, ITEM.feedback, ...(admin ? [ADMIN_ITEM] : [])];
+  // The iPhone app is for calls, notes, leads and how it's going (the
+  // Dashboard). Contracts, the calendar and the deal analytics stay on the
+  // computer (see phone-app.ts).
+  if (phone) {
+    return [
+      { label: "", items: [ITEM.dashboard, ...(prospecting ? [ITEM.notes] : [])] },
+      ...(prospecting ? [{ label: "Prospecting", items: [ITEM.leads, ITEM.calls] }] : []),
+      { label: "Workspace", items: people },
+    ];
+  }
+  const workspace = [ITEM.analytics, ...people];
   return [
     { label: "", items: [ITEM.dashboard, ITEM.calendar] },
     ...(prospecting ? [{ label: "Prospecting", items: [ITEM.leads, ITEM.calls] }] : []),
@@ -44,12 +55,15 @@ export function navGroupsFor({ prospecting, admin, manager = false }: { prospect
 // The phone's bottom bar has room for four buttons plus "More". Reps live
 // in prospecting on the phone, so those come first when it's on; anything
 // not built yet is skipped and the next item fills its spot.
+// In the iPhone app, Notes (record or upload a call) comes right after the
+// Dashboard.
 const MOBILE_PRIORITY_PROSPECTING = ["/dashboard", "/leads", "/calls", "/deals"];
 const MOBILE_PRIORITY_DEFAULT = ["/dashboard", "/deals", "/calendar", "/clients"];
+const MOBILE_PRIORITY_PHONE_APP = ["/dashboard", "/notes", "/leads", "/calls"];
 
-export function mobilePrimaryItems(groups: NavGroup[], prospecting: boolean, count = 4): NavItem[] {
+export function mobilePrimaryItems(groups: NavGroup[], { prospecting, phone = false }: { prospecting: boolean; phone?: boolean }, count = 4): NavItem[] {
   const all = groups.flatMap((g) => g.items);
-  const priority = prospecting ? MOBILE_PRIORITY_PROSPECTING : MOBILE_PRIORITY_DEFAULT;
+  const priority = phone ? MOBILE_PRIORITY_PHONE_APP : prospecting ? MOBILE_PRIORITY_PROSPECTING : MOBILE_PRIORITY_DEFAULT;
   const picked = priority.map((href) => all.find((i) => i.href === href)).filter((i): i is NavItem => Boolean(i));
   for (const item of all) if (picked.length < count && !picked.includes(item)) picked.push(item);
   return picked.slice(0, count);

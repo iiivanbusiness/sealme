@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requireProspecting } from "@/lib/prospecting";
+import { isPhoneApp } from "@/lib/phone-app-server";
 import { leadAccess } from "@/lib/lead-visibility";
 import { LEAD_STAGES, LEAD_STAGE_LABEL, LEAD_INTEREST_LABEL } from "@/lib/lead-stages";
 import { formatPhone } from "@/lib/phone";
@@ -42,7 +43,7 @@ export default async function LeadPage({
   const { id } = await params;
   const { created, saved } = await searchParams;
 
-  const access = await leadAccess();
+  const [access, phone] = await Promise.all([leadAccess(), isPhoneApp()]);
   const processed = { leadId: id, workspaceId: workspace.id, status: "processed" };
   const [lead, members, tasks, calls, templates, campaigns, newest, callStats] = await Promise.all([
     prisma.lead.findFirst({ where: { id, workspaceId: workspace.id, ...access.where }, include: { owner: { select: { id: true, name: true } } } }),
@@ -101,7 +102,8 @@ export default async function LeadPage({
           <span style={{ color: "var(--ink-muted)" }}>{lead.owner ? `Owner: ${lead.owner.name}` : "Unassigned"}</span>
         </div>
       </div>
-      {convertedDeal ? (
+      {/* Deals and contracts aren't in the iPhone app. */}
+      {phone ? null : convertedDeal ? (
         <Link href={`/deals/${convertedDeal.id}`} className="btn btn-secondary">
           Open deal →
         </Link>
