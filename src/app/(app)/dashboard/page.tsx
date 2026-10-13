@@ -93,9 +93,15 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <div className="mt-1 text-[14px]" style={{ color: "var(--ink-muted)" }}>{subtitle}</div>
           </div>
           {prospecting && (
-            <Link href="/notes" className="btn btn-primary">
-              + Add a call
-            </Link>
+            <div className="flex gap-2.5">
+              <Link href="/record" className="btn record-button gap-2">
+                <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "#fff" }} />
+                Record a meeting
+              </Link>
+              <Link href="/notes" className="btn btn-secondary">
+                Upload
+              </Link>
+            </div>
           )}
         </div>
         {today && <div id="todo">{today.block}</div>}

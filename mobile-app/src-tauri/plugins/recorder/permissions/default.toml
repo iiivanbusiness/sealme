@@ -1,0 +1,12 @@
+[default]
+description = "Everything the SealMe page needs to record a meeting and send it"
+permissions = [
+  "allow-start",
+  "allow-pause",
+  "allow-resume",
+  "allow-stop",
+  "allow-status",
+  "allow-pending",
+  "allow-discard",
+  "allow-upload",
+]

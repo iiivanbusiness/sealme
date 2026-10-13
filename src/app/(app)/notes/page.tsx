@@ -89,6 +89,12 @@ export default async function NotesPage({ searchParams }: { searchParams: Promis
 
       <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,560px)_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-3">
+          {phone && (
+            <Link href="/record" className="btn record-button max-w-[560px] justify-center gap-2">
+              <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "#fff" }} />
+              Record a meeting
+            </Link>
+          )}
           <CallUploadForm templates={[]} action={createNotesFromTranscript} searchLeads={searchTodoLeads} notesOnly back="/notes" phone={phone} />
           {(processing.length > 0 || failed.length > 0 || added) && (
             <div className="card flex max-w-[560px] flex-col gap-1.5 px-5 py-4 text-[13px]" role="status">

@@ -19,6 +19,7 @@ import AiDisclosureModal from "./AiDisclosureModal";
 import FaqChatWidget from "./FaqChatWidget";
 import NotificationBell from "./NotificationBell";
 import GuideTip from "./GuideTip";
+import RecordingBanner from "./RecordingBanner";
 import { Suspense } from "react";
 import Link from "next/link";
 import { getUnreadNotifications } from "@/app/(app)/notifications/actions";
@@ -125,6 +126,7 @@ export default async function AppShell({ children }: { children: React.ReactNode
             </div>
           </header>
 
+          {phone && <RecordingBanner />}
           <EmailVerifyBanner />
           <LocalCaptureBanner />
 

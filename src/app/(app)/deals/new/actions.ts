@@ -127,9 +127,23 @@ export async function createDealFromTranscript(formData: FormData) {
 // written up in the background the same way as a call from the Calls
 // inbox, which is where the person lands to watch it finish.
 export async function createNotesFromTranscript(formData: FormData) {
+  await saveNotesCall(formData);
+  // From the Notes page, back there: the call shows as being written up.
+  redirect(formData.get("back") === "/notes" ? "/notes?added=1" : "/calls");
+}
+
+// A meeting recorded in the iPhone app: saved the same way, but the page
+// moves on by itself, after deleting the recording from the phone.
+export async function saveRecordedMeeting(formData: FormData): Promise<void> {
+  formData.set("source", "app");
+  await saveNotesCall(formData);
+}
+
+async function saveNotesCall(formData: FormData): Promise<void> {
   const transcript = String(formData.get("transcript") ?? "").trim();
   const leadId = String(formData.get("leadId") ?? "new").trim() || "new";
-  const fromRecording = formData.get("source") === "recording";
+  const fromApp = formData.get("source") === "app";
+  const fromRecording = fromApp || formData.get("source") === "recording";
   const seconds = Math.round(Number(formData.get("seconds")) || 0) || null;
   if (!transcript) throw new Error("Add the recording or paste the transcript first");
   if (transcript.length > 400_000) throw new Error("That transcript is too long. Use one call at a time");
@@ -147,7 +161,7 @@ export async function createNotesFromTranscript(formData: FormData) {
       workspaceId: workspace.id,
       userId: access.userId,
       leadId: lead.id,
-      source: fromRecording ? "upload" : "paste",
+      source: fromApp ? "app" : fromRecording ? "upload" : "paste",
       mode: "notes",
       status: "processing",
       transcript,
@@ -157,9 +171,10 @@ export async function createNotesFromTranscript(formData: FormData) {
     select: { id: true },
   });
   const timeZone = await cookieTimeZone();
-  after(() => runCallProcessing(call.id, timeZone));
-  // From the Notes page, back there: the call shows as being written up.
-  redirect(formData.get("back") === "/notes" ? "/notes?added=1" : "/calls");
+  // A meeting recorded in the app was recorded on purpose, and one phone in a
+  // room often hears everyone as one voice: write it up anyway. (The app
+  // doesn't send recordings under MIN_PROCESS_SECONDS.)
+  after(() => runCallProcessing(call.id, timeZone, { force: fromApp }));
 }
 
 // Desktop-app-only: starts a deal backed by a locally-recorded call instead

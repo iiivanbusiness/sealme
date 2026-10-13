@@ -19,7 +19,7 @@ import { addUploadedCall, discardCall, processCall } from "./actions";
 export const maxDuration = 300;
 
 const HISTORY_SHOWN = 100;
-const SOURCE_LABEL: Record<string, string> = { phone: "Phone", upload: "Upload", desktop: "Desktop", paste: "Pasted" };
+const SOURCE_LABEL: Record<string, string> = { phone: "Phone", upload: "Upload", desktop: "Desktop", paste: "Pasted", app: "Recorded on iPhone" };
 
 function formatWhen(date: Date, timeZone: string): string {
   return date.toLocaleString("en-US", { timeZone, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });

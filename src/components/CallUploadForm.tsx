@@ -7,7 +7,7 @@ import { formatCallDuration as formatDuration, formatFileSize as formatSize, isR
 
 type Stage = { kind: "idle" } | { kind: "uploading"; progress: number } | { kind: "transcribing" } | { kind: "ready"; seconds: number; turns: number } | { kind: "error"; message: string };
 
-type LeadOption = { id: string; name: string; company: string | null };
+export type LeadOption = { id: string; name: string; company: string | null };
 
 // "Recording or transcript" on Start a call: upload the call's video or
 // audio (transcribed by Deepgram, then shown for a check) or paste the
@@ -265,8 +265,8 @@ export default function CallUploadForm({
 }
 
 // Who a notes-only call was with: a new lead the call fills in (the
-// default), or one already in Leads.
-function LeadPicker({ search }: { search: (q: string) => Promise<LeadOption[]> }) {
+// default), or one already in Leads. Also on the iPhone app's recorder.
+export function LeadPicker({ search }: { search: (q: string) => Promise<LeadOption[]> }) {
   const [lead, setLead] = useState<LeadOption | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<LeadOption[]>([]);

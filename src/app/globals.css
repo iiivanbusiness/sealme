@@ -579,6 +579,13 @@ a {
 [data-mobile-app] .min-h-dvh,
 [data-mobile-app] .min-h-screen { min-height: calc(100dvh - env(safe-area-inset-top)); }
 [data-mobile-app] .mobile-drawer { top: env(safe-area-inset-top); }
+/* The iPhone app's meeting recorder: the one red in the app, readable on
+   either theme. */
+.record-button { background: #e5372c; color: #fff; box-shadow: 0 8px 24px rgba(229, 55, 44, 0.32); }
+.record-dot { background: #e5372c; }
+@media (prefers-reduced-motion: no-preference) {
+  .record-dot-live { animation: pulse 1.4s ease-in-out infinite; }
+}
 [data-mobile-app] .status-bar-backdrop {
   display: block;
   position: fixed;

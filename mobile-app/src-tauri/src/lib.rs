@@ -43,6 +43,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_recorder::init())
         .setup(|app| {
             let url = APP_URL.parse().expect("APP_URL is a URL");
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))

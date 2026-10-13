@@ -1,0 +1,13 @@
+[package]
+name = "tauri-plugin-recorder"
+version = "0.1.0"
+authors = ["SealMe"]
+description = "Meeting recording for the SealMe iPhone app"
+edition = "2021"
+links = "tauri-plugin-recorder"
+
+[dependencies]
+tauri = { version = "2" }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

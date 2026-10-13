@@ -6,5 +6,5 @@
   "remote": {
     "urls": ["https://app.sealme.net/*", "http://localhost:3000/*"]
   },
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "recorder:default"]
 }

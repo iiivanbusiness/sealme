@@ -75,6 +75,7 @@ const SCREEN_LABELS: { test: (path: string) => boolean; label: string }[] = [
   { test: (p) => p === "/team", label: "Team" },
   { test: (p) => p === "/calls", label: "Calls" },
   { test: (p) => p === "/notes", label: "Notes" },
+  { test: (p) => p === "/record", label: "Record" },
   { test: (p) => p === "/deals/new", label: "Start a call" },
   { test: (p) => /^\/deals\/[^/]+\/contract$/.test(p), label: "Contract review" },
   { test: (p) => /^\/deals\/[^/]+\/send$/.test(p), label: "Send contract" },
