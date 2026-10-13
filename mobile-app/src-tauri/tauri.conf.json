@@ -14,9 +14,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"],
+    "icon": [
+      "icons/icon.png"
+    ],
     "iOS": {
-      "minimumSystemVersion": "17.0"
+      "minimumSystemVersion": "17.0",
+      "developmentTeam": "Y6NYKGZKY8"
     }
   }
 }

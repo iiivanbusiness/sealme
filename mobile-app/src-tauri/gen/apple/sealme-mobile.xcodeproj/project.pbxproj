@@ -272,6 +272,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = net.sealme.app;
 				PRODUCT_NAME = "SealMe";
 				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "Y6NYKGZKY8";
 			};
 			name = debug;
 		};
@@ -311,6 +312,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = net.sealme.app;
 				PRODUCT_NAME = "SealMe";
 				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "Y6NYKGZKY8";
 			};
 			name = release;
 		};

@@ -9,6 +9,9 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- Only standard HTTPS, so no export compliance questions on upload. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- Recording meetings (plugins/recorder). -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SealMe records your meetings so it can write up the notes.</string>
