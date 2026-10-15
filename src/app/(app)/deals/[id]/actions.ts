@@ -20,6 +20,7 @@ export type LiveDealState = {
   summary: string | null;
   fields: {
     id: string;
+    fieldKey: string;
     groupLabel: string;
     label: string;
     value: string | null;
@@ -66,6 +67,7 @@ export async function getLiveDealState(dealId: string): Promise<LiveDealState | 
     summary: deal.summary,
     fields: deal.fields.map((f) => ({
       id: f.id,
+      fieldKey: f.fieldKey,
       groupLabel: f.groupLabel,
       label: f.label,
       value: f.value,

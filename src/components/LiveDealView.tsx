@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useVisibleInterval } from "@/lib/use-visible-interval";
 import Link from "next/link";
+import ContractPreview from "./ContractPreview";
+import NothingHeardYet from "./NothingHeardYet";
 import DealTermsCard from "./DealTermsCard";
 import ContinueCallButton from "./ContinueCallButton";
 import ActionItemsCard from "./ActionItemsCard";
@@ -16,7 +18,7 @@ import ReviewPanel from "./ReviewPanel";
 const POLL_INTERVAL_MS = 4000;
 
 type FieldChange = { oldValue: string | null; newValue: string | null; changedBy: string; changedAt: Date };
-type FieldItem = { id: string; groupLabel: string; label: string; value: string | null; status: string; sourceQuote: string | null; history: FieldChange[] };
+type FieldItem = { id: string; fieldKey: string; groupLabel: string; label: string; value: string | null; status: string; sourceQuote: string | null; history: FieldChange[] };
 type CallItem = { id: string; source: string; startedAt: Date; endedAt: Date | null; transcript: string };
 type ActionItemT = { id: string; description: string; ownerType: string; dueDate: Date | null; status: string; sourceQuote: string | null };
 type CallHighlightItem = { id: string; type: string; body: string; sourceQuote: string | null };
@@ -126,6 +128,7 @@ export default function LiveDealView({
   callLength,
   contractViewedAt,
   templateName,
+  templateClauses,
   hasContract,
   initialStatus,
   initialSummary,
@@ -158,6 +161,8 @@ export default function LiveDealView({
   callLength: string | null;
   contractViewedAt: Date | null;
   templateName: string | null;
+  // The template's clauses (JSON), for the contract preview before there's a contract.
+  templateClauses: string | null;
   hasContract: boolean;
   initialStatus: string;
   initialSummary: string | null;
@@ -343,7 +348,12 @@ export default function LiveDealView({
           <DealTermsCard
             groups={[...groups.entries()].filter(([label]) => label !== "Missing")}
             updateAction={updateFieldsAction}
+            listening={status === "processing"}
           />
+
+          {!hasContract && templateClauses && fields.length > 0 && (
+            <ContractPreview templateName={templateName} clausesJson={templateClauses} fields={fields} live={status === "processing"} />
+          )}
 
           {calls.length > 0 && (
             <div className="card p-5">
@@ -363,6 +373,7 @@ export default function LiveDealView({
                     <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>
                       {callPreview(call.transcript)}
                     </p>
+                    {call.source === "local" && !call.endedAt && !call.transcript.trim() && <NothingHeardYet startedAt={call.startedAt} />}
                     {call.source === "local" && call.endedAt && channelHasWords(call.transcript, "You") && !channelHasWords(call.transcript, "Client") && (
                       <div className="mt-2 rounded-[8px] px-3 py-2 text-[12px]" style={{ background: "var(--surface-2)", color: "#c0392b" }}>
                         We didn&apos;t pick up anything from the other side of this call — only your own mic came through. If you were on headphones or an external mic, try switching back to your Mac&apos;s built-in speakers and microphone and recording again.

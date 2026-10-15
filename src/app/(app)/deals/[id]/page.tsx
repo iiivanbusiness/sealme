@@ -93,11 +93,13 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
       callLength={deal.callLength}
       contractViewedAt={deal.contract?.viewedAt ?? null}
       templateName={deal.template?.name ?? null}
+      templateClauses={deal.template?.clauses ?? null}
       hasContract={Boolean(deal.contract)}
       initialStatus={deal.status}
       initialSummary={deal.summary}
       initialFields={deal.fields.map((f) => ({
         id: f.id,
+        fieldKey: f.fieldKey,
         groupLabel: f.groupLabel,
         label: f.label,
         value: f.value,

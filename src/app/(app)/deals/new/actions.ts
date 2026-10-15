@@ -13,7 +13,7 @@ import { syncDealToSalesforce } from "@/lib/salesforce";
 import { reportError } from "@/lib/error-report";
 import { createDealFromTranscriptText, finishTranscriptDealInBackground, type TranscriptDeal } from "@/lib/transcript-deal";
 import { extractPlaceholderKeys } from "@/lib/contract";
-import { fieldMeta } from "@/lib/extract-deal";
+import { buildDealFieldRows, fieldMeta } from "@/lib/extract-deal";
 import { requireProspecting } from "@/lib/prospecting";
 import { leadAccess } from "@/lib/lead-visibility";
 import { runCallProcessing } from "@/lib/call-inbox";
@@ -192,6 +192,8 @@ export async function startLocalCapture(formData: FormData): Promise<{ dealId: s
 
   const [workspace, user] = await Promise.all([requireWorkspace(), currentUserWithRole()]);
   const workspaceId = workspace.id;
+  const template = await prisma.contractTemplate.findFirst({ where: { id: templateId, workspaceId }, select: { clauses: true } });
+  if (!template) return { error: "Choose a template" };
 
   const client = await prisma.client.create({
     data: { workspaceId, name: clientName, company: clientName, email: clientEmail },
@@ -209,6 +211,19 @@ export async function startLocalCapture(formData: FormData): Promise<{ dealId: s
       status: "processing",
       source: "local",
     },
+  });
+
+  // Every term the template needs is on the deal from the start, empty, so
+  // the page shows the contract right away and fills it in as the terms are
+  // said, instead of staying blank until the first minute is transcribed.
+  // Who the meeting is with is already known.
+  const { fieldRows } = buildDealFieldRows({ clientName, company: null, email: clientEmail, summary: null, fields: [] }, extractPlaceholderKeys(template.clauses));
+  await prisma.dealField.createMany({
+    data: fieldRows.map((row) => ({
+      dealId: deal.id,
+      ...row,
+      ...(row.fieldKey === "clientName" ? { value: clientName, status: "extracted" } : {}),
+    })),
   });
 
   const call = await prisma.call.create({ data: { dealId: deal.id, source: "local" } });

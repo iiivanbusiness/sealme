@@ -23,12 +23,16 @@ function formatChangeDate(date: Date): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// listening: the call is still going, so a term not heard yet is still to
+// come rather than missing.
 export default function DealTermsCard({
   groups,
   updateAction,
+  listening = false,
 }: {
   groups: [string, Field[]][];
   updateAction: (formData: FormData) => void;
+  listening?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [openQuote, setOpenQuote] = useState<string | null>(null);
@@ -57,7 +61,11 @@ export default function DealTermsCard({
                   <div className="flex items-center justify-between gap-3 py-2">
                     <span className="text-[13.5px]" style={{ color: "var(--ink-muted)" }}>{row.label}</span>
                     <div className="flex items-center gap-2">
-                      <span className="text-[13.5px] font-medium">{row.value}</span>
+                      {row.value ? (
+                        <span className="text-[13.5px] font-medium">{row.value}</span>
+                      ) : (
+                        <span className="text-[13px]" style={{ color: "var(--ink-muted)" }}>{listening ? "Listening…" : "Not mentioned"}</span>
+                      )}
                       {!!row.history?.length && (
                         <button
                           onClick={() => setOpenHistory(openHistory === row.id ? null : row.id)}

@@ -33,6 +33,10 @@ export async function applyExtractionToDeal(
 
   for (const row of fieldRows) {
     if (locked(row.fieldKey)) continue;
+    // Nothing heard for a term that already has a value (the client the rep
+    // named when they started recording, or what an earlier pass found):
+    // keep it rather than blank it.
+    if (!row.value && existingByKey.get(row.fieldKey)?.value) continue;
 
     // A real change — not "missing found a value" for the first time, that's
     // not a negotiation moving, just extraction catching up.

@@ -21,8 +21,14 @@ const FIELD_META: Record<string, { label: string; groupLabel: string }> = {
   billingAddress: { label: "Billing address", groupLabel: "Commercial terms" },
 };
 
+// A template's own placeholder ({billingCycle}) reads as "Billing cycle".
+function humanize(fieldKey: string): string {
+  const words = fieldKey.replace(/[_-]+/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim().toLowerCase();
+  return words ? words[0].toUpperCase() + words.slice(1) : fieldKey;
+}
+
 export function fieldMeta(fieldKey: string): { label: string; groupLabel: string } {
-  return FIELD_META[fieldKey] ?? { label: fieldKey, groupLabel: "Deal details" };
+  return FIELD_META[fieldKey] ?? { label: humanize(fieldKey), groupLabel: "Deal details" };
 }
 
 export type ExtractedField = {
