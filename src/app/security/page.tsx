@@ -5,7 +5,7 @@ export const metadata = {
   description: "How SealMe stores, protects and processes your data.",
 };
 
-const LAST_UPDATED = "October 4, 2026";
+const LAST_UPDATED = "October 16, 2026";
 
 export default function SecurityPage() {
   return (
@@ -82,6 +82,8 @@ export default function SecurityPage() {
               <li><strong style={{ color: "var(--ink)" }}>Anthropic</strong>: reading deal terms and notes from calls.</li>
               <li><strong style={{ color: "var(--ink)" }}>Deepgram</strong>: transcribing recordings.</li>
               <li><strong style={{ color: "var(--ink)" }}>Resend</strong>: sending email, such as contracts to sign.</li>
+              <li><strong style={{ color: "var(--ink)" }}>Telnyx</strong>: phone calls placed through SealMe, and their recordings until they&apos;re transcribed.</li>
+              <li><strong style={{ color: "var(--ink)" }}>Recall.ai</strong>: the notetaker that joins Zoom and Google Meet calls when you invite it.</li>
               <li>Integrations you connect (Google, Slack, HubSpot, Salesforce, DocuSign) act on your instructions.</li>
             </ul>
           </Section>

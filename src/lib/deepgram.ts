@@ -1,3 +1,5 @@
+import { DEEPGRAM_OPT_OUT } from "@/lib/recording-transcript";
+
 export function isDeepgramConfigured(): boolean {
   return Boolean(process.env.DEEPGRAM_API_KEY);
 }
@@ -39,7 +41,7 @@ export async function transcribeWav(wavBytes: Buffer): Promise<string> {
   // ceiling changes (e.g. a paid plan) or Deepgram's Whisper cold-start
   // improves.
   const language = process.env.DEEPGRAM_LANGUAGE || "en";
-  const res = await fetch(`https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&multichannel=true&language=${language}`, {
+  const res = await fetch(`https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&multichannel=true&${DEEPGRAM_OPT_OUT}&language=${language}`, {
     method: "POST",
     headers: {
       Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
@@ -87,7 +89,7 @@ export async function transcribeWav(wavBytes: Buffer): Promise<string> {
 export async function transcribeVoiceClip(audioBytes: Buffer, contentType: string): Promise<string> {
   // Same reasoning and same model/language choice as transcribeWav.
   const language = process.env.DEEPGRAM_LANGUAGE || "en";
-  const res = await fetch(`https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&language=${language}`, {
+  const res = await fetch(`https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&${DEEPGRAM_OPT_OUT}&language=${language}`, {
     method: "POST",
     headers: {
       Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,

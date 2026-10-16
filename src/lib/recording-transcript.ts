@@ -3,11 +3,16 @@
 
 // Diarized, single-track recordings: Deepgram tells speakers apart and
 // numbers them from 0.
-export const RECORDING_LISTEN_PARAMS = "model=nova-3&smart_format=true&punctuate=true&diarize=true&utterances=true";
+// mip_opt_out: Deepgram keeps a request only while it's processed and
+// doesn't use it to improve its models (otherwise requests can be). The
+// security page promises this, so every Deepgram request carries it.
+export const DEEPGRAM_OPT_OUT = "mip_opt_out=true";
+
+export const RECORDING_LISTEN_PARAMS = `model=nova-3&smart_format=true&punctuate=true&diarize=true&utterances=true&${DEEPGRAM_OPT_OUT}`;
 
 // A two-channel phone recording (SealMe's own calls): each person is on
 // their own channel, so turns are labeled by channel instead of guessed.
-export const DUAL_CHANNEL_LISTEN_PARAMS = "model=nova-3&smart_format=true&punctuate=true&multichannel=true&utterances=true";
+export const DUAL_CHANNEL_LISTEN_PARAMS = `model=nova-3&smart_format=true&punctuate=true&multichannel=true&utterances=true&${DEEPGRAM_OPT_OUT}`;
 
 type Utterance = { speaker?: number; channel?: number; start?: number; transcript?: string };
 type ListenResponse = {
