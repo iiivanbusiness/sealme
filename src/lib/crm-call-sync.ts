@@ -2,6 +2,8 @@ import { prisma } from "@/lib/db";
 import { CALL_OUTCOME_LABEL, UNREACHED_OUTCOMES } from "@/lib/call-outcomes";
 import { salesforceGet, salesforceRequest, SALESFORCE_API_VERSION } from "@/lib/salesforce";
 import { reportError } from "@/lib/error-report";
+import { NEW_LEAD_NAME } from "@/lib/cold-call";
+import { addGhlNote, addGhlTask, createGhlOpportunity, ghlCallNote, upsertGhlContact } from "@/lib/gohighlevel";
 
 const HUBSPOT_API = "https://api.hubapi.com";
 // HubSpot's own association type for call -> contact.
@@ -124,11 +126,64 @@ async function logToSalesforce(workspaceId: string, recordId: string, recordType
   return task.id;
 }
 
+// What a next step reads as in another CRM.
+function nextStepTitle(type: string, leadName: string): string {
+  if (type === "follow_up") return `Follow up with ${leadName}`;
+  if (type === "sales_call") return `Sales call with ${leadName}`;
+  if (type === "cold_call") return `Call ${leadName}`;
+  return `To-do: ${leadName}`;
+}
+
+type GhlWorkspace = { ghlLocationId: string; ghlAccessToken: string; ghlPipelineId: string | null; ghlStageId: string | null };
+type GhlLead = { id: string; name: string; email: string | null; phone: string | null; company: string | null; ghlContactId: string | null; ghlOpportunityId: string | null };
+
+// GoHighLevel: unlike HubSpot and Salesforce, these leads mostly start in
+// SealMe, so the contact is found (by email or phone) or made the first
+// time. Then the write-up goes on as a note, the call's next step as a task,
+// and the first call opens an opportunity when a pipeline is picked.
+async function logToGohighlevel(workspace: GhlWorkspace, lead: GhlLead, call: CallForCrm & { notes: string | null }): Promise<string> {
+  const token = workspace.ghlAccessToken;
+  let contactId = lead.ghlContactId;
+  if (!contactId) {
+    contactId = await upsertGhlContact(token, workspace.ghlLocationId, { name: lead.name, email: lead.email, phone: lead.phone, company: lead.company });
+    await prisma.lead.update({ where: { id: lead.id }, data: { ghlContactId: contactId } });
+  }
+
+  // The next step this call set: the lead's open to-do made since it started.
+  const next = await prisma.task.findFirst({
+    where: { leadId: lead.id, status: "open", createdAt: { gte: call.startedAt } },
+    select: { type: true, note: true, dueDate: true },
+    orderBy: { dueDate: "asc" },
+  });
+  const nextTitle = next ? nextStepTitle(next.type, lead.name) : null;
+
+  const noteId = await addGhlNote(
+    token,
+    contactId,
+    ghlCallNote({ title: callTitle(call), startedAt: call.startedAt, summary: call.summary, notes: call.notes, nextStep: next ? [nextTitle, next.note].filter(Boolean).join(": ") : null }),
+  );
+  // Midday UTC of the due day, so it lands on the same date in any timezone.
+  if (next && nextTitle) await addGhlTask(token, contactId, { title: nextTitle, body: next.note, dueDate: new Date(next.dueDate.getTime() + 12 * 60 * 60 * 1000) });
+
+  if (workspace.ghlPipelineId && !lead.ghlOpportunityId) {
+    const opportunityId = await createGhlOpportunity(token, {
+      locationId: workspace.ghlLocationId,
+      pipelineId: workspace.ghlPipelineId,
+      stageId: workspace.ghlStageId,
+      contactId,
+      name: lead.company ? `${lead.company} (${lead.name})` : lead.name,
+    });
+    await prisma.lead.update({ where: { id: lead.id }, data: { ghlOpportunityId: opportunityId } });
+  }
+  return noteId;
+}
+
 // After a call is processed: the call and its summary go onto the lead in
 // the CRM it came from, and its status there moves along. Only for leads
 // that came from HubSpot or Salesforce, only while that integration is on,
-// and only once per call. Never throws; a failure is reported and the call
-// in SealMe is unaffected.
+// and only once per call. GoHighLevel, when connected, gets every processed
+// call with a named lead (see logToGohighlevel). Never throws; a failure is
+// reported and the call in SealMe is unaffected.
 export async function pushCallToCrm(callId: string): Promise<void> {
   const call = await prisma.phoneCall.findUnique({
     where: { id: callId },
@@ -139,12 +194,40 @@ export async function pushCallToCrm(callId: string): Promise<void> {
       mode: true,
       outcome: true,
       summary: true,
+      notes: true,
       durationSec: true,
       startedAt: true,
       hubspotCallId: true,
       salesforceTaskId: true,
-      lead: { select: { hubspotContactId: true, salesforceRecordId: true, salesforceRecordType: true } },
-      workspace: { select: { id: true, hubspotEnabled: true, hubspotAccessToken: true, salesforceEnabled: true, salesforceRefreshToken: true } },
+      ghlNoteId: true,
+      lead: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          company: true,
+          hubspotContactId: true,
+          salesforceRecordId: true,
+          salesforceRecordType: true,
+          ghlContactId: true,
+          ghlOpportunityId: true,
+        },
+      },
+      workspace: {
+        select: {
+          id: true,
+          hubspotEnabled: true,
+          hubspotAccessToken: true,
+          salesforceEnabled: true,
+          salesforceRefreshToken: true,
+          ghlEnabled: true,
+          ghlLocationId: true,
+          ghlAccessToken: true,
+          ghlPipelineId: true,
+          ghlStageId: true,
+        },
+      },
     },
   });
   // A call logged through the API came from the customer's own dialer,
@@ -158,6 +241,21 @@ export async function pushCallToCrm(callId: string): Promise<void> {
       await prisma.phoneCall.update({ where: { id: call.id }, data: { hubspotCallId } });
     } catch (err) {
       await reportError(err, "Logging a call to HubSpot", { workspaceId: workspace.id, callId });
+    }
+  }
+
+  // A lead the call couldn't name yet would only make a nameless contact.
+  const named = lead.name !== NEW_LEAD_NAME || Boolean(lead.email || lead.phone);
+  if (workspace.ghlEnabled && workspace.ghlAccessToken && workspace.ghlLocationId && !call.ghlNoteId && named) {
+    try {
+      const ghlNoteId = await logToGohighlevel(
+        { ghlLocationId: workspace.ghlLocationId, ghlAccessToken: workspace.ghlAccessToken, ghlPipelineId: workspace.ghlPipelineId, ghlStageId: workspace.ghlStageId },
+        lead,
+        call,
+      );
+      await prisma.phoneCall.update({ where: { id: call.id }, data: { ghlNoteId } });
+    } catch (err) {
+      await reportError(err, "Logging a call to GoHighLevel", { workspaceId: workspace.id, callId });
     }
   }
 

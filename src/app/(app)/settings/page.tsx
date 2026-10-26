@@ -22,6 +22,8 @@ import SsoSettingsPanel from "@/components/SsoSettingsPanel";
 import DeveloperSettingsLink from "@/components/DeveloperSettingsLink";
 import SlackSettingsPanel from "@/components/SlackSettingsPanel";
 import HubspotSettingsPanel from "@/components/HubspotSettingsPanel";
+import GohighlevelSettingsPanel from "@/components/GohighlevelSettingsPanel";
+import { listGhlPipelines, type GhlPipeline } from "@/lib/gohighlevel";
 import DocusignSettingsPanel from "@/components/DocusignSettingsPanel";
 import SalesforceSettingsPanel from "@/components/SalesforceSettingsPanel";
 import CrmLeadImportPanel from "@/components/CrmLeadImportPanel";
@@ -53,6 +55,7 @@ import { createReviewChain, deleteReviewChain, moveReviewChain, addReviewChainSt
 import { createDelegation, revokeDelegation } from "./delegation-actions";
 import { setSlackChannel, toggleSlack, disconnectSlack } from "./slack-actions";
 import { connectHubspot, toggleHubspot, disconnectHubspot } from "./hubspot-actions";
+import { connectGohighlevel, disconnectGohighlevel, setGohighlevelPipeline, toggleGohighlevel } from "./gohighlevel-actions";
 import { toggleDocusign, disconnectDocusign } from "./docusign-actions";
 import { toggleSalesforce, disconnectSalesforce } from "./salesforce-actions";
 
@@ -189,6 +192,17 @@ export default async function SettingsPage({
       slackChannels = await listSlackChannels(workspace.slackAccessToken);
     } catch (err) {
       slackChannelsError = err instanceof Error ? err.message : "Unknown error";
+    }
+  }
+
+  // The sub-account's pipelines, for picking where opportunities open.
+  let ghlPipelines: GhlPipeline[] = [];
+  let ghlPipelinesError: string | null = null;
+  if (canManageWorkspacePerm && workspace.ghlAccessToken && workspace.ghlLocationId) {
+    try {
+      ghlPipelines = await listGhlPipelines(workspace.ghlAccessToken, workspace.ghlLocationId);
+    } catch {
+      ghlPipelinesError = "Couldn't load the pipelines from GoHighLevel right now.";
     }
   }
 
@@ -491,6 +505,29 @@ export default async function SettingsPage({
             saveSecretAction={saveHubspotWebhookSecret}
           />
         )}
+      </div>
+    )}
+
+    {canManageWorkspacePerm && workspace.prospectingEnabled && (
+      <div id="gohighlevel" className="glass-card glass-card-solid card-hover mb-4 max-w-[600px] scroll-mt-24">
+        <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
+          <h2 className="text-[15px] font-medium">GoHighLevel</h2>
+          <div className="mt-0.5 text-[12px]" style={{ color: "var(--ink-muted)" }}>
+            Put every call into a GoHighLevel sub-account: the contact, the notes, the next step and, if you like, an opportunity.
+          </div>
+        </div>
+        <GohighlevelSettingsPanel
+          connected={Boolean(workspace.ghlAccessToken)}
+          locationId={workspace.ghlLocationId}
+          enabled={workspace.ghlEnabled}
+          pipelines={ghlPipelines}
+          pipelinesError={ghlPipelinesError}
+          selected={workspace.ghlPipelineId ? `${workspace.ghlPipelineId}:${workspace.ghlStageId ?? ""}` : ""}
+          connectAction={connectGohighlevel}
+          setPipelineAction={setGohighlevelPipeline}
+          toggleAction={toggleGohighlevel}
+          disconnectAction={disconnectGohighlevel}
+        />
       </div>
     )}
 

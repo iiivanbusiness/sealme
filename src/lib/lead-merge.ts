@@ -39,6 +39,8 @@ export function mergedLeadData(target: Lead, source: Lead) {
     hubspotContactId: target.hubspotContactId ?? source.hubspotContactId,
     salesforceRecordId: target.salesforceRecordId ?? source.salesforceRecordId,
     salesforceRecordType: target.salesforceRecordId ? target.salesforceRecordType : source.salesforceRecordType,
+    ghlContactId: target.ghlContactId ?? source.ghlContactId,
+    ghlOpportunityId: target.ghlOpportunityId ?? source.ghlOpportunityId,
     externalOwnerEmail: target.externalOwnerEmail ?? source.externalOwnerEmail,
     externalId: target.externalId ?? source.externalId,
   };

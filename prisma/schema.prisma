@@ -101,6 +101,18 @@ model Workspace {
   hubspotPortalId    String?
   hubspotAccessToken String?
 
+  // GoHighLevel — a sub-account's Private Integration token (Settings ->
+  // Private Integrations in GoHighLevel) and that sub-account's Location ID,
+  // pasted in Settings. After each processed call SealMe finds or creates
+  // the contact, adds the notes as a note and the next step as a task, and,
+  // when a pipeline is picked, opens an opportunity once per lead. One-way
+  // push; see src/lib/gohighlevel.ts.
+  ghlEnabled     Boolean @default(false)
+  ghlLocationId  String?
+  ghlAccessToken String?
+  ghlPipelineId  String?
+  ghlStageId     String?
+
   // Leads coming IN from the workspace's CRM (separate from the push above).
   // Off until turned on in Settings. The filters pick which records come in
   // (see src/lib/crm-leads.ts). hubspotWebhookSecret is the Private App's
@@ -1154,6 +1166,10 @@ model Lead {
   hubspotContactId     String?
   salesforceRecordId   String?
   salesforceRecordType String? // Lead | Contact
+  // The lead's contact and opportunity in GoHighLevel, once SealMe has made
+  // or found them.
+  ghlContactId         String?
+  ghlOpportunityId     String?
   externalOwnerEmail   String? // owner as the CRM had it, kept even when no SealMe user matches
   // The id the lead has in whatever system sent it through the API (an
   // agency's dialer or CRM), so they can find and update it by their own id.
@@ -1289,6 +1305,7 @@ model PhoneCall {
   // The call as logged in the lead's CRM, so it's written there only once.
   hubspotCallId    String?
   salesforceTaskId String?
+  ghlNoteId        String?
   templateId          String? // sales calls: which contract template to draft with
 
   durationSec Int?

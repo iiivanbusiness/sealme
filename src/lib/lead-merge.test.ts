@@ -30,6 +30,8 @@ const base: Lead = {
   hubspotContactId: null,
   salesforceRecordId: null,
   salesforceRecordType: null,
+  ghlContactId: null,
+  ghlOpportunityId: null,
   externalOwnerEmail: null,
   externalId: null,
   campaign: null,

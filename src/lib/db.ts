@@ -15,6 +15,7 @@ const SECRET_FIELDS = {
     "slackAccessToken",
     "hubspotAccessToken",
     "hubspotWebhookSecret",
+    "ghlAccessToken",
     "docusignAccessToken",
     "docusignRefreshToken",
     "salesforceAccessToken",
