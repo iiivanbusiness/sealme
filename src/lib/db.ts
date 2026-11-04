@@ -69,6 +69,7 @@ const secretColumns = Prisma.defineExtension({
       slackAccessToken: { needs: { slackAccessToken: true }, compute: (w) => open(w.slackAccessToken) },
       hubspotAccessToken: { needs: { hubspotAccessToken: true }, compute: (w) => open(w.hubspotAccessToken) },
       hubspotWebhookSecret: { needs: { hubspotWebhookSecret: true }, compute: (w) => open(w.hubspotWebhookSecret) },
+      ghlAccessToken: { needs: { ghlAccessToken: true }, compute: (w) => open(w.ghlAccessToken) },
       docusignAccessToken: { needs: { docusignAccessToken: true }, compute: (w) => open(w.docusignAccessToken) },
       docusignRefreshToken: { needs: { docusignRefreshToken: true }, compute: (w) => open(w.docusignRefreshToken) },
       salesforceAccessToken: { needs: { salesforceAccessToken: true }, compute: (w) => open(w.salesforceAccessToken) },
