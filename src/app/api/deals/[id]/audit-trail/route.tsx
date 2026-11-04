@@ -2,7 +2,8 @@ import { renderToBuffer } from "@react-pdf/renderer";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { currentUserWithRole } from "@/lib/permissions";
-import { AuditTrailPdfDocument, type AuditEvent } from "@/lib/audit-trail-pdf";
+import { AuditTrailPdfDocument, formatAuditTime, type AuditEvent } from "@/lib/audit-trail-pdf";
+import { attachmentDisposition } from "@/lib/contract-pdf";
 
 const CALL_SOURCE_LABEL: Record<string, string> = {
   local: "Recorded locally",
@@ -64,7 +65,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     events.push({
       when: call.startedAt,
       label: `Call recorded (${CALL_SOURCE_LABEL[call.source] ?? call.source})`,
-      detail: call.endedAt ? `Ended ${call.endedAt.toLocaleString()}` : "In progress",
+      detail: call.endedAt ? `Ended ${formatAuditTime(call.endedAt)}` : "In progress",
     });
   }
 
@@ -72,9 +73,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     events.push({
       when: change.changedAt,
       label: `Field changed: ${change.fieldKey}`,
-      // "->" not "→" — the PDF's base Helvetica font (WinAnsiEncoding) has
-      // no glyph for the Unicode arrow and silently substitutes garbage.
-      detail: `"${change.oldValue ?? "—"}" -> "${change.newValue ?? "—"}" (${change.changedBy === "manual" ? "edited manually" : "from a call"})`,
+      detail: `"${change.oldValue ?? "-"}" → "${change.newValue ?? "-"}" (${change.changedBy === "manual" ? "edited manually" : "from a call"})`,
     });
   }
 
@@ -141,7 +140,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return new NextResponse(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename="Audit-Trail-${deal.client.name.replace(/\s+/g, "-")}.pdf"`,
+      "Content-Disposition": attachmentDisposition(`Audit-Trail-${deal.client.name.replace(/\s+/g, "-")}.pdf`),
     },
   });
 }

@@ -1,6 +1,12 @@
 import { prisma } from "@/lib/db";
 import { extractDealFromTranscript, buildDealFieldRows } from "@/lib/extract-deal";
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Lives in a prisma-free module so LiveDealView hides the Edit button by the
+// same rule the server actions enforce.
+export { contractLocksTerms } from "@/lib/contract-status";
+
 // Runs an extraction pass against the given transcript and writes the result onto
 // an existing deal — upserting fields (never overwriting a human-confirmed or
 // user-edited value) and flipping deal status the moment nothing is missing,
@@ -11,7 +17,10 @@ export async function applyExtractionToDeal(
   placeholderKeys: string[],
   callId?: string
 ): Promise<{ hasMissing: boolean }> {
-  const deal = await prisma.deal.findUnique({ where: { id: dealId }, include: { contract: { select: { status: true } } } });
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    include: { contract: { select: { status: true } }, client: { select: { email: true } } },
+  });
   if (!deal) throw new Error("Deal not found");
   if (deal.status === "sent" || deal.status === "signed") return { hasMissing: false };
   // Once an approver or the client is looking at the contract, a call that's
@@ -94,12 +103,17 @@ export async function applyExtractionToDeal(
     },
   });
 
-  if (extracted.company || extracted.email) {
+  // An email heard on the call only fills an empty one: the contract goes to
+  // this address, and "cc our legal at ..." or a misheard address must never
+  // replace the one the rep entered.
+  const extractedEmail = extracted.email?.trim().toLowerCase();
+  const email = !deal.client.email && extractedEmail && EMAIL_PATTERN.test(extractedEmail) ? extractedEmail : null;
+  if (extracted.company || email) {
     await prisma.client.update({
       where: { id: deal.clientId },
       data: {
         ...(extracted.company ? { company: extracted.company } : {}),
-        ...(extracted.email ? { email: extracted.email } : {}),
+        ...(email ? { email } : {}),
       },
     });
   }
@@ -138,7 +152,7 @@ export async function syncCoreDealFields(
     await prisma.client.update({ where: { id: clientId }, data: { name: clientName } });
   }
   const clientEmail = changed.find((c) => c.fieldKey === "clientEmail")?.value?.trim().toLowerCase();
-  if (clientEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
+  if (clientEmail && EMAIL_PATTERN.test(clientEmail)) {
     await prisma.client.update({ where: { id: clientId }, data: { email: clientEmail } });
   }
 }

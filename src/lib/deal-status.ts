@@ -26,3 +26,16 @@ export const STATUS_CHIP: Record<string, string> = {
   sent: "chip-neutral",
   signed: "chip-success",
 };
+
+// A sent deal whose SealMe sign link ran out (contractExpired in
+// contract-status.ts) isn't waiting on the client anymore: the rep has to
+// send it again, so it says that instead of "awaiting signature".
+export function dealStatusLabel(status: string, contractExpired = false): string {
+  if (status === "sent" && contractExpired) return "Sign link expired";
+  return STATUS_LABEL[status] ?? status;
+}
+
+export function dealStatusChip(status: string, contractExpired = false): string {
+  if (status === "sent" && contractExpired) return "chip-warn";
+  return STATUS_CHIP[status] ?? "chip-neutral";
+}

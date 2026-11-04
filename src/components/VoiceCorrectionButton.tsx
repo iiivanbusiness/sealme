@@ -86,7 +86,7 @@ export default function VoiceCorrectionButton({
   reviewAction,
 }: {
   dealId: string;
-  applyAction: (dealId: string, fieldKey: string, newValue: string) => Promise<void>;
+  applyAction: (dealId: string, fieldKey: string, newValue: string) => Promise<{ error?: string }>;
   reviewAction: (dealId: string, recipientUserId: string) => Promise<{ error?: string }>;
 }) {
   const router = useRouter();
@@ -188,7 +188,12 @@ export default function VoiceCorrectionButton({
     startTransition(async () => {
       try {
         if (proposal.intent === "update_field") {
-          await applyAction(dealId, proposal.fieldKey, proposal.proposedValue);
+          // A refusal (say, the contract went to a reviewer meanwhile) says why.
+          const result = await applyAction(dealId, proposal.fieldKey, proposal.proposedValue);
+          if (result.error) {
+            setError(result.error);
+            return;
+          }
         } else if (proposal.intent === "send_for_review") {
           const result = await reviewAction(dealId, proposal.recipientUserId);
           if (result.error) {

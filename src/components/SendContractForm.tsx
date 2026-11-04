@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import CountersignerFields from "./CountersignerFields";
+import CountersignerFields, { type CountersignerInput } from "./CountersignerFields";
 import SentConfirmationCard from "./SentConfirmationCard";
 
 type SendResult = { status: "sent" } | { status: "pending_approval"; assigneeName: string } | { status: "error"; error: string };
@@ -22,6 +22,9 @@ export default function SendContractForm({
   clientName,
   docusignAvailable,
   docusignAccountEmail,
+  defaultCc = "",
+  defaultDeliveryMethod = "sealme",
+  initialSigners,
   sendAction,
 }: {
   dealId: string;
@@ -32,6 +35,12 @@ export default function SendContractForm({
   clientName: string;
   docusignAvailable: boolean;
   docusignAccountEmail: string | null;
+  // Sending again (after changes, or once the link expired) starts from what
+  // the last send used, so nobody drops off the CC or the signers unless the
+  // rep removes them (say, a signer who declined).
+  defaultCc?: string;
+  defaultDeliveryMethod?: string;
+  initialSigners?: CountersignerInput[];
   sendAction: (dealId: string, formData: FormData) => Promise<SendResult>;
 }) {
   const router = useRouter();
@@ -77,7 +86,7 @@ export default function SendContractForm({
       </label>
       <label className="flex flex-col gap-1.5">
         <span className="text-[13px] font-medium">CC <span style={{ color: "var(--ink-muted)", fontWeight: 400 }}>(optional. Comma-separated, gets a copy but doesn&apos;t sign)</span></span>
-        <input name="cc" placeholder="assistant@client.com, ops@yourcompany.com" className="input" />
+        <input name="cc" defaultValue={defaultCc} placeholder="assistant@client.com, ops@yourcompany.com" className="input" />
       </label>
       <label className="flex flex-col gap-1.5">
         <span className="text-[13px] font-medium">Subject</span>
@@ -90,11 +99,11 @@ export default function SendContractForm({
           The sign link is appended below your message automatically.
         </span>
       </label>
-      <CountersignerFields clientName={clientName} />
+      <CountersignerFields clientName={clientName} initialSigners={initialSigners} />
       {docusignAvailable && (
         <label className="flex flex-col gap-1.5">
           <span className="text-[13px] font-medium">Sign via</span>
-          <select name="deliveryMethod" defaultValue="sealme" className="input">
+          <select name="deliveryMethod" defaultValue={defaultDeliveryMethod === "docusign" ? "docusign" : "sealme"} className="input">
             <option value="sealme">SealMe (built-in signing)</option>
             <option value="docusign">DocuSign ({docusignAccountEmail})</option>
           </select>

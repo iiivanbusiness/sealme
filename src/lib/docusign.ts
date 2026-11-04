@@ -187,16 +187,17 @@ export async function sendDocusignEnvelope(
       })),
     },
     status: "sent",
-    // DocuSign tells SealMe when this envelope is done. Set on the envelope
-    // itself, so nothing has to be configured in the client's DocuSign
-    // account; the event is only a nudge, SealMe reads the real status from
-    // DocuSign (see syncDocusignContract).
+    // DocuSign tells SealMe when this envelope is done, or turned down by a
+    // signer or voided by the sender. Set on the envelope itself, so nothing
+    // has to be configured in the client's DocuSign account; the event is
+    // only a nudge, SealMe reads the real status from DocuSign (see
+    // syncDocusignContract).
     eventNotification: {
       url: `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/docusign/webhook`,
       loggingEnabled: "true",
       requireAcknowledgment: "true",
       deliveryMode: "SIM",
-      events: ["envelope-completed"],
+      events: ["envelope-completed", "envelope-declined", "envelope-voided"],
       eventData: { version: "restv2.1", format: "json" },
     },
   };
@@ -213,7 +214,8 @@ export async function sendDocusignEnvelope(
 
 export type DocusignEnvelopeStatus = {
   status: string;
-  signers: { name: string; email: string; routingOrder: string; status: string; signedDateTime?: string }[];
+  voidedReason?: string;
+  signers: { name: string; email: string; routingOrder: string; status: string; signedDateTime?: string; declinedReason?: string }[];
 };
 
 // Where an envelope stands, straight from DocuSign. This is what decides a
@@ -224,6 +226,6 @@ export async function docusignEnvelopeStatus(workspaceId: string, envelopeId: st
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) throw new Error(`DocuSign envelope lookup failed: ${res.status} ${await res.text()}`);
-  const data = (await res.json()) as { status?: string; recipients?: { signers?: DocusignEnvelopeStatus["signers"] } };
-  return { status: data.status ?? "unknown", signers: data.recipients?.signers ?? [] };
+  const data = (await res.json()) as { status?: string; voidedReason?: string; recipients?: { signers?: DocusignEnvelopeStatus["signers"] } };
+  return { status: data.status ?? "unknown", voidedReason: data.voidedReason, signers: data.recipients?.signers ?? [] };
 }

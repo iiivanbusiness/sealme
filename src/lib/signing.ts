@@ -18,13 +18,24 @@ function appUrl(): string {
 // with counter-signers behaves identically to today's single-signer one
 // from here on — the only difference is how many people had to sign to
 // get here.
+//
+// Claims the contract first: only the call that actually moves it to
+// "signed" goes on, so two signers finishing at once, or a DocuSign event
+// and the daily check arriving together, can't send every email, webhook
+// and CRM update twice.
 export async function finalizeContractSigned(contractId: string): Promise<void> {
+  const claimed = await prisma.contract.updateMany({
+    where: { id: contractId, status: { not: "signed" } },
+    data: { status: "signed" },
+  });
+  if (claimed.count === 0) return;
+
   const contract = await prisma.contract.findUniqueOrThrow({
     where: { id: contractId },
-    include: { deal: { include: { client: true, workspace: { include: { users: true } } } }, template: true },
+    // Deactivated (SCIM offboarded) users don't get the "signed" email.
+    include: { deal: { include: { client: true, workspace: { include: { users: { where: { deactivatedAt: null } } } } } }, template: true },
   });
 
-  await prisma.contract.update({ where: { id: contractId }, data: { status: "signed" } });
   await prisma.deal.update({ where: { id: contract.dealId }, data: { status: "signed" } });
 
   await logAudit({
@@ -34,7 +45,7 @@ export async function finalizeContractSigned(contractId: string): Promise<void> 
     targetId: contract.id,
   });
 
-  if (contract.deal.workspace.notifyOnSigned) {
+  if (contract.deal.workspace.notifyOnSigned && contract.deal.workspace.users.length > 0) {
     try {
       await sendSignedNotificationEmail({
         to: contract.deal.workspace.users.map((u) => u.email),
@@ -73,19 +84,28 @@ export async function finalizeContractSigned(contractId: string): Promise<void> 
 // Called right after ANY signer (the client, or a counter-signer) signs.
 // If someone's still pending in the routing order, notifies whoever's
 // next and leaves the contract "partially_signed"; otherwise finalizes.
-// Returns the resulting status so the caller can render accordingly.
-export async function advanceSigningOrFinalize(contractId: string): Promise<"partially_signed" | "signed"> {
+// The client always signs first: a counter-signer who signs while the
+// contract is still out to the client doesn't complete or advance it.
+export async function advanceSigningOrFinalize(contractId: string): Promise<void> {
   const nextSigner = await prisma.contractSigner.findFirst({
     where: { contractId, status: "pending" },
     orderBy: { order: "asc" },
   });
 
   if (!nextSigner) {
-    await finalizeContractSigned(contractId);
-    return "signed";
+    const { signedAt } = await prisma.contract.findUniqueOrThrow({ where: { id: contractId }, select: { signedAt: true } });
+    if (signedAt) await finalizeContractSigned(contractId);
+    return;
   }
 
-  await prisma.contract.update({ where: { id: contractId }, data: { status: "partially_signed" } });
+  // Guarded: if a signer racing this one already finalized it, or it was
+  // pulled back for changes meanwhile, it stays that way and nobody else
+  // gets asked to sign.
+  const moved = await prisma.contract.updateMany({
+    where: { id: contractId, status: { in: ["sent", "partially_signed"] }, signedAt: { not: null } },
+    data: { status: "partially_signed" },
+  });
+  if (moved.count === 0) return;
 
   const contract = await prisma.contract.findUniqueOrThrow({
     where: { id: contractId },
@@ -106,6 +126,4 @@ export async function advanceSigningOrFinalize(contractId: string): Promise<"par
   } catch (err) {
     console.error(`Failed to notify next signer for contract ${contractId}`, err);
   }
-
-  return "partially_signed";
 }

@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
 import { fillClauses } from "@/lib/contract";
+import { isValidTimeZone } from "@/lib/tasks";
+import { dayInZone } from "@/lib/viewer-time";
 
 // Runs once, right after a contract is signed — reads the final filled
 // clause text (the exact legal language, not a raw template placeholder)
@@ -10,7 +12,7 @@ import { fillClauses } from "@/lib/contract";
 export async function extractRenewalTerms(contractId: string): Promise<void> {
   const contract = await prisma.contract.findUnique({
     where: { id: contractId },
-    include: { deal: { include: { fields: true } }, template: true },
+    include: { deal: { include: { fields: true, owner: { select: { timezone: true } } } }, template: true },
   });
   if (!contract || !contract.template || !contract.signedAt) return;
 
@@ -18,8 +20,12 @@ export async function extractRenewalTerms(contractId: string): Promise<void> {
   const contractText = clauses.map((c) => `${c.title}\n${c.body}`).join("\n\n");
   if (!contractText.trim()) return;
 
-  const client = new Anthropic();
-  const signedDateIso = contract.signedAt.toISOString().slice(0, 10);
+  const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
+  // The day it was signed on the deal owner's clock, not the server's:
+  // signed at 9:30 PM in New York is still that day there, though it's
+  // already the next one in UTC. UTC when the owner's zone isn't known.
+  const ownerZone = contract.deal.owner?.timezone;
+  const signedDateIso = dayInZone(contract.signedAt, ownerZone && isValidTimeZone(ownerZone) ? ownerZone : "UTC");
 
   const response = await client.messages.create({
     model: "claude-sonnet-5",

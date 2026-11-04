@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { isEmailConfigured } from "@/lib/email";
 import { requireWorkspace, requireWorkspaceId } from "@/lib/workspace";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
+import { canSendContract } from "@/lib/review";
 import { sendContractEmail } from "../actions";
 import SendContractForm from "@/components/SendContractForm";
 
@@ -21,13 +22,23 @@ export default async function SendContractPage({
   const [deal, workspace] = await Promise.all([
     prisma.deal.findFirst({
       where: { id, workspaceId, ...visibility },
-      include: { client: true, template: true, contract: true },
+      include: { client: true, template: true, contract: { include: { signers: { orderBy: { order: "asc" } } } } },
     }),
     requireWorkspace(),
   ]);
   if (!deal || !deal.contract || !deal.template) notFound();
+  // Already with a reviewer or the client (e.g. Back after sending).
+  if (!canSendContract(deal.contract)) redirect(`/deals/${deal.id}/contract`);
 
   const docusignAvailable = Boolean(workspace?.docusignEnabled);
+
+  // The CC list the last send used, so sending again keeps it.
+  let defaultCc = "";
+  try {
+    defaultCc = deal.contract.ccEmails ? (JSON.parse(deal.contract.ccEmails) as string[]).join(", ") : "";
+  } catch {
+    defaultCc = "";
+  }
 
   const workspaceName = workspace?.name ?? "Your workspace";
   const configured = isEmailConfigured();
@@ -69,6 +80,9 @@ export default async function SendContractPage({
       clientName={deal.client.name}
       docusignAvailable={docusignAvailable}
       docusignAccountEmail={workspace?.docusignAccountEmail ?? null}
+      defaultCc={defaultCc}
+      defaultDeliveryMethod={deal.contract.deliveryMethod}
+      initialSigners={deal.contract.signers.map((s) => ({ name: s.name, email: s.email, role: s.role }))}
       sendAction={sendContractEmail}
     />
     </>

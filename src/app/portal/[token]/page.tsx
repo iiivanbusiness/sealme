@@ -3,13 +3,17 @@ import { prisma } from "@/lib/db";
 import BrandLogo from "@/components/BrandLogo";
 import DownloadContractButton from "@/components/DownloadContractButton";
 
+// partially_signed: the client has signed and someone after them (a
+// counter-signer) still has to.
 const STATUS_LABEL: Record<string, string> = {
   sent: "Awaiting your signature",
+  partially_signed: "Waiting on counter-signature",
   signed: "Signed",
 };
 
 const STATUS_CHIP: Record<string, string> = {
   sent: "chip-warn",
+  partially_signed: "chip-active",
   signed: "chip-success",
 };
 
@@ -29,7 +33,7 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
 
   // Drafts and internal-approval states aren't this client's business yet —
   // only show agreements that have actually reached them.
-  const visibleDeals = client.deals.filter((d) => d.contract && (d.contract.status === "sent" || d.contract.status === "signed"));
+  const visibleDeals = client.deals.filter((d) => d.contract && ["sent", "partially_signed", "signed"].includes(d.contract.status));
 
   return (
     <div className="sm-theme min-h-screen" style={{ background: "var(--canvas)" }}>
@@ -90,7 +94,8 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
                   )}
 
                   <div className="mt-3.5 flex flex-wrap gap-2.5">
-                    {contract.status === "sent" && (
+                    {/* A DocuSign contract is signed from DocuSign's own email. */}
+                    {contract.status === "sent" && contract.deliveryMethod === "sealme" && (
                       <a href={`/sign/${contract.id}`} className="btn btn-primary btn-sm">
                         Review &amp; sign
                       </a>

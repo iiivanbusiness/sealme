@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { filenameFromDisposition } from "@/lib/download-filename";
 
 export default function AuditTrailButton({ dealId, className }: { dealId: string; className?: string }) {
   const [downloading, setDownloading] = useState(false);
@@ -13,8 +14,7 @@ export default function AuditTrailButton({ dealId, className }: { dealId: string
     try {
       const res = await fetch(`/api/deals/${dealId}/audit-trail`);
       if (!res.ok) throw new Error("Failed to export audit trail");
-      const disposition = res.headers.get("content-disposition") ?? "";
-      const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? "audit-trail.pdf";
+      const filename = filenameFromDisposition(res.headers.get("content-disposition") ?? "", "audit-trail.pdf");
 
       // Blob download, not a direct link navigation — same reason as the
       // contract PDF button: some webviews (the desktop app) open a PDF in

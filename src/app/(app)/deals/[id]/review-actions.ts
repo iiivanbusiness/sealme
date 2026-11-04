@@ -5,7 +5,7 @@ import { prisma } from "@/lib/db";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
-import { performActualSend, notifyStepAssignee, notifyChangesRequested } from "@/lib/review";
+import { canSendContract, performActualSend, notifyStepAssignee, notifyChangesRequested, resolveReviewChain } from "@/lib/review";
 import { logAudit } from "@/lib/audit";
 
 type ReviewStepWithAssignee = { id: string; assigneeId: string; contractId: string };
@@ -120,7 +120,12 @@ export async function getReviewState(dealId: string): Promise<{
 // If nothing is active (never sent for review, or the chain already
 // finished), it starts a fresh step. Open to any workspace member who can
 // see the deal, same visibility gate as a deal note/comment — this is
-// deliberately informal, not an admin-only action.
+// deliberately informal, not an admin-only action. Handing off the active
+// step, though, skips whoever has it now (say Finance, from the chain), so
+// only they, their delegate, or an admin can do that; anyone else adds the
+// teammate as one more step after it: an extra approval, never one less.
+// For the same reason a fresh round from anyone but an admin starts with
+// the steps the deal's review chain requires, and the teammate after them.
 export async function sendForReviewTo(dealId: string, assigneeId: string): Promise<{ error?: string }> {
   const { where } = await dealVisibilityFilter();
   const workspaceId = await requireWorkspaceId();
@@ -141,8 +146,26 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
     return { error: "You can't send a review to yourself. Pick a teammate" };
   }
 
-  const activeStep = await prisma.reviewStep.findFirst({ where: { contractId: deal.contract.id, status: "pending" }, orderBy: { order: "asc" } });
-  const startingFreshChain = !activeStep && deal.contract.status !== "sent" && deal.contract.status !== "signed";
+  // Only a contract in review has an active step. A pending one on any other
+  // contract was queued behind a rejection from before rejections cleared
+  // them, and a new round replaces it (below).
+  const activeStep =
+    deal.contract.status === "pending_approval"
+      ? await prisma.reviewStep.findFirst({ where: { contractId: deal.contract.id, status: "pending" }, orderBy: { order: "asc" } })
+      : null;
+  // Approving a new step sends the contract, which is already with the client.
+  if (!activeStep && !canSendContract(deal.contract) && deal.contract.status !== "pending_approval") {
+    return { error: "This contract was already sent" };
+  }
+  const startingFreshChain = !activeStep;
+  const canHandOff =
+    !!activeStep &&
+    (activeStep.assigneeId === assigneeId || Boolean(caller.role?.canManageWorkspace) || (await checkReviewStepEligibility(activeStep, caller.id)).eligible);
+  // Approving a fresh round sends the contract, so it must not skip the
+  // approvals the Send page would ask for (requestOrSendReview), e.g. after
+  // Legal asked for changes.
+  const requiredAssigneeIds =
+    startingFreshChain && !caller.role?.canManageWorkspace ? ((await resolveReviewChain(deal))?.steps.map((s) => s.assigneeId) ?? []) : [];
 
   // A chain kicked off from the contract page's compose form already has
   // pendingTo/Subject/Message stored (requestOrSendReview), but this manual
@@ -156,17 +179,30 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
     return { error: "This client has no email on file yet. Add one before sending for review" };
   }
 
-  let stepId: string;
-  if (activeStep) {
+  // The step whose assignee hears about it now. A teammate queued behind the
+  // active step or the chain's steps hears from decideReviewStep once it's
+  // their turn.
+  let notifyStepId: string | null = null;
+  let queued = false;
+  if (activeStep && canHandOff) {
     await prisma.reviewStep.update({ where: { id: activeStep.id }, data: { assigneeId } });
-    stepId = activeStep.id;
+    notifyStepId = activeStep.id;
   } else {
+    if (startingFreshChain) await prisma.reviewStep.deleteMany({ where: { contractId: deal.contract.id, status: "pending" } });
     const maxOrder = await prisma.reviewStep.aggregate({ where: { contractId: deal.contract.id }, _max: { order: true } });
-    const order = (maxOrder._max.order ?? 0) + 1;
-    const created = await prisma.reviewStep.create({ data: { contractId: deal.contract.id, assigneeId, order, status: "pending" } });
-    stepId = created.id;
+    // In chain order, then the teammate unless the chain already has them.
+    const assignees = [...new Set([...requiredAssigneeIds, assigneeId])];
+    let firstStepId: string | null = null;
+    for (let i = 0; i < assignees.length; i++) {
+      const created = await prisma.reviewStep.create({
+        data: { contractId: deal.contract.id, assigneeId: assignees[i], order: (maxOrder._max.order ?? 0) + i + 1, status: "pending" },
+      });
+      firstStepId ??= created.id;
+    }
+    queued = !startingFreshChain || assignees[0] !== assigneeId;
 
     if (startingFreshChain) {
+      notifyStepId = firstStepId;
       const contractUpdate: { status: string; pendingTo?: string; pendingSubject?: string; pendingMessage?: string } = {
         status: "pending_approval",
       };
@@ -180,9 +216,9 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
     }
   }
 
-  await logAudit({ workspaceId, actorEmail: caller.email, action: "contract.sent_for_review", targetType: "Deal", targetId: dealId, metadata: { assignee: assignee.name } });
+  await logAudit({ workspaceId, actorEmail: caller.email, action: "contract.sent_for_review", targetType: "Deal", targetId: dealId, metadata: { assignee: assignee.name, ...(queued ? { queued: true } : {}) } });
 
-  await notifyStepAssignee(dealId, stepId);
+  if (notifyStepId) await notifyStepAssignee(dealId, notifyStepId);
 
   revalidatePath(`/deals/${dealId}`);
   revalidatePath(`/deals/${dealId}/contract`);
@@ -201,14 +237,22 @@ export async function decideReviewStep(dealId: string, reviewStepId: string, dec
 
   const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId }, include: { contract: true } });
   if (!deal || !deal.contract) return { error: "Deal not found" };
+  // A decision only counts while the contract is in review: once it's back
+  // with the rep (changes requested) or out with the client, approving would
+  // send it again and rejecting would pull it back.
+  if (deal.contract.status !== "pending_approval") return { error: "This contract isn't waiting on review anymore" };
 
   const reviewStep = await prisma.reviewStep.findFirst({ where: { id: reviewStepId, contractId: deal.contract.id } });
   if (!reviewStep) return { error: "Review step not found" };
   if (reviewStep.status !== "pending") return { error: "This step was already decided" };
 
-  // Steps must be decided strictly in order.
+  // Steps must be decided strictly in order: nothing before this one may
+  // still be pending. Only "pending" counts because a rejection ends its
+  // round (it clears what was queued after it, below), so an earlier
+  // rejected step belongs to a round that's over, and "Send to" can start a
+  // new one after it.
   const earlierUnresolved = await prisma.reviewStep.count({
-    where: { contractId: deal.contract.id, order: { lt: reviewStep.order }, status: { not: "approved" } },
+    where: { contractId: deal.contract.id, order: { lt: reviewStep.order }, status: "pending" },
   });
   if (earlierUnresolved > 0) return { error: "An earlier step hasn't been approved yet" };
 
@@ -221,6 +265,12 @@ export async function decideReviewStep(dealId: string, reviewStepId: string, dec
       where: { id: reviewStepId },
       data: { status: "rejected", decidedByUserId: user.id, decidedOnBehalfOfUserId: onBehalfOfUserId, decidedAt: new Date(), note },
     });
+    // The steps queued after this one never got their turn. Left pending they
+    // would sit in their assignees' approvals with no way to decide them, and
+    // make "Send to" reassign one of them instead of starting a new round.
+    // Removed rather than given a new status, the same way a send rebuilds
+    // the chain from scratch (requestOrSendReview).
+    await prisma.reviewStep.deleteMany({ where: { contractId: deal.contract.id, order: { gt: reviewStep.order }, status: "pending" } });
     await prisma.contract.update({ where: { id: deal.contract.id }, data: { status: "changes_requested" } });
     await prisma.deal.update({ where: { id: dealId }, data: { status: "changes_requested" } });
 
@@ -233,7 +283,7 @@ export async function decideReviewStep(dealId: string, reviewStepId: string, dec
   }
 
   const nextStep = await prisma.reviewStep.findFirst({
-    where: { contractId: deal.contract.id, order: { gt: reviewStep.order } },
+    where: { contractId: deal.contract.id, order: { gt: reviewStep.order }, status: "pending" },
     orderBy: { order: "asc" },
   });
 

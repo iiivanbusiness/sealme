@@ -452,7 +452,9 @@ export default function ReviewPanel({
       ? "Signed"
       : contractStatus === "sent"
         ? "Sent to client"
-        : activeStep
+        : contractStatus === "expired"
+          ? "Sign link expired"
+          : activeStep
           ? `With ${activeStep.assigneeName}`
           : mostRecentDecided?.status === "rejected"
             ? "Changes requested"

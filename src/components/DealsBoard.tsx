@@ -10,6 +10,8 @@ type BoardDeal = {
   service: string;
   feeDisplay: string;
   updatedAgo: string;
+  // Sent, but the SealMe sign link ran out: it needs sending again.
+  linkExpired?: boolean;
 };
 
 const DRAGGABLE_STATUSES = new Set(["processing", "missing_info", "changes_requested", "ready"]);
@@ -143,6 +145,12 @@ export default function DealsBoard({
                   >
                     <span className="text-[13px] font-medium">{deal.clientName}</span>
                     <span className="truncate text-[12px]" style={{ color: "var(--ink-muted)" }}>{deal.service || "—"}</span>
+                    {deal.linkExpired && (
+                      <span className="chip chip-warn mt-1 w-fit" style={{ fontSize: 11 }}>
+                        <span className="chip-dot" />
+                        Sign link expired
+                      </span>
+                    )}
                     <div className="mt-1 flex items-center justify-between">
                       <span className="font-mono-tab text-[12px] font-medium">{deal.feeDisplay || "—"}</span>
                       <span className="text-[11px]" style={{ color: "var(--ink-muted)" }}>{deal.updatedAgo}</span>

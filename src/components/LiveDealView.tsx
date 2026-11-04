@@ -5,6 +5,7 @@ import { useVisibleInterval } from "@/lib/use-visible-interval";
 import Link from "next/link";
 import ContractPreview from "./ContractPreview";
 import NothingHeardYet from "./NothingHeardYet";
+import MicSilentWarning from "./MicSilentWarning";
 import DealTermsCard from "./DealTermsCard";
 import ContinueCallButton from "./ContinueCallButton";
 import ActionItemsCard from "./ActionItemsCard";
@@ -14,6 +15,8 @@ import VoiceCorrectionButton from "./VoiceCorrectionButton";
 import DealNotes from "./DealNotes";
 import ClientText from "./ClientText";
 import ReviewPanel from "./ReviewPanel";
+import { contractLocksTerms } from "@/lib/contract-status";
+import { dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -57,28 +60,6 @@ const CALL_SOURCE_LABEL: Record<string, string> = {
   recording: "Uploaded recording",
   phone: "Phone call",
   api: "Sent through the API",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  processing: "Analyzing call…",
-  missing_info: "Missing info",
-  extraction_failed: "Couldn't process call",
-  ready: "Ready for review",
-  pending_approval: "Awaiting approval",
-  changes_requested: "Changes requested",
-  sent: "Sent - awaiting signature",
-  signed: "Signed",
-};
-
-const STATUS_CHIP: Record<string, string> = {
-  processing: "chip-neutral chip-live",
-  missing_info: "chip-warn",
-  extraction_failed: "chip-warn",
-  ready: "chip-active",
-  pending_approval: "chip-neutral",
-  changes_requested: "chip-warn",
-  sent: "chip-neutral",
-  signed: "chip-success",
 };
 
 function callPreview(transcript: string): string {
@@ -150,7 +131,8 @@ export default function LiveDealView({
   applyVoiceFieldCorrectionAction,
   sendForReviewToAction,
   docusignEnabled,
-  contractIsDraft: initialContractIsDraft,
+  contractStatus: initialContractStatus,
+  contractExpired: initialContractExpired,
   clientHasEmail,
   sendViaDocusignNowAction,
   reviewPanel,
@@ -181,12 +163,15 @@ export default function LiveDealView({
   currentUserName: string;
   addNoteAction: (dealId: string, body: string) => Promise<{ error?: string }>;
   deleteNoteAction: (dealId: string, noteId: string) => Promise<{ error?: string }>;
-  applyVoiceFieldCorrectionAction: (dealId: string, fieldKey: string, newValue: string) => Promise<void>;
+  applyVoiceFieldCorrectionAction: (dealId: string, fieldKey: string, newValue: string) => Promise<{ error?: string }>;
   sendForReviewToAction: (dealId: string, assigneeId: string) => Promise<{ error?: string }>;
   docusignEnabled: boolean;
-  contractIsDraft: boolean;
+  contractStatus: string | null;
+  // The SealMe sign link ran out (contractExpired in contract-status.ts),
+  // worked out on the server, which knows expiresAt.
+  contractExpired: boolean;
   clientHasEmail: boolean;
-  sendViaDocusignNowAction: (dealId: string) => Promise<{ error?: string }>;
+  sendViaDocusignNowAction: (dealId: string) => Promise<{ error?: string; heldForReviewBy?: string }>;
   reviewPanel: {
     initialContractStatus: string;
     initialContractCreatedAt: Date;
@@ -220,8 +205,31 @@ export default function LiveDealView({
   const [calls, setCalls] = useState(initialCalls);
   const [actionItems, setActionItems] = useState(initialActionItems);
   const [callHighlights, setCallHighlights] = useState(initialCallHighlights);
-  const [contractIsDraft, setContractIsDraft] = useState(initialContractIsDraft);
+  const [contractStatus, setContractStatus] = useState(initialContractStatus);
+  const [contractExpired, setContractExpired] = useState(initialContractExpired);
   const [live, setLive] = useState(() => isLive(initialStatus, initialCalls));
+  const [docusignNowStarted, setDocusignNowStarted] = useState(false);
+
+  // Next keeps this component mounted when a server action redirects back
+  // to this same page (Save & continue, Save changes), so the fresh props it
+  // renders with would never reach the state above on their own. Every
+  // server render sends new arrays, which is how fresh props are told apart.
+  // serverRender also closes the Deal terms editor once a save comes back.
+  const [propsFields, setPropsFields] = useState(initialFields);
+  const [serverRender, setServerRender] = useState(0);
+  if (initialFields !== propsFields) {
+    setPropsFields(initialFields);
+    setServerRender(serverRender + 1);
+    setStatus(initialStatus);
+    setSummary(initialSummary);
+    setFields(initialFields);
+    setCalls(initialCalls);
+    setActionItems(initialActionItems);
+    setCallHighlights(initialCallHighlights);
+    setContractStatus(initialContractStatus);
+    setContractExpired(initialContractExpired);
+    setLive(isLive(initialStatus, initialCalls));
+  }
 
   // ReviewPanel polls its own review state independently (contractStatus/
   // dealStatus), but the call-progress poll above only runs while a call is
@@ -231,9 +239,12 @@ export default function LiveDealView({
   // at whatever it was on page load even as the review moves through its
   // whole lifecycle. ReviewPanel calls this on every one of its own polls so
   // this page's status tracks the review's without needing a second timer.
-  function handleReviewSync(contractStatus: string, dealStatus: string) {
+  function handleReviewSync(nextContractStatus: string, dealStatus: string) {
     setStatus(dealStatus);
-    setContractIsDraft(contractStatus === "draft");
+    // A new contract status means it moved on (the cron marked the link
+    // expired, or it went out again), so that status alone settles it.
+    if (nextContractStatus !== contractStatus) setContractExpired(nextContractStatus === "expired");
+    setContractStatus(nextContractStatus);
   }
 
   function isLive(s: string, callList: CallItem[]): boolean {
@@ -268,7 +279,11 @@ export default function LiveDealView({
     groups.get(field.groupLabel)!.push(field);
   }
   const missing = fields.filter((f) => f.status === "missing");
-  const canSendToDocusignNow = docusignEnabled && status === "ready" && contractIsDraft && clientHasEmail;
+  const canSendToDocusignNow = docusignEnabled && status === "ready" && contractStatus === "draft" && clientHasEmail;
+  // The same rule the server actions enforce: the terms are what a reviewer
+  // or the client is looking at, so they can't be edited, unless the sign
+  // link expired and the contract has to go out again anyway.
+  const termsLocked = !contractExpired && contractLocksTerms(contractStatus);
   const firstName = clientName.split(/\s+/)[0] || clientName;
 
   // The one thing this deal needs next, said at the top so nobody has to
@@ -290,11 +305,13 @@ export default function LiveDealView({
               ? { title: "Waiting for approval", detail: "It goes to the client as soon as it's approved.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
               : status === "changes_requested"
                 ? { title: "Make the requested changes", detail: "A reviewer asked for changes before it goes out.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
-                : status === "sent"
-                  ? { title: `Waiting for ${firstName} to sign`, detail: contractViewedAt ? `They opened it ${timeAgo(contractViewedAt)}.` : "They haven't opened it yet." }
-                  : status === "signed"
-                    ? { title: "Signed", detail: "Nothing left to do on this deal." }
-                    : { title: "Check the contract and send it", detail: `${firstName} gets it to sign as soon as you send.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Review and send</Link> };
+                : status === "sent" && contractExpired
+                  ? { title: "Sign link expired", detail: `${firstName} can't sign it anymore. Send it again for a new link.`, action: <Link href={`/deals/${dealId}/send`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Send again</Link> }
+                  : status === "sent"
+                    ? { title: `Waiting for ${firstName} to sign`, detail: contractViewedAt ? `They opened it ${timeAgo(contractViewedAt)}.` : "They haven't opened it yet." }
+                    : status === "signed"
+                      ? { title: "Signed", detail: "Nothing left to do on this deal." }
+                      : { title: "Check the contract and send it", detail: `${firstName} gets it to sign as soon as you send.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Review and send</Link> };
 
   return (
     <>
@@ -311,9 +328,9 @@ export default function LiveDealView({
           </div>
         </div>
         <div className="flex flex-none flex-col items-end gap-1.5">
-          <span className={`chip ${STATUS_CHIP[status] ?? "chip-neutral"}`}>
+          <span className={`chip ${dealStatusChip(status, contractExpired)}`}>
             <span className="chip-dot" />
-            {STATUS_LABEL[status] ?? status}
+            {dealStatusLabel(status, contractExpired)}
           </span>
           {contractViewedAt && (
             <span className="text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
@@ -346,9 +363,11 @@ export default function LiveDealView({
             </div>
           )}
           <DealTermsCard
+            key={serverRender}
             groups={[...groups.entries()].filter(([label]) => label !== "Missing")}
             updateAction={updateFieldsAction}
             listening={status === "processing"}
+            locked={termsLocked}
           />
 
           {!hasContract && templateClauses && fields.length > 0 && (
@@ -374,9 +393,12 @@ export default function LiveDealView({
                       {callPreview(call.transcript)}
                     </p>
                     {call.source === "local" && !call.endedAt && !call.transcript.trim() && <NothingHeardYet startedAt={call.startedAt} />}
+                    {call.source === "local" && channelHasWords(call.transcript, "Client") && !channelHasWords(call.transcript, "You") && (
+                      <MicSilentWarning startedAt={call.startedAt} endedAt={call.endedAt} />
+                    )}
                     {call.source === "local" && call.endedAt && channelHasWords(call.transcript, "You") && !channelHasWords(call.transcript, "Client") && (
                       <div className="mt-2 rounded-[8px] px-3 py-2 text-[12px]" style={{ background: "var(--surface-2)", color: "#c0392b" }}>
-                        We didn&apos;t pick up anything from the other side of this call — only your own mic came through. If you were on headphones or an external mic, try switching back to your Mac&apos;s built-in speakers and microphone and recording again.
+                        We didn&apos;t pick up anything from the other side of this call. Only your own mic came through. If you were on headphones or an external mic, try switching back to your Mac&apos;s built-in speakers and microphone and recording again.
                       </div>
                     )}
                   </div>
@@ -400,7 +422,8 @@ export default function LiveDealView({
         <div className="flex flex-col gap-4">
           {status !== "signed" && <ContinueCallButton dealId={dealId} />}
 
-          {status !== "signed" && status !== "sent" && fields.some((f) => f.status !== "missing") && (
+          {/* Its changes would be refused while the terms are locked. */}
+          {!termsLocked && fields.some((f) => f.status !== "missing") && (
             <VoiceCorrectionButton dealId={dealId} applyAction={applyVoiceFieldCorrectionAction} reviewAction={sendForReviewToAction} />
           )}
 
@@ -495,7 +518,9 @@ export default function LiveDealView({
             </span>
           </div>
 
-          {canSendToDocusignNow && <SendToDocusignButton dealId={dealId} sendAction={sendViaDocusignNowAction} />}
+          {(canSendToDocusignNow || docusignNowStarted) && (
+            <SendToDocusignButton dealId={dealId} sendAction={sendViaDocusignNowAction} onStart={() => setDocusignNowStarted(true)} />
+          )}
         </div>
       </div>
     </>

@@ -84,7 +84,7 @@ export async function todaySection(o: { workspaceId: string; me: Me; tz: string;
     prisma.phoneCall.findMany({ where: { workspaceId, ...calledBy, startedAt: { gte: weekStart }, status: { in: ["processed", "skipped"] } }, select: { startedAt: true, outcome: true }, take: 20000 }),
     // What's waiting on the viewer, whichever list they're looking at.
     prisma.reviewStep.findMany({
-      where: { status: "pending", assigneeId: me.id, contract: { deal: { workspaceId, trashedAt: null } } },
+      where: { status: "pending", assigneeId: me.id, contract: { status: "pending_approval", deal: { workspaceId, trashedAt: null } } },
       select: { id: true, contract: { select: { reviewSteps: { where: { status: "pending" }, orderBy: { order: "asc" }, take: 1, select: { id: true } }, deal: { select: { id: true, service: true, client: { select: { name: true } } } } } } },
       take: 20,
     }),

@@ -24,17 +24,21 @@ function formatChangeDate(date: Date): string {
 }
 
 // listening: the call is still going, so a term not heard yet is still to
-// come rather than missing.
+// come rather than missing. locked: the contract is with a reviewer or the
+// client, so the terms can't be edited.
 export default function DealTermsCard({
   groups,
   updateAction,
   listening = false,
+  locked = false,
 }: {
   groups: [string, Field[]][];
   updateAction: (formData: FormData) => void;
   listening?: boolean;
+  locked?: boolean;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [isEditing, setEditing] = useState(false);
+  const editing = isEditing && !locked;
   const [openQuote, setOpenQuote] = useState<string | null>(null);
   const [openHistory, setOpenHistory] = useState<string | null>(null);
 
@@ -42,7 +46,7 @@ export default function DealTermsCard({
     <div className="card">
       <div className="flex items-center justify-between border-b px-5 py-4" style={{ borderColor: "var(--hairline)" }}>
         <h2 className="text-[15px] font-medium">Deal terms</h2>
-        {!editing && (
+        {!editing && !locked && (
           <button onClick={() => setEditing(true)} className="text-[12.5px] font-medium" style={{ color: "var(--accent-blue)" }}>
             Edit
           </button>

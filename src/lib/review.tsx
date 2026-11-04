@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { prisma } from "@/lib/db";
 import { sendContractEmail, sendReviewAssignedEmail, sendChangesRequestedEmail } from "@/lib/email";
@@ -9,7 +10,8 @@ import { dispatchWebhookEvent } from "@/lib/webhooks";
 import { notifySlack } from "@/lib/slack";
 import { syncDealToHubspot } from "@/lib/hubspot";
 import { syncDealToSalesforce } from "@/lib/salesforce";
-import { contractParty, fillClauses } from "@/lib/contract";
+import { contractParty, extractPlaceholderKeys, fillClauses } from "@/lib/contract";
+import { contractExpired } from "@/lib/contract-status";
 import { ContractPdfDocument } from "@/lib/contract-pdf";
 import { sendDocusignEnvelope, type EnvelopeSigner } from "@/lib/docusign";
 
@@ -17,6 +19,26 @@ export type PendingEmail = { to: string; subject: string; message: string };
 
 function appUrl(): string {
   return process.env.NEXT_PUBLIC_APP_URL ?? "";
+}
+
+// A contract can go to the client (or into review) only as a draft, after
+// changes were asked for, or once it expired (including a SealMe link past
+// expiresAt that the daily cron hasn't marked yet). Anything else is already
+// with a reviewer or the client, and sending it again would start a second
+// envelope or let a signature be overwritten.
+export function canSendContract(contract: { status: string; deliveryMethod: string; expiresAt: Date | null }, now = new Date()): boolean {
+  return contract.status === "draft" || contract.status === "changes_requested" || contractExpired(contract, now);
+}
+
+// A send must never leave a raw "{fee}" in the client's copy: a term that's
+// still empty, or a placeholder the deal has no field for.
+function assertNoBlanks(clausesJson: string, fields: { fieldKey: string; label: string; value: string | null }[]) {
+  const filled = new Set(fields.filter((f) => f.value?.trim()).map((f) => f.fieldKey));
+  const blanks = extractPlaceholderKeys(clausesJson).filter((key) => !filled.has(key));
+  if (blanks.length > 0) {
+    const labels = blanks.map((key) => fields.find((f) => f.fieldKey === key)?.label ?? key);
+    throw new Error(`Fill in ${labels.join(", ")} before sending. The contract still has blanks`);
+  }
 }
 
 // Picks which of the workspace's ReviewChains applies to this deal. Chains
@@ -53,14 +75,18 @@ export async function requestOrSendReview(
   pending: PendingEmail,
   actorEmail?: string | null
 ): Promise<{ status: "sent" } | { status: "pending_approval"; assigneeName: string }> {
-  const deal = await prisma.deal.findUnique({ where: { id: dealId }, include: { contract: true } });
+  const deal = await prisma.deal.findUnique({ where: { id: dealId }, include: { contract: { include: { template: true } }, fields: true } });
   if (!deal || !deal.contract) throw new Error("Deal not found");
   const contractId = deal.contract.id;
+  if (!canSendContract(deal.contract)) {
+    throw new Error(deal.contract.status === "pending_approval" ? "This contract is already waiting on review" : "This contract was already sent");
+  }
+  if (deal.contract.template) assertNoBlanks(deal.contract.template.clauses, deal.fields);
 
   const chain = await resolveReviewChain(deal);
 
   if (!chain || chain.steps.length === 0) {
-    await performActualSend(contractId, pending);
+    await performActualSend(contractId, pending, actorEmail);
     await logAudit({ workspaceId: deal.workspaceId, actorEmail, action: "contract.sent", targetType: "Deal", targetId: dealId, metadata: { to: pending.to } });
     return { status: "sent" };
   }
@@ -101,16 +127,26 @@ export async function requestOrSendReview(
 // what's already stored on the contract. When the contract's
 // deliveryMethod is "docusign", the client never gets a SealMe email at
 // all — DocuSign sends its own, this just creates and sends the envelope.
-export async function performActualSend(contractId: string, pendingOverride?: PendingEmail): Promise<void> {
+// senderEmail is whoever clicked Send; the client's replies go to them.
+export async function performActualSend(contractId: string, pendingOverride?: PendingEmail, senderEmail?: string | null): Promise<void> {
   const contract = await prisma.contract.findUnique({
     where: { id: contractId },
     include: {
-      deal: { include: { client: true, workspace: { include: { users: true } }, fields: true } },
+      deal: {
+        include: {
+          client: true,
+          owner: true,
+          workspace: { include: { users: { where: { deactivatedAt: null }, include: { role: true }, orderBy: { createdAt: "asc" } } } },
+          fields: true,
+        },
+      },
       template: true,
       signers: { orderBy: { order: "asc" } },
     },
   });
   if (!contract || !contract.template) throw new Error("Contract not found");
+  if (!canSendContract(contract) && contract.status !== "pending_approval") throw new Error("This contract was already sent");
+  assertNoBlanks(contract.template.clauses, contract.deal.fields);
 
   const to = pendingOverride?.to ?? contract.pendingTo;
   const subject = pendingOverride?.subject ?? contract.pendingSubject;
@@ -141,7 +177,14 @@ export async function performActualSend(contractId: string, pendingOverride?: Pe
     );
     docusignEnvelopeId = await sendDocusignEnvelope(workspace.id, { pdfBuffer, emailSubject: subject, emailBlurb: message, signers });
   } else {
-    const replyTo = workspace.users[0]?.email ?? null;
+    // Whoever sent it, else the deal's owner, else an admin. Never someone
+    // who has been offboarded.
+    const activeEmails = new Set(workspace.users.map((u) => u.email));
+    const replyTo =
+      [senderEmail, deal.owner?.email].find((e): e is string => !!e && activeEmails.has(e)) ??
+      workspace.users.find((u) => u.role?.canManageWorkspace)?.email ??
+      workspace.users[0]?.email ??
+      null;
     const verifiedSenderEmail = workspace.senderDomainStatus === "verified" ? workspace.senderEmail : null;
 
     const portalToken = await getOrMintPortalToken(deal.client.id);
@@ -160,10 +203,34 @@ export async function performActualSend(contractId: string, pendingOverride?: Pe
   const sentAt = new Date();
   const expiresAt = workspace.signingExpiryDays ? new Date(sentAt.getTime() + workspace.signingExpiryDays * 24 * 60 * 60 * 1000) : null;
 
+  // Every send starts a fresh signing round: a signature or a decline on an
+  // earlier version doesn't carry over, so the client and every counter-signer
+  // sign this one (counter-signers with a new link once it's their turn), and
+  // the "still unsigned" nudge goes out again for the new link.
   await prisma.contract.update({
     where: { id: contractId },
-    data: { status: "sent", sentAt, expiresAt, docusignEnvelopeId, pendingTo: null, pendingSubject: null, pendingMessage: null },
+    data: {
+      status: "sent",
+      sentAt,
+      expiresAt,
+      reminderSentAt: null,
+      docusignEnvelopeId,
+      pendingTo: null,
+      pendingSubject: null,
+      pendingMessage: null,
+      signedAt: null,
+      signerName: null,
+      signerIp: null,
+      signatureImage: null,
+      viewedAt: null,
+    },
   });
+  for (const signer of contract.signers.filter((s) => s.status !== "pending" || s.notifiedAt)) {
+    await prisma.contractSigner.update({
+      where: { id: signer.id },
+      data: { status: "pending", token: randomBytes(24).toString("hex"), signatureImage: null, signerIp: null, signedAt: null, declinedReason: null, notifiedAt: null },
+    });
+  }
   await prisma.deal.update({ where: { id: deal.id }, data: { status: "sent" } });
   // Resending is how the workspace answers open clause-change requests —
   // whatever they asked for is presumably reflected in this new version.
@@ -228,11 +295,11 @@ export async function notifyStepAssignee(dealId: string, reviewStepId: string): 
 
 // No per-deal owner is tracked, so a rejection notifies the whole team —
 // same audience the "email me when a contract is signed" toggle already
-// reaches.
+// reaches. Offboarded teammates are left out.
 export async function notifyChangesRequested(dealId: string, decidedByName: string, note: string | null): Promise<void> {
   const deal = await prisma.deal.findUnique({
     where: { id: dealId },
-    include: { client: true, template: true, workspace: { include: { users: true } } },
+    include: { client: true, template: true, workspace: { include: { users: { where: { deactivatedAt: null } } } } },
   });
   if (!deal || deal.workspace.users.length === 0) return;
 

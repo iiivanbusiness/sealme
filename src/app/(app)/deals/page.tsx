@@ -7,7 +7,8 @@ import DealsBoard from "@/components/DealsBoard";
 import DealsFilterBar from "@/components/DealsFilterBar";
 import { bulkRemind, bulkSend, bulkTrash, updateDealStatus } from "./bulk-actions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
-import { STATUS_LABEL, STATUS_CHIP, BOARD_COLUMNS } from "@/lib/deal-status";
+import { BOARD_COLUMNS, dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
+import { contractExpired } from "@/lib/contract-status";
 
 const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const STALE_STATUSES = new Set(["ready", "missing_info"]);
@@ -73,7 +74,7 @@ export default async function DealsPage({
         status: true,
         updatedAt: true,
         client: { select: { name: true, email: true } },
-        contract: { select: { status: true } },
+        contract: { select: { status: true, deliveryMethod: true, expiresAt: true } },
         owner: { select: { name: true } },
       },
       orderBy: { updatedAt: "desc" },
@@ -82,23 +83,27 @@ export default async function DealsPage({
     prisma.deal.count({ where: { workspaceId, ...visibility, trashedAt: { not: null } } }),
   ]);
 
+  // A sent deal whose sign link ran out reads "Sign link expired" and has
+  // nothing to remind the client about: the link in a reminder wouldn't work.
+  const expiredDealIds = new Set(deals.filter((deal) => contractExpired(deal.contract)).map((deal) => deal.id));
+
   const tableRows = deals.map((deal) => ({
     id: deal.id,
     clientName: deal.client.name,
     service: deal.service,
     feeDisplay: deal.feeDisplay,
     feeValue: parseFee(deal.feeDisplay),
-    statusLabel: STATUS_LABEL[deal.status] ?? deal.status,
-    statusChip: STATUS_CHIP[deal.status] ?? "chip-neutral",
+    statusLabel: dealStatusLabel(deal.status, expiredDealIds.has(deal.id)),
+    statusChip: dealStatusChip(deal.status, expiredDealIds.has(deal.id)),
     updatedAgo: timeAgo(deal.updatedAt),
     updatedAt: deal.updatedAt.getTime(),
     ownerName: deal.owner?.name ?? null,
     isStale: isDealStale(deal.status, deal.updatedAt),
-    canRemind: deal.contract?.status === "sent" && Boolean(deal.client.email),
+    canRemind: deal.contract?.status === "sent" && !expiredDealIds.has(deal.id) && Boolean(deal.client.email),
     canSend: deal.contract?.status === "draft" && Boolean(deal.client.email),
   }));
 
-  const byColumn: Record<string, { id: string; clientName: string; service: string; feeDisplay: string; updatedAgo: string }[]> = {};
+  const byColumn: Record<string, { id: string; clientName: string; service: string; feeDisplay: string; updatedAgo: string; linkExpired: boolean }[]> = {};
   for (const col of BOARD_COLUMNS) byColumn[col] = [];
   for (const deal of deals) {
     if (!byColumn[deal.status]) byColumn[deal.status] = [];
@@ -108,6 +113,7 @@ export default async function DealsPage({
       service: deal.service,
       feeDisplay: deal.feeDisplay,
       updatedAgo: timeAgo(deal.updatedAt),
+      linkExpired: deal.status === "sent" && expiredDealIds.has(deal.id),
     });
   }
 

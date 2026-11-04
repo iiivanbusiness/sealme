@@ -7,6 +7,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { notifyChangesRequested } from "@/lib/review";
 import { advanceSigningOrFinalize } from "@/lib/signing";
+import { canCommentOnClauses, signPageMessage, signPageState } from "./sign-state";
 
 export async function signContract(contractId: string, formData: FormData): Promise<{ error?: string }> {
   const signerName = String(formData.get("signerName") ?? "").trim();
@@ -26,15 +27,25 @@ export async function signContract(contractId: string, formData: FormData): Prom
   // updateMany with a status filter makes this atomic: a contract that's
   // already been signed, or has moved on to waiting for a counter-signer,
   // or a concurrent double-submit, can't overwrite the existing
-  // signerName/signatureImage/signedAt — that's the legally significant
+  // signerName/signatureImage/signedAt. That's the legally significant
   // record, it shouldn't be replaceable after the fact. Only a contract
-  // still sitting at "sent" (the client hasn't acted yet) can be signed.
+  // still sitting at "sent" (the client hasn't acted yet), on SealMe's own
+  // page and not past its expiry, can be signed. The status moves off
+  // "sent" in this same write, so a second submit racing this one finds
+  // nothing to update; advanceSigningOrFinalize then settles on
+  // partially_signed or signed.
+  const now = new Date();
   const result = await prisma.contract.updateMany({
-    where: { id: contractId, status: "sent" },
-    data: { signedAt: new Date(), signerName, signerIp: ip, signatureImage },
+    where: { id: contractId, status: "sent", deliveryMethod: "sealme", OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    data: { status: "partially_signed", signedAt: now, signerName, signerIp: ip, signatureImage },
   });
   if (result.count === 0) {
-    redirect(`/sign/${contractId}`);
+    const current = await prisma.contract.findUnique({ where: { id: contractId }, include: { deal: { include: { workspace: true } } } });
+    if (!current) return { error: "Not found" };
+    const state = signPageState(current, now);
+    // A double-submit after the first one went through: just show it signed.
+    if (state === "signed") redirect(`/sign/${contractId}`);
+    return { error: signPageMessage(state, current.deal.workspace.name) ?? "This agreement can't be signed right now. Refresh the page." };
   }
 
   const contract = await prisma.contract.findUniqueOrThrow({ where: { id: contractId } });
@@ -70,14 +81,19 @@ export async function requestClauseChange(contractId: string, clauseTitle: strin
   const allowed = await checkRateLimit(`clause-comment:contract:${contractId}`, 10, 60 * 60 * 1000);
   if (!allowed) return { error: "Too many requests. Try again later." };
 
-  const contract = await prisma.contract.findUnique({ where: { id: contractId }, include: { deal: true } });
+  const contract = await prisma.contract.findUnique({ where: { id: contractId }, include: { deal: { include: { workspace: true } } } });
   if (!contract) return { error: "Not found" };
-  if (contract.status === "signed" || contract.status === "partially_signed" || contract.status === "expired") {
-    return { error: "This agreement can no longer be changed" };
-  }
+  const closed = signPageMessage(signPageState(contract), contract.deal.workspace.name) ?? "This agreement can no longer be changed";
+  if (!canCommentOnClauses(contract)) return { error: closed };
 
+  // Guarded the same way as signing: a contract that moved into approval
+  // or got signed since the page loaded doesn't get pulled back.
+  const moved = await prisma.contract.updateMany({
+    where: { id: contractId, status: { in: ["sent", "changes_requested"] } },
+    data: { status: "changes_requested" },
+  });
+  if (moved.count === 0) return { error: closed };
   await prisma.clauseComment.create({ data: { contractId, clauseTitle, comment, fromName } });
-  await prisma.contract.update({ where: { id: contractId }, data: { status: "changes_requested" } });
   await prisma.deal.update({ where: { id: contract.dealId }, data: { status: "changes_requested" } });
 
   await logAudit({

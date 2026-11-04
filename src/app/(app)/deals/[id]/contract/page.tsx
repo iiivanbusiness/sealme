@@ -7,6 +7,7 @@ import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import DownloadContractButton from "@/components/DownloadContractButton";
 import AuditTrailButton from "@/components/AuditTrailButton";
+import LocalDateTime from "@/components/LocalDateTime";
 import { startRenewal, updateFieldValues } from "../actions";
 
 function daysUntil(date: Date): number {
@@ -45,6 +46,7 @@ export default async function ContractPage({
       contract: {
         include: {
           clauseComments: { where: { resolved: false }, orderBy: { createdAt: "asc" } },
+          signers: { orderBy: { order: "asc" } },
         },
       },
       workspace: true,
@@ -53,7 +55,14 @@ export default async function ContractPage({
   if (!deal || !deal.contract || !deal.template) notFound();
 
   const clauses = fillClauses(deal.template.clauses, deal.fields);
-  const canResend = deal.contract.status === "draft" || deal.contract.status === "changes_requested";
+  // The sign page stops taking signatures the moment expiresAt passes; the
+  // daily cron only catches up on the status later, so both count here.
+  // DocuSign runs its own expiry.
+  const expired =
+    deal.contract.status === "expired" ||
+    (deal.contract.status === "sent" && deal.contract.deliveryMethod === "sealme" && deal.contract.expiresAt != null && deal.contract.expiresAt <= new Date());
+  const canResend = deal.contract.status === "draft" || deal.contract.status === "changes_requested" || expired;
+  const waitingOn = deal.contract.signers.filter((s) => s.status === "pending").map((s) => `${s.name} (${s.role})`).join(", ");
   // Which deal fields each clause pulls in (e.g. "Fees & Payment" -> {fee}),
   // so a client's change request can be answered right under the comment.
   const fieldsByClause = new Map<string, typeof deal.fields>();
@@ -84,7 +93,7 @@ export default async function ContractPage({
     {deal.contract.status === "signed" && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className="chip chip-success px-4 py-3 text-[13.5px]">
-          ✓ Signed by {deal.contract.signerName} on {deal.contract.signedAt?.toLocaleDateString()}
+          ✓ Signed by {deal.contract.signerName}{deal.contract.signedAt && <> on <LocalDateTime iso={deal.contract.signedAt.toISOString()} options={{ year: "numeric", month: "numeric", day: "numeric" }} /></>}
         </div>
         {deal.contract.signatureImage && (
           <div className="card px-3 py-2">
@@ -111,7 +120,21 @@ export default async function ContractPage({
         </div>
       </div>
     )}
-    {deal.contract.status === "sent" && (
+    {deal.contract.status === "partially_signed" && (
+      <div className="mb-[18px] flex flex-wrap items-center gap-3">
+        <div className="chip chip-warn whitespace-normal px-4 py-3 text-[13.5px]">
+          ✓ Signed by {deal.contract.signerName}. Waiting on {waitingOn || "the other signers"}
+        </div>
+      </div>
+    )}
+    {expired && (
+      <div className="mb-[18px] flex flex-wrap items-center gap-3">
+        <div className="chip chip-warn whitespace-normal px-4 py-3 text-[13.5px]">
+          Sign link expired{deal.contract.expiresAt && <> on <LocalDateTime iso={deal.contract.expiresAt.toISOString()} options={{ year: "numeric", month: "numeric", day: "numeric" }} /></>}. Send it again so {deal.client.name} can sign
+        </div>
+      </div>
+    )}
+    {deal.contract.status === "sent" && !expired && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className="chip chip-warn px-4 py-3 text-[13.5px]">
           ✓ Sent to {deal.client.name}. Awaiting signature
@@ -176,7 +199,7 @@ export default async function ContractPage({
         <div className="flex flex-col gap-2.5 p-5 pt-2">
           {canResend ? (
             <Link href={`/deals/${deal.id}/send`} className="btn btn-primary w-full justify-center">
-              {deal.contract.status === "changes_requested" ? "Send again" : "Send to client"}
+              {deal.contract.status === "changes_requested" || expired ? "Send again" : "Send to client"}
             </Link>
           ) : deal.contract.status === "pending_approval" ? (
             <button disabled className="btn btn-primary w-full justify-center">
@@ -185,11 +208,14 @@ export default async function ContractPage({
           ) : (
             <>
               <button disabled className="btn btn-primary w-full justify-center">
-                {deal.contract.status === "signed" ? "Signed ✓" : "Sent ✓"}
+                {deal.contract.status === "signed" ? "Signed ✓" : deal.contract.status === "partially_signed" ? "Awaiting counter-signer" : "Sent ✓"}
               </button>
-              <div className="rounded-[10px] px-3 py-2.5 text-[11.5px] break-all" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)", color: "var(--ink-muted)" }}>
-                {`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/sign/${deal.contract.id}`}
-              </div>
+              {/* A DocuSign contract is signed on DocuSign's own page, never this link. */}
+              {deal.contract.deliveryMethod === "sealme" && (
+                <div className="rounded-[10px] px-3 py-2.5 text-[11.5px] break-all" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)", color: "var(--ink-muted)" }}>
+                  {`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/sign/${deal.contract.id}`}
+                </div>
+              )}
             </>
           )}
           <DownloadContractButton contractId={deal.contract.id} className="btn btn-secondary w-full justify-center" />

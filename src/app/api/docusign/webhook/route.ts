@@ -5,11 +5,11 @@ import { reportError } from "@/lib/error-report";
 
 type EnvelopeEvent = { event?: string; envelopeId?: string; data?: { envelopeId?: string } };
 
-// DocuSign calls this when an envelope SealMe sent is completed (the
-// envelope carries this URL, see sendDocusignEnvelope). Nothing in the
-// body is trusted: it only names the envelope, and SealMe asks DocuSign
-// with that workspace's own connection whether it's really completed
-// before marking anything signed. So a forged call can at most trigger a
+// DocuSign calls this when an envelope SealMe sent is completed, declined
+// or voided (the envelope carries this URL, see sendDocusignEnvelope).
+// Nothing in the body is trusted: it only names the envelope, and SealMe
+// asks DocuSign with that workspace's own connection where it really
+// stands before changing anything. So a forged call can at most trigger a
 // lookup. Always 200 for envelopes SealMe doesn't know, or DocuSign
 // retries.
 export async function POST(req: Request) {

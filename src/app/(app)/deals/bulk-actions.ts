@@ -8,6 +8,7 @@ import { requestOrSendReview } from "@/lib/review";
 import { logAudit } from "@/lib/audit";
 import { auth } from "@/lib/auth";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
+import { contractExpired } from "@/lib/contract-status";
 
 // Statuses a drag-and-drop board move is allowed to set directly — pure
 // review-state flags with no side effect on anything outside this row.
@@ -57,7 +58,7 @@ export async function bulkRemind(dealIds: string[]): Promise<{ sent: number; ski
   let sent = 0;
   let skipped = 0;
   for (const deal of deals) {
-    if (!deal.contract || deal.contract.status !== "sent" || !deal.client.email) {
+    if (!deal.contract || deal.contract.status !== "sent" || deal.contract.deliveryMethod !== "sealme" || contractExpired(deal.contract) || !deal.client.email) {
       skipped++;
       continue;
     }

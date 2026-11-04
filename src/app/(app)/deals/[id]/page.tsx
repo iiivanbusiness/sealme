@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { requireWorkspaceId, requireWorkspace } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
+import { contractExpired } from "@/lib/contract-status";
 import {
   addDealNote,
   applyVoiceFieldCorrection,
@@ -124,7 +125,8 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
       applyVoiceFieldCorrectionAction={applyVoiceFieldCorrection}
       sendForReviewToAction={sendForReviewTo}
       docusignEnabled={Boolean(workspace?.docusignEnabled)}
-      contractIsDraft={deal.contract?.status === "draft"}
+      contractStatus={deal.contract?.status ?? null}
+      contractExpired={contractExpired(deal.contract)}
       clientHasEmail={Boolean(deal.client.email)}
       sendViaDocusignNowAction={sendViaDocusignNow}
       reviewPanel={

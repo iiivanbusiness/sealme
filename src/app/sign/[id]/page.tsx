@@ -7,6 +7,8 @@ import BrandLogo from "@/components/BrandLogo";
 import SignForm from "@/components/SignForm";
 import ClauseChangeForm from "@/components/ClauseChangeForm";
 import DownloadContractButton from "@/components/DownloadContractButton";
+import LocalDateTime from "@/components/LocalDateTime";
+import { canCommentOnClauses, signPageMessage, signPageState } from "./sign-state";
 
 export default async function SignPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ feedbackSent?: string }> }) {
   const { id } = await params;
@@ -30,8 +32,10 @@ export default async function SignPage({ params, searchParams }: { params: Promi
   // The client is the only signer whose page this is — "signed" here means
   // the CLIENT'S OWN part is done, whether or not counter-signers still
   // need to act (partially_signed) or everyone's fully done (signed).
-  const clientSigned = contract.status === "signed" || contract.status === "partially_signed";
-  const expired = contract.status === "expired" || (contract.status === "sent" && contract.expiresAt != null && contract.expiresAt < new Date());
+  const state = signPageState(contract);
+  const clientSigned = state === "signed";
+  const canComment = canCommentOnClauses(contract);
+  const notice = clientSigned ? null : signPageMessage(state, contract.deal.workspace.name);
 
   return (
     <div className="sm-theme min-h-screen" style={{ background: "var(--canvas)" }}>
@@ -63,15 +67,15 @@ export default async function SignPage({ params, searchParams }: { params: Promi
             ✓ Thanks. Your feedback was sent. We&apos;ll follow up.
           </div>
         )}
-        {expired && (
-          <div className="chip chip-warn mb-6 w-full justify-start px-4 py-3 text-[13.5px]">
-            This sign link has expired. Ask {contract.deal.workspace.name} to resend it.
+        {notice && (
+          <div className="chip chip-warn mb-6 w-full justify-start whitespace-normal px-4 py-3 text-[13.5px]">
+            {notice}
           </div>
         )}
         {clientSigned && (
           <div className="mb-6 flex flex-col gap-3">
             <div className="chip chip-success px-4 py-3 text-[13.5px]">
-              ✓ Signed by {contract.signerName} on {contract.signedAt?.toLocaleDateString()}
+              ✓ Signed by {contract.signerName}{contract.signedAt && <> on <LocalDateTime iso={contract.signedAt.toISOString()} options={{ year: "numeric", month: "numeric", day: "numeric" }} /></>}
             </div>
             {contract.signatureImage && (
               <div className="card inline-block w-fit px-4 py-3">
@@ -99,7 +103,7 @@ export default async function SignPage({ params, searchParams }: { params: Promi
                 {clause.title}
               </h3>
               <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{clause.body}</p>
-              {!clientSigned && !expired && (
+              {canComment && (
                 <details className="mt-2">
                   <summary className="cursor-pointer text-[12px] font-medium" style={{ color: "var(--accent-blue)" }}>
                     Request a change to this clause
@@ -111,7 +115,7 @@ export default async function SignPage({ params, searchParams }: { params: Promi
           ))}
         </div>
 
-        {!clientSigned && !expired ? (
+        {state === "open" ? (
           <div className="card mt-5 p-6">
             <h2 className="mb-1 text-[16px] font-medium">Review &amp; sign</h2>
             <p className="mb-4 text-[13px]" style={{ color: "var(--ink-muted)" }}>
@@ -121,7 +125,8 @@ export default async function SignPage({ params, searchParams }: { params: Promi
           </div>
         ) : clientSigned ? (
           <div className="mt-5 text-center text-[12px]" style={{ color: "var(--ink-muted)" }}>
-            This agreement was signed electronically on {contract.signedAt?.toLocaleString()}.
+            This agreement was signed electronically
+            {contract.signedAt && <> on <LocalDateTime iso={contract.signedAt.toISOString()} options={{ year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }} /></>}.
           </div>
         ) : null}
 

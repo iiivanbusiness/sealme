@@ -21,11 +21,16 @@ export async function GET(req: Request) {
     // Reminder cadence is per-workspace (reminderIntervalDays) since it
     // moved off a hardcoded 3 days — can't push that into the query
     // itself, so pull every still-eligible candidate and check each one.
+    // Only SealMe's own sign link gets nudged: a DocuSign contract is signed
+    // on DocuSign, and a deal in Trash is one the rep gave up on.
     const reminderCandidates = await prisma.contract.findMany({
       where: {
         status: "sent",
+        deliveryMethod: "sealme",
         reminderSentAt: null,
-        deal: { workspace: { autoRemind: true } },
+        // The expiry sweep below runs after this one; a lapsed link isn't worth a nudge.
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        deal: { trashedAt: null, workspace: { autoRemind: true } },
       },
       include: { deal: { include: { client: true, workspace: true } } },
     });
@@ -60,12 +65,16 @@ export async function GET(req: Request) {
   }
 
   try {
+    // DocuSign envelopes expire on DocuSign's own schedule; expiring one
+    // here would offer "Send again" while the envelope is still signable.
     const expiredResult = await prisma.contract.findMany({
-      where: { status: "sent", expiresAt: { lte: new Date() } },
+      where: { status: "sent", deliveryMethod: "sealme", expiresAt: { lte: new Date() } },
       include: { deal: { select: { id: true, workspaceId: true } } },
     });
     for (const contract of expiredResult) {
-      await prisma.contract.update({ where: { id: contract.id }, data: { status: "expired" } });
+      // Guarded so a client signing in the same second keeps their signature.
+      const moved = await prisma.contract.updateMany({ where: { id: contract.id, status: "sent" }, data: { status: "expired" } });
+      if (moved.count === 0) continue;
       await logAudit({ workspaceId: contract.deal.workspaceId, action: "contract.expired", targetType: "Contract", targetId: contract.id });
       await dispatchWebhookEvent(contract.deal.workspaceId, "contract.expired", { dealId: contract.deal.id, contractId: contract.id, sentAt: contract.sentAt?.toISOString() ?? null, expiredAt: new Date().toISOString() });
       expired++;

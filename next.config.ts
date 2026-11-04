@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // The PDF font (src/lib/pdf-fonts.ts) is read from disk by path, which
+  // the build can't trace on its own. Every route: a contract PDF is also
+  // built for DocuSign from server actions and API routes all over the app.
+  outputFileTracingIncludes: {
+    "/**": ["src/lib/fonts/*.ttf"],
+  },
   async headers() {
     return [
       {

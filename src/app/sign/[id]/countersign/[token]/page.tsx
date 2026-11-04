@@ -5,6 +5,8 @@ import { signAsCountersigner, declineToSign } from "./actions";
 import BrandLogo from "@/components/BrandLogo";
 import CountersignForm from "@/components/CountersignForm";
 import DeclineToSignForm from "@/components/DeclineToSignForm";
+import LocalDateTime from "@/components/LocalDateTime";
+import { countersignPageState, signPageMessage } from "../../sign-state";
 
 export default async function CountersignPage({ params }: { params: Promise<{ id: string; token: string }> }) {
   const { id, token } = await params;
@@ -19,6 +21,10 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
 
   const clauses = fillClauses(contract.template.clauses, contract.deal.fields);
   const decided = signer.status !== "pending";
+  // Signing (or declining) only while the contract is out for signature;
+  // a draft, review or change the client asked for comes back as a new send.
+  const state = countersignPageState(contract);
+  const notice = decided ? null : signPageMessage(state, contract.deal.workspace.name);
 
   return (
     <div className="sm-theme min-h-screen" style={{ background: "var(--canvas)" }}>
@@ -52,7 +58,7 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
         {signer.status === "signed" && (
           <div className="mb-6 flex flex-col gap-3">
             <div className="chip chip-success px-4 py-3 text-[13.5px]">
-              ✓ You signed on {signer.signedAt?.toLocaleDateString()}
+              ✓ You signed{signer.signedAt && <> on <LocalDateTime iso={signer.signedAt.toISOString()} options={{ year: "numeric", month: "numeric", day: "numeric" }} /></>}
             </div>
             {signer.signatureImage && (
               <div className="card inline-block w-fit px-4 py-3">
@@ -65,6 +71,11 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
         {signer.status === "declined" && (
           <div className="chip chip-warn mb-6 px-4 py-3 text-[13.5px]">
             You declined to sign this agreement.
+          </div>
+        )}
+        {notice && (
+          <div className="chip chip-warn mb-6 w-full justify-start whitespace-normal px-4 py-3 text-[13.5px]">
+            {notice}
           </div>
         )}
 
@@ -84,7 +95,7 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
           ))}
         </div>
 
-        {!decided && (
+        {!decided && state === "open" && (
           <div className="card mt-5 p-6">
             <h2 className="mb-1 text-[16px] font-medium">Review &amp; sign</h2>
             <p className="mb-4 text-[13px]" style={{ color: "var(--ink-muted)" }}>
