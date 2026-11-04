@@ -5,6 +5,8 @@ import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { currentUserWithRole, requirePermission } from "@/lib/permissions";
 import { logAudit } from "@/lib/audit";
+import { cookieTimeZone } from "@/lib/viewer-time";
+import { endOfDayInZone } from "./delegation-dates";
 
 // Self-service: anyone can hand their own approval authority to a
 // teammate — no special permission needed, since it's their own authority
@@ -16,13 +18,14 @@ export async function createDelegation(formData: FormData): Promise<{ error?: st
   if (!toUserId) return { error: "Choose who to delegate to" };
   if (toUserId === user.id) return { error: "Can't delegate to yourself" };
 
-  const toUser = await prisma.user.findFirst({ where: { id: toUserId, workspaceId: user.workspaceId } });
+  const toUser = await prisma.user.findFirst({ where: { id: toUserId, workspaceId: user.workspaceId, deactivatedAt: null } });
   if (!toUser) return { error: "Teammate not found" };
 
+  // The backup lasts through the chosen day on the chooser's own clock.
   const rawEndsAt = String(formData.get("endsAt") ?? "").trim();
-  const endsAt = rawEndsAt ? new Date(rawEndsAt) : null;
-  if (endsAt && Number.isNaN(endsAt.getTime())) return { error: "Invalid end date" };
-  if (endsAt && endsAt.getTime() <= Date.now()) return { error: "End date must be in the future" };
+  const endsAt = rawEndsAt ? endOfDayInZone(rawEndsAt, await cookieTimeZone()) : null;
+  if (rawEndsAt && !endsAt) return { error: "Invalid end date" };
+  if (endsAt && endsAt.getTime() <= Date.now()) return { error: "End date can't be in the past" };
 
   await prisma.approvalDelegate.create({
     data: { workspaceId: user.workspaceId, fromUserId: user.id, toUserId, endsAt },
@@ -65,14 +68,14 @@ export async function createDelegationForUser(fromUserId: string, formData: Form
   if (toUserId === fromUserId) return { error: "Can't delegate to the same person" };
 
   const [fromUser, toUser] = await Promise.all([
-    prisma.user.findFirst({ where: { id: fromUserId, workspaceId: admin.workspaceId } }),
-    prisma.user.findFirst({ where: { id: toUserId, workspaceId: admin.workspaceId } }),
+    prisma.user.findFirst({ where: { id: fromUserId, workspaceId: admin.workspaceId, deactivatedAt: null } }),
+    prisma.user.findFirst({ where: { id: toUserId, workspaceId: admin.workspaceId, deactivatedAt: null } }),
   ]);
   if (!fromUser || !toUser) return { error: "Teammate not found" };
 
   const rawEndsAt = String(formData.get("endsAt") ?? "").trim();
-  const endsAt = rawEndsAt ? new Date(rawEndsAt) : null;
-  if (endsAt && Number.isNaN(endsAt.getTime())) return { error: "Invalid end date" };
+  const endsAt = rawEndsAt ? endOfDayInZone(rawEndsAt, await cookieTimeZone()) : null;
+  if (rawEndsAt && !endsAt) return { error: "Invalid end date" };
 
   await prisma.approvalDelegate.create({
     data: { workspaceId: admin.workspaceId, fromUserId, toUserId, endsAt },

@@ -80,7 +80,7 @@ export async function addReviewChainStep(chainId: string, formData: FormData): P
   const chain = await prisma.reviewChain.findFirst({ where: { id: chainId, workspaceId: user.workspaceId } });
   if (!chain) return { error: "Chain not found" };
 
-  const assignee = await prisma.user.findFirst({ where: { id: assigneeId, workspaceId: user.workspaceId } });
+  const assignee = await prisma.user.findFirst({ where: { id: assigneeId, workspaceId: user.workspaceId, deactivatedAt: null } });
   if (!assignee) return { error: "Teammate not found" };
 
   const existing = await prisma.reviewChainStep.findFirst({ where: { chainId, assigneeId } });

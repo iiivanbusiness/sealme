@@ -2,6 +2,7 @@
 
 import { randomBytes, createHash } from "crypto";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { requireWorkspace } from "@/lib/workspace";
@@ -166,31 +167,61 @@ export async function inviteTeammate(formData: FormData): Promise<{ error: strin
   revalidatePath("/settings");
 }
 
-export async function removeTeammate(userId: string) {
+// Returns { error } as data for the same reason inviteTeammate does. See
+// RemoveTeammateButton.
+export async function removeTeammate(userId: string): Promise<{ error?: string }> {
   const actor = await requirePermission("canManageTeam");
   const workspace = await requireWorkspace();
   const session = await auth();
 
-  const count = await prisma.user.count({ where: { workspaceId: workspace.id } });
-  if (count <= 1) throw new Error("Can't remove the only member of a workspace");
+  const others = await prisma.user.count({ where: { workspaceId: workspace.id, id: { not: userId }, deactivatedAt: null } });
+  if (others === 0) return { error: "Can't remove the only member of a workspace" };
 
   const removed = await prisma.user.findFirst({ where: { id: userId, workspaceId: workspace.id }, include: { role: true } });
-  if (!removed) throw new Error("Teammate not found");
-  if (!canActOnRole(actor.role, removed.role)) throw new Error(ROLE_ESCALATION_ERROR);
+  if (!removed) return { error: "Teammate not found" };
+  if (!canActOnRole(actor.role, removed.role)) return { error: ROLE_ESCALATION_ERROR };
   if (removed.role?.canManageTeam) {
     const otherTeamManagers = await prisma.user.count({
       where: { workspaceId: workspace.id, id: { not: userId }, deactivatedAt: null, role: { canManageTeam: true } },
     });
-    if (otherTeamManagers === 0) throw new Error("This is the only teammate who can manage the team. Give someone else that access first");
+    if (otherTeamManagers === 0) return { error: "This is the only teammate who can manage the team. Give someone else that access first" };
   }
-  await prisma.user.deleteMany({ where: { id: userId, workspaceId: workspace.id } });
+  // Not a delete: past approvals and feedback posts point at the person and
+  // block it. Same as SCIM and deleting your own account, they're
+  // deactivated, and their email and phone are freed so they can be invited
+  // again or start their own workspace. Their name stays on the deals, tasks
+  // and approvals they worked on. What a delete used to clear with them goes
+  // too: their review chain steps, approval backups and unused invite link.
+  // So does their role, or it could never be deleted ("reassign 1
+  // teammate") once they're off the list.
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: removed.id },
+      data: {
+        email: `deleted-${removed.id}@deleted.sealme.net`,
+        roleId: null,
+        passwordHash: null,
+        twoFactorEnabled: false,
+        twoFactorSecret: null,
+        twoFactorBackupCodes: null,
+        phone: null,
+        phoneVerifiedAt: null,
+        scimExternalId: null,
+        deactivatedAt: removed.deactivatedAt ?? new Date(),
+      },
+    }),
+    prisma.reviewChainStep.deleteMany({ where: { assigneeId: removed.id } }),
+    prisma.approvalDelegate.deleteMany({ where: { OR: [{ fromUserId: removed.id }, { toUserId: removed.id }] } }),
+    prisma.passwordResetToken.deleteMany({ where: { userId: removed.id } }),
+  ]);
   await logAudit({
     workspaceId: workspace.id,
     actorEmail: session?.user?.email,
     action: "teammate.removed",
-    metadata: { removedEmail: removed?.email },
+    metadata: { removedEmail: removed.email },
   });
   revalidatePath("/settings");
+  return {};
 }
 
 const MAX_LOGO_BYTES = 1.5 * 1024 * 1024;
@@ -256,14 +287,27 @@ export async function requestUpgrade(formData: FormData) {
   revalidatePath("/settings");
 }
 
+// Problems come back on the page's own error banner: a thrown message
+// would reach the user only as a digest in production.
+function domainError(message: string): never {
+  redirect(`/settings?error=${encodeURIComponent(message)}`);
+}
+
 export async function updateAllowedDomain(formData: FormData) {
   const raw = String(formData.get("domain") ?? "").trim().toLowerCase();
   const domain = raw.replace(/^@/, "") || null;
   if (domain && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) {
-    throw new Error("That doesn't look like a domain, e.g. yourcompany.com");
+    domainError("That doesn't look like a domain, e.g. yourcompany.com");
   }
 
   const user = await requirePermission("canManageWorkspace");
+  // Nothing proves a workspace owns its domain yet, and SSO sign-in finds
+  // the workspace by it, so a domain stays with the first workspace that
+  // set it.
+  if (domain) {
+    const taken = await prisma.workspace.findFirst({ where: { allowedEmailDomain: domain, id: { not: user.workspaceId } }, select: { id: true } });
+    if (taken) domainError("Another SealMe workspace already uses that domain. Contact SealMe support if it's yours");
+  }
   await prisma.workspace.update({ where: { id: user.workspaceId }, data: { allowedEmailDomain: domain } });
 
   const session = await auth();
@@ -335,6 +379,10 @@ export async function toggleSso(): Promise<{ error?: string }> {
     }
     if (!workspace.allowedEmailDomain) {
       return { error: "Set an allowed email domain above first. It's how sign-ins get matched to this workspace" };
+    }
+    const shared = await prisma.workspace.count({ where: { allowedEmailDomain: workspace.allowedEmailDomain, id: { not: workspace.id } } });
+    if (shared > 0) {
+      return { error: "Another SealMe workspace uses the same email domain, so SSO can't tell them apart. Contact SealMe support" };
     }
   }
 

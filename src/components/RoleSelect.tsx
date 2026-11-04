@@ -45,6 +45,10 @@ export default function RoleSelect({
         className="input"
         style={{ fontSize: "12.5px", padding: "5px 8px", width: "auto" }}
       >
+        {/* Invited and SCIM teammates start with no role. Without this
+            the browser shows the first role (Owner) as picked, and picking
+            it never fires onChange. */}
+        {!value && <option value="" disabled>No role</option>}
         {roles.map((role) => (
           <option key={role.id} value={role.id}>
             {role.name}

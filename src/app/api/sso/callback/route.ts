@@ -4,25 +4,29 @@ import { mintSessionCookie, ssoCallbackUrl, verifyIdToken, verifySsoState } from
 import { logAudit } from "@/lib/audit";
 import { notifySignup } from "@/lib/signup-alert";
 
-function loginError(message: string): NextResponse {
-  return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/login?error=${encodeURIComponent(message)}`);
+// A code from the login page's ERROR_MESSAGE list.
+function loginError(code: string): NextResponse {
+  return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/login?error=${code}`);
 }
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const idpError = url.searchParams.get("error");
-  if (idpError) return loginError(`Sign-in was cancelled (${idpError})`);
+  if (idpError) {
+    console.error("SSO sign-in returned an error from the identity provider", idpError);
+    return loginError("SsoCancelled");
+  }
 
   const code = url.searchParams.get("code");
   const stateParam = url.searchParams.get("state");
-  if (!code || !stateParam) return loginError("Missing sign-in parameters. Try again");
+  if (!code || !stateParam) return loginError("SsoExpired");
 
   const state = await verifySsoState(stateParam);
-  if (!state) return loginError("That sign-in link expired. Try again");
+  if (!state) return loginError("SsoExpired");
 
   const workspace = await prisma.workspace.findUnique({ where: { id: state.workspaceId } });
   if (!workspace || !workspace.ssoEnabled || !workspace.ssoClientSecret) {
-    return loginError("SSO is no longer enabled for that organization");
+    return loginError("SsoDisabled");
   }
 
   // Exchange the authorization code for an ID token — server-to-server,
@@ -45,42 +49,48 @@ export async function GET(req: Request) {
     tokenResponse = await res.json();
   } catch (err) {
     console.error("SSO token exchange failed", err);
-    return loginError("Couldn't complete sign-in with your identity provider");
+    return loginError("SsoFailed");
   }
-  if (!tokenResponse.id_token) return loginError("Identity provider didn't return an ID token");
+  if (!tokenResponse.id_token) return loginError("SsoFailed");
 
   let claims: { email: string; name: string };
   try {
     claims = await verifyIdToken(tokenResponse.id_token, state.jwksUri, state.issuer, state.clientId, state.nonce);
   } catch (err) {
     console.error("SSO ID token verification failed", err);
-    return loginError("Couldn't verify your identity provider's response");
+    return loginError("SsoFailed");
   }
 
   if (!claims.email.endsWith(`@${workspace.allowedEmailDomain}`)) {
-    return loginError("Your identity provider account isn't in this organization's domain");
+    return loginError("SsoWrongDomain");
   }
 
   let user = await prisma.user.findUnique({ where: { email: claims.email } });
   if (user && user.workspaceId !== workspace.id) {
-    return loginError("That email is already tied to a different SealMe workspace");
+    return loginError("SsoOtherWorkspace");
   }
 
+  // Only people already on the workspace (invited, or provisioned over
+  // SCIM). Nothing proves a workspace owns the domain it typed in, so an
+  // identity provider it points at could claim any address there; letting
+  // that create accounts would hand them out for other people's emails.
   if (!user) {
-    // First SSO sign-in for this person — the IdP already vouches for who
-    // they are (and its own app-assignment already gated who can even
-    // reach this point), so there's no separate invite step. No role yet;
-    // an admin assigns one afterward, same as a manually invited teammate.
-    user = await prisma.user.create({
-      data: { workspaceId: workspace.id, name: claims.name, email: claims.email, passwordHash: null, emailVerifiedAt: new Date() },
-    });
-    await logAudit({ workspaceId: workspace.id, actorEmail: claims.email, action: "teammate.sso_provisioned" });
-    notifySignup({ name: claims.name, email: claims.email, workspaceName: workspace.name, how: "Joined with company single sign-on" });
+    await logAudit({ workspaceId: workspace.id, actorEmail: claims.email, action: "login.failure", metadata: { reason: "not_invited", provider: "sso" } });
+    return loginError("SsoNotInvited");
   }
 
   if (user.deactivatedAt) {
     await logAudit({ workspaceId: workspace.id, actorEmail: claims.email, action: "login.failure", metadata: { reason: "deactivated", provider: "sso" } });
-    return loginError("Your account has been deactivated. Contact your IT team");
+    return loginError("AccountDeactivated");
+  }
+
+  // An invite leaves the email as the name, so this is their first SSO
+  // sign-in: take the name from the identity provider. The address is not
+  // marked verified here, since the provider isn't proven to own the domain.
+  const idpName = claims.name.trim().slice(0, 100);
+  if (user.name === user.email && idpName && idpName !== claims.email) {
+    user = await prisma.user.update({ where: { id: user.id }, data: { name: idpName } });
+    notifySignup({ name: user.name, email: claims.email, workspaceName: workspace.name, how: "Joined with company single sign-on" });
   }
 
   const cookie = await mintSessionCookie({ id: user.id, name: user.name, email: user.email, workspaceId: workspace.id });

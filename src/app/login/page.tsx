@@ -7,10 +7,41 @@ import BrandLogo from "@/components/BrandLogo";
 import GoogleIcon from "@/components/GoogleIcon";
 import { phoneAppViewport } from "@/lib/phone-app-server";
 
+// Codes only, never text from the URL, so a link can't put its own
+// message on the sign-in page. The SSO routes and the Google check in
+// auth.ts send these.
 const ERROR_MESSAGE: Record<string, string> = {
   CredentialsSignin: "Wrong email, password, or 2FA code.",
+  AccountDeactivated: "Your account has been deactivated. Ask your admin or IT team.",
+  Google2fa: "This account has two-factor on. Sign in with your email, password and 2FA code.",
+  GoogleUnverified: "Google hasn't verified that email address.",
+  SsoNoEmail: "Enter your work email to sign in with SSO.",
+  SsoNotConfigured: "SSO isn't set up for that email's company. Ask your IT team.",
+  SsoIdpUnreachable: "Couldn't reach your company's sign-in service. Try again or ask your IT team.",
+  SsoCancelled: "Sign-in was cancelled at your identity provider.",
+  SsoExpired: "That sign-in link expired. Try again.",
+  SsoDisabled: "SSO is no longer on for that company.",
+  SsoFailed: "Couldn't finish signing in with your identity provider. Try again or ask your IT team.",
+  SsoWrongDomain: "Your identity provider account isn't in this company's email domain.",
+  SsoOtherWorkspace: "That email is already tied to a different SealMe workspace.",
+  SsoNotInvited: "That email isn't on your company's SealMe workspace yet. Ask your admin to invite you, then sign in with SSO.",
 };
 const DEFAULT_ERROR_MESSAGE = "Something went wrong signing you in. Please try again.";
+
+// The apps have no Google button (see .web-only in globals.css), so an
+// account made with Google needs a password there. Shown under the form,
+// or with the wrong-password error when there is one.
+function AppPasswordNote() {
+  return (
+    <span className="app-only text-[12px]" style={{ color: "var(--ink-muted)" }}>
+      Signed up with Google? Use{" "}
+      <Link href="/forgot-password" className="font-medium" style={{ color: "var(--accent-blue)" }}>
+        Forgot password
+      </Link>{" "}
+      once to set a password for the app.
+    </span>
+  );
+}
 
 // The iPhone app opens here when signed out.
 export const generateViewport = phoneAppViewport;
@@ -61,9 +92,12 @@ export default async function LoginPage({
           </Link>
         </p>
 
+        {/* An inline style, not whitespace-normal: .chip's nowrap sits outside
+            Tailwind's layers, so it beats any utility class. */}
         {error && (
-          <div className="chip chip-warn mb-4 w-full justify-center py-2.5 text-[12.5px]">
-            {ERROR_MESSAGE[error] ?? DEFAULT_ERROR_MESSAGE}
+          <div className="chip chip-warn mb-4 w-full flex-col justify-center gap-1 py-2.5 text-center text-[12.5px]" style={{ whiteSpace: "normal" }}>
+            <span>{ERROR_MESSAGE[error] ?? DEFAULT_ERROR_MESSAGE}</span>
+            {error === "CredentialsSignin" && <AppPasswordNote />}
           </div>
         )}
         {(reset || joined) && (
@@ -110,6 +144,7 @@ export default async function LoginPage({
               Sign in
             </button>
           </form>
+          {error !== "CredentialsSignin" && <AppPasswordNote />}
 
           <div className="my-1 flex items-center gap-3">
             <div className="h-px flex-1" style={{ background: "var(--hairline)" }} />

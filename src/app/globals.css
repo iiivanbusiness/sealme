@@ -568,6 +568,10 @@ a {
 /* Sign-in options Apple's guideline 4.8 doesn't allow without Sign in with
    Apple. data-desktop is set in both apps (desktop and iPhone). */
 [data-desktop] .web-only { display: none !important; }
+/* The other way round: only in the apps, like how to sign in there
+   without the Google button. */
+.app-only { display: none; }
+[data-desktop] .app-only { display: block; }
 /* What can't work on a phone: recording the computer's audio, and links
    that only make sense on a computer. */
 [data-mobile-app] .not-on-phone-app { display: none !important; }

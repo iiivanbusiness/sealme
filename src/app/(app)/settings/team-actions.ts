@@ -45,7 +45,7 @@ export async function assignUserTeam(userId: string, formData: FormData): Promis
   const teamId = String(formData.get("teamId") ?? "") || null;
   const user = await requirePermission("canManageTeam");
 
-  const targetUser = await prisma.user.findFirst({ where: { id: userId, workspaceId: user.workspaceId } });
+  const targetUser = await prisma.user.findFirst({ where: { id: userId, workspaceId: user.workspaceId, deactivatedAt: null } });
   if (!targetUser) return { error: "Teammate not found" };
 
   if (teamId) {

@@ -302,7 +302,7 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
     questions: [
       {
         question: "How do I invite a teammate?",
-        answer: "Go to Settings, Team, and send an invite. They get an email with a link to add their name and set a password; if their address is a Google account they can also just sign in with Google.",
+        answer: "Go to Settings, Team, and send an invite. They get an email with a link to add their name and set a password; if their address is a Google account they can also sign in with Google on the web. The desktop and iPhone apps use email and password, and Forgot password sets one.",
       },
       {
         question: "Can I restrict who signs up?",

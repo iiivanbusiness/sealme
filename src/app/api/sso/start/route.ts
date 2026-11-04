@@ -1,31 +1,38 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { discoverOidcConfig, generatePkce, signSsoState, ssoCallbackUrl } from "@/lib/sso";
+import { pickSsoWorkspace } from "@/lib/auth-rules";
 import { randomBytes } from "crypto";
 
-function loginError(message: string): NextResponse {
-  return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/login?error=${encodeURIComponent(message)}`);
+// A code from the login page's ERROR_MESSAGE list.
+function loginError(code: string): NextResponse {
+  return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/login?error=${code}`);
 }
 
 // There's no per-workspace vanity login URL, so the tenant is resolved the
 // same way the rest of enterprise access control already works here: by
-// matching the email's domain against the workspace's allowedEmailDomain.
+// matching the email's domain against the workspace's allowedEmailDomain,
+// and only for someone already on that workspace (see pickSsoWorkspace).
 export async function GET(req: Request) {
   const email = new URL(req.url).searchParams.get("email")?.trim().toLowerCase();
   const domain = email?.split("@")[1];
-  if (!email || !domain) return loginError("Enter your work email to sign in with SSO");
+  if (!email || !domain) return loginError("SsoNoEmail");
 
-  const workspace = await prisma.workspace.findFirst({ where: { allowedEmailDomain: domain, ssoEnabled: true } });
-  if (!workspace || !workspace.ssoIssuer || !workspace.ssoClientId) {
-    return loginError("SSO isn't set up for that email's organization");
-  }
+  const [candidates, member] = await Promise.all([
+    prisma.workspace.findMany({ where: { allowedEmailDomain: domain, ssoEnabled: true } }),
+    prisma.user.findUnique({ where: { email }, select: { workspaceId: true } }),
+  ]);
+  const picked = pickSsoWorkspace(candidates, member?.workspaceId);
+  if ("error" in picked) return loginError(picked.error);
+  const { workspace } = picked;
+  if (!workspace.ssoIssuer || !workspace.ssoClientId) return loginError("SsoNotConfigured");
 
   let oidc;
   try {
     oidc = await discoverOidcConfig(workspace.ssoIssuer);
   } catch (err) {
     console.error("SSO discovery failed", err);
-    return loginError("Couldn't reach the identity provider. Try again or contact your IT team");
+    return loginError("SsoIdpUnreachable");
   }
 
   const nonce = randomBytes(16).toString("hex");

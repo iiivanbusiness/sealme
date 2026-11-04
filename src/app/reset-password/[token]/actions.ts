@@ -8,7 +8,9 @@ import { logAudit } from "@/lib/audit";
 import { notifySignup } from "@/lib/signup-alert";
 
 // Also finishes a teammate invite (joining): the same one-time link, plus
-// their name, and the invite email they opened proves the address.
+// their name. Either way the emailed link they opened proves the address,
+// so it's marked verified. Not just for the "Verify your email" banner:
+// Google sign-in wipes the password of an account never verified.
 export async function resetPassword(token: string, joining: boolean, formData: FormData) {
   const password = String(formData.get("password") ?? "");
   const name = String(formData.get("name") ?? "").trim().slice(0, 100);
@@ -26,7 +28,7 @@ export async function resetPassword(token: string, joining: boolean, formData: F
   const current = await prisma.user.findUniqueOrThrow({ where: { id: resetToken.userId }, select: { emailVerifiedAt: true } });
   const user = await prisma.user.update({
     where: { id: resetToken.userId },
-    data: { passwordHash: hashPassword(password), ...(joining ? { name, emailVerifiedAt: current.emailVerifiedAt ?? new Date() } : {}) },
+    data: { passwordHash: hashPassword(password), emailVerifiedAt: current.emailVerifiedAt ?? new Date(), ...(joining ? { name } : {}) },
   });
   await prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } });
   await logAudit({ workspaceId: user.workspaceId, actorEmail: user.email, action: joining ? "teammate.joined" : "password.reset" });

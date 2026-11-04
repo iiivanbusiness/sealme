@@ -186,11 +186,11 @@ export async function sendTeammateInviteEmail(options: {
       <p style="margin:0 0 14px;">${escapeHtml(options.inviterName)} invited you to join <strong>${escapeHtml(options.workspaceName)}</strong> on SealMe.</p>
       <p style="margin:0 0 14px;">Set your password to get in. The link works for 7 days.</p>
       ${button(options.setPasswordUrl, "Set your password")}
-      <p style="margin:0 0 14px;color:#6e6e73;">If this address is a Google account, you can also just sign in with Google.</p>
+      <p style="margin:0 0 14px;color:#6e6e73;">If this address is a Google account, you can also sign in with Google on the web. The desktop and iPhone apps use email and password (Forgot password sets one).</p>
     `
       : `
       <p style="margin:0 0 14px;">${escapeHtml(options.inviterName)} invited you to join <strong>${escapeHtml(options.workspaceName)}</strong> on SealMe.</p>
-      <p style="margin:0 0 14px;">Sign in with your company account or with Google using this email address (${escapeHtml(options.to)}).</p>
+      <p style="margin:0 0 14px;">Sign in with your company account using this email address (${escapeHtml(options.to)}). On the web, Google works too.</p>
       ${button(options.loginUrl ?? "", "Sign in")}
     `,
   });

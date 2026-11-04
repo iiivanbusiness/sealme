@@ -12,6 +12,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { notifySignup } from "@/lib/signup-alert";
 import { verifyTotpCode, consumeBackupCode, type BackupCode } from "@/lib/two-factor";
+import { googleSignInChanges, googleSignInRefusal, normalizeEmail } from "@/lib/auth-rules";
 
 const findSessionAccount = cache((email: string) =>
   prisma.user.findUnique({ where: { email }, select: { workspaceId: true, deactivatedAt: true } })
@@ -27,12 +28,12 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         code: { label: "2FA code", type: "text" },
       },
       authorize: async (credentials) => {
-        const email = credentials?.email as string | undefined;
+        const email = normalizeEmail(credentials?.email);
         const password = credentials?.password as string | undefined;
         const code = (credentials?.code as string | undefined)?.trim();
         if (!email || !password) return null;
 
-        const allowed = await checkRateLimit(`login:${email.toLowerCase()}`, 10, 15 * 60 * 1000);
+        const allowed = await checkRateLimit(`login:${email}`, 10, 15 * 60 * 1000);
         if (!allowed) {
           await logAudit({ actorEmail: email, action: "login.rate_limited" });
           return null;
@@ -86,6 +87,29 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   ],
   callbacks: {
     ...authConfig.callbacks,
+    // Runs before jwt on every sign-in. Passwords are checked in authorize
+    // and SSO in its own route, so only Google needs a gate here, and
+    // returning a /login URL lets the page say why.
+    async signIn({ account, profile }) {
+      if (account?.provider !== "google") return true;
+      if (!profile?.email || profile.email_verified === false) return "/login?error=GoogleUnverified";
+      const email = normalizeEmail(profile.email);
+      const user = await prisma.user.findUnique({
+        where: { email },
+        select: { workspaceId: true, emailVerifiedAt: true, twoFactorEnabled: true, deactivatedAt: true },
+      });
+      const refusal = googleSignInRefusal(user);
+      if (refusal) {
+        await logAudit({
+          workspaceId: user?.workspaceId,
+          actorEmail: email,
+          action: "login.failure",
+          metadata: { reason: refusal === "Google2fa" ? "2fa_required" : "deactivated", provider: "google" },
+        });
+        return `/login?error=${refusal}`;
+      }
+      return true;
+    },
     // Runs on every request that touches a session, but `account`/`profile` are
     // only present right after a provider's sign-in exchange — everywhere else
     // this is just decoding the existing token, so the DB lookup below only
@@ -95,7 +119,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       const { account, profile } = params;
 
       if (account?.provider === "google" && !token.workspaceId && profile?.email) {
-        const email = profile.email as string;
+        const email = normalizeEmail(profile.email);
         let user = await prisma.user.findUnique({ where: { email } });
 
         if (!user) {
@@ -112,27 +136,28 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           await attachOnboardingProfile(workspace.id);
           await logAudit({ workspaceId: workspace.id, actorEmail: email, action: "workspace.created", metadata: { provider: "google" } });
           notifySignup({ name, email, workspaceName: workspace.name, how: "Started a workspace with Google" });
-        } else if (!user.emailVerifiedAt) {
+        } else {
           // An invited teammate has no password, so Google is their only way
           // in — every sign-in already re-confirms the address with Google,
           // so there's no separate "click a link" step for them to do.
-          user = await prisma.user.update({ where: { id: user.id }, data: { emailVerifiedAt: new Date() } });
-          // Their first time in: an invite accepted.
-          const joined = await prisma.workspace.findUnique({ where: { id: user.workspaceId }, select: { name: true } });
-          notifySignup({ name: (profile.name as string | undefined) ?? user.name, email, workspaceName: joined?.name ?? "", how: "Joined by invite, with Google" });
+          const firstTime = !user.emailVerifiedAt;
+          const hadPassword = Boolean(user.passwordHash);
+          const changes = googleSignInChanges(user, profile.name, new Date());
+          if (changes) user = await prisma.user.update({ where: { id: user.id }, data: changes });
+          if (firstTime && hadPassword) {
+            await logAudit({ workspaceId: user.workspaceId, actorEmail: email, action: "account.unverified_password_removed", metadata: { provider: "google" } });
+          } else if (firstTime) {
+            // Their first time in: an invite accepted.
+            const joined = await prisma.workspace.findUnique({ where: { id: user.workspaceId }, select: { name: true } });
+            notifySignup({ name: user.name, email, workspaceName: joined?.name ?? "", how: "Joined by invite, with Google" });
+          }
         }
 
-        // Deactivated via SCIM (or manually) — leave workspaceId unset rather
-        // than throwing: every protected page already redirects to /login
-        // when it's missing, the same "please sign in again" shape as a
-        // stale session, not a hard error page.
-        if (user.deactivatedAt) {
-          await logAudit({ workspaceId: user.workspaceId, actorEmail: email, action: "login.failure", metadata: { reason: "deactivated", provider: "google" } });
-          return token;
-        }
-
+        // Deactivated accounts were already turned away in signIn.
         await logAudit({ workspaceId: user.workspaceId, actorEmail: email, action: "login.success", metadata: { provider: "google" } });
         token.workspaceId = user.workspaceId;
+        // The session check below looks the account up by this address.
+        token.email = user.email;
       }
 
       // Deactivation, removal, and self-deletion are otherwise only enforced at

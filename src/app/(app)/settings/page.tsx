@@ -10,6 +10,8 @@ import { countryFromLocale } from "@/lib/phone-input";
 import { headers } from "next/headers";
 import { isPhoneApp } from "@/lib/phone-app-server";
 import DeleteAccountSettings from "@/components/DeleteAccountSettings";
+import YourNameSettings from "@/components/YourNameSettings";
+import RemoveTeammateButton from "@/components/RemoveTeammateButton";
 import RolesManager from "@/components/RolesManager";
 import RoleSelect from "@/components/RoleSelect";
 import TeamSelect from "@/components/TeamSelect";
@@ -76,17 +78,28 @@ function Toggle({ on, field }: { on: boolean; field: "requireApproval" | "notify
   );
 }
 
-// The person's own settings: their phone number (for calls), two-factor
-// and deleting the account. All the iPhone app shows.
+// The person's own settings: their name, their phone number (for calls),
+// two-factor and deleting the account. All the iPhone app shows.
 async function PersonalSettings({
   user,
   prospecting,
+  onlyTeamManager,
 }: {
-  user: { phone: string | null; phoneVerifiedAt: Date | null; passwordHash: string | null; twoFactorEnabled: boolean };
+  user: { name: string; phone: string | null; phoneVerifiedAt: Date | null; passwordHash: string | null; twoFactorEnabled: boolean };
   prospecting: boolean;
+  onlyTeamManager: boolean;
 }) {
   return (
     <>
+      <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
+        <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
+          <h2 className="text-[15px] font-medium">Your name</h2>
+        </div>
+        <div className="px-[22px] py-4">
+          <YourNameSettings name={user.name} />
+        </div>
+      </div>
+
       {prospecting && (
         <div id="phone" className="glass-card glass-card-solid card-hover mb-4 max-w-[600px] scroll-mt-24">
           <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
@@ -119,7 +132,7 @@ async function PersonalSettings({
           <h2 className="text-[15px] font-medium">Delete account</h2>
         </div>
         <div className="px-[22px] py-4">
-          <DeleteAccountSettings hasPassword={Boolean(user.passwordHash)} />
+          <DeleteAccountSettings hasPassword={Boolean(user.passwordHash)} onlyTeamManager={onlyTeamManager} />
         </div>
       </div>
     </>
@@ -137,10 +150,12 @@ export default async function SettingsPage({
   const { error: connectError, error_detail: connectErrorDetail, slack_connected } = await searchParams;
   const workspaceId = await requireWorkspaceId();
   const [workspace, session, roles, teams, reviewChains] = await Promise.all([
-    prisma.workspace.findUnique({ where: { id: workspaceId }, include: { users: { include: { role: true, team: true } } } }),
+    // Only people still on the team: removed, deleted and SCIM-deactivated
+    // accounts stay in the table for the history they're part of.
+    prisma.workspace.findUnique({ where: { id: workspaceId }, include: { users: { where: { deactivatedAt: null }, include: { role: true, team: true } } } }),
     auth(),
-    prisma.role.findMany({ where: { workspaceId }, include: { _count: { select: { users: true } } }, orderBy: [{ isOwner: "desc" }, { createdAt: "asc" }] }),
-    prisma.team.findMany({ where: { workspaceId }, include: { _count: { select: { users: true } } }, orderBy: { createdAt: "asc" } }),
+    prisma.role.findMany({ where: { workspaceId }, include: { _count: { select: { users: { where: { deactivatedAt: null } } } } }, orderBy: [{ isOwner: "desc" }, { createdAt: "asc" }] }),
+    prisma.team.findMany({ where: { workspaceId }, include: { _count: { select: { users: { where: { deactivatedAt: null } } } } }, orderBy: { createdAt: "asc" } }),
     prisma.reviewChain.findMany({
       where: { workspaceId },
       include: { team: true, steps: { include: { assignee: true }, orderBy: { order: "asc" } } },
@@ -149,6 +164,9 @@ export default async function SettingsPage({
   ]);
   if (!workspace) return null;
   const currentUser = workspace.users.find((u) => u.email === session?.user?.email);
+  // Same rule deleteMyAccount enforces, said up front on the Delete card.
+  const others = workspace.users.filter((u) => u.id !== currentUser?.id);
+  const onlyTeamManager = Boolean(currentUser?.role?.canManageTeam) && others.length > 0 && !others.some((u) => u.role?.canManageTeam);
   // The iPhone app: only the person's own settings. The workspace, the team
   // and connected apps are set up on a computer.
   if (await isPhoneApp()) {
@@ -160,7 +178,7 @@ export default async function SettingsPage({
             Your account. The workspace, the team and connected apps are set up on a computer.
           </div>
         </div>
-        {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} />}
+        {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} onlyTeamManager={onlyTeamManager} />}
       </>
     );
   }
@@ -299,19 +317,13 @@ export default async function SettingsPage({
               ) : (
                 u.role && <span className="chip chip-neutral" style={{ fontSize: 11 }}>{u.role.name}</span>
               )}
-              {workspace.users.length > 1 && canManageTeam && (
-                <form action={removeTeammate.bind(null, u.id)}>
-                  <button type="submit" className="text-[12px] font-medium" style={{ color: "var(--ink-muted)" }}>
-                    Remove
-                  </button>
-                </form>
-              )}
+              {workspace.users.length > 1 && canManageTeam && <RemoveTeammateButton userId={u.id} removeAction={removeTeammate} />}
             </div>
           </div>
         ))}
         <InviteTeammateForm inviteAction={inviteTeammate} />
         <div className="pb-3 text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
-          They&apos;ll get an email with a link to set their password. Teammates with a Google account can also just sign in with Google.
+          They&apos;ll get an email with a link to set their password. Teammates with a Google account can also sign in with Google on the web.
         </div>
       </div>
     </div>
@@ -375,7 +387,14 @@ export default async function SettingsPage({
             teamId: c.teamId,
             teamName: c.team?.name ?? null,
             minDealValue: c.minDealValue,
-            steps: c.steps.map((s) => ({ id: s.id, order: s.order, assigneeId: s.assigneeId, assigneeName: s.assignee.name })),
+            // A step can still name someone who has since left (SCIM, or
+            // they deleted their account), so say so and it gets replaced.
+            steps: c.steps.map((s) => ({
+              id: s.id,
+              order: s.order,
+              assigneeId: s.assigneeId,
+              assigneeName: s.assignee.deactivatedAt ? `${s.assignee.name} (no longer on the team)` : s.assignee.name,
+            })),
           }))}
           teammates={teammateOptions}
           teams={teamOptions}
@@ -601,7 +620,7 @@ export default async function SettingsPage({
 
     {canManageWorkspacePerm && <DeveloperSettingsLink />}
 
-    {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} />}
+    {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} onlyTeamManager={onlyTeamManager} />}
 
     <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
       <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>

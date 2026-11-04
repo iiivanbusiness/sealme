@@ -70,14 +70,16 @@ export async function updateRole(roleId: string, formData: FormData): Promise<{ 
   if (!canActOnRole(user.role, permissions)) return { error: ROLE_ESCALATION_ERROR };
 
   // If this role currently holds canManageTeam and is about to lose it,
-  // make sure some other role in the workspace still grants it — otherwise
-  // nobody could ever manage roles or teammates again.
+  // make sure someone still on the team keeps it through another role,
+  // otherwise nobody could ever manage roles or teammates again. Counting
+  // roles isn't enough: the Owner role always qualifies, even with nobody
+  // active on it.
   if (role.canManageTeam && !permissions.canManageTeam) {
-    const otherTeamManagers = await prisma.role.count({
-      where: { workspaceId: user.workspaceId, canManageTeam: true, id: { not: roleId } },
+    const otherTeamManagers = await prisma.user.count({
+      where: { workspaceId: user.workspaceId, deactivatedAt: null, roleId: { not: roleId }, role: { canManageTeam: true } },
     });
     if (otherTeamManagers === 0) {
-      return { error: "At least one role must be able to manage the team. Edit another role first" };
+      return { error: "That would leave nobody who can manage the team. Give someone else a role that can manage it first" };
     }
   }
 
@@ -92,7 +94,12 @@ export async function updateRole(roleId: string, formData: FormData): Promise<{ 
 
 export async function deleteRole(roleId: string): Promise<{ error?: string }> {
   const user = await requirePermission("canManageTeam");
-  const role = await prisma.role.findFirst({ where: { id: roleId, workspaceId: user.workspaceId }, include: { _count: { select: { users: true } } } });
+  // Only people still on the team block it: anyone deactivated who still
+  // points at the role just loses it (roleId is set null on delete).
+  const role = await prisma.role.findFirst({
+    where: { id: roleId, workspaceId: user.workspaceId },
+    include: { _count: { select: { users: { where: { deactivatedAt: null } } } } },
+  });
   if (!role) return { error: "Role not found" };
   if (role.isOwner) return { error: "The Owner role can't be deleted" };
   if (!canActOnRole(user.role, role)) return { error: ROLE_ESCALATION_ERROR };
@@ -112,7 +119,7 @@ export async function assignUserRole(userId: string, formData: FormData): Promis
   const user = await requirePermission("canManageTeam");
 
   const [targetUser, newRole] = await Promise.all([
-    prisma.user.findFirst({ where: { id: userId, workspaceId: user.workspaceId }, include: { role: true } }),
+    prisma.user.findFirst({ where: { id: userId, workspaceId: user.workspaceId, deactivatedAt: null }, include: { role: true } }),
     prisma.role.findFirst({ where: { id: roleId, workspaceId: user.workspaceId } }),
   ]);
   if (!targetUser) return { error: "Teammate not found" };
@@ -124,7 +131,7 @@ export async function assignUserRole(userId: string, formData: FormData): Promis
   // of a database edit.
   if (targetUser.role?.canManageTeam && !newRole.canManageTeam) {
     const otherTeamManagers = await prisma.user.count({
-      where: { workspaceId: user.workspaceId, id: { not: userId }, role: { canManageTeam: true } },
+      where: { workspaceId: user.workspaceId, id: { not: userId }, deactivatedAt: null, role: { canManageTeam: true } },
     });
     if (otherTeamManagers === 0) {
       return { error: "This is the only teammate who can manage the team. Assign someone else first" };
