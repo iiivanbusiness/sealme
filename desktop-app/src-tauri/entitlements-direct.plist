@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Direct-distribution (Developer ID) build. Tauri signs it with the
+	     hardened runtime on, which blocks the microphone side of
+	     audio_capture.swift unless this is here. Not sandboxed, so nothing
+	     else is needed; the Mac App Store build uses entitlements.plist
+	     instead (see tauri.macos-mas.conf.json). -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

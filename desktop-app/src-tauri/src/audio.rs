@@ -21,8 +21,10 @@ pub fn start_capture() -> Result<(), String> {
         0 => Ok(()),
         -100 => Err("Capture is already running".to_string()),
         -1 => Err("No display available to capture from".to_string()),
-        -2 => Err("Couldn't start capture — check Screen Recording permission in System Settings".to_string()),
-        -3 => Err("Couldn't access the microphone — check Microphone permission in System Settings".to_string()),
+        -2 => Err("Couldn't start capture. Check Screen Recording permission in System Settings".to_string()),
+        -3 => Err("Couldn't start the microphone. Check your input device in System Settings > Sound".to_string()),
+        -4 => Err("SealMe doesn't have microphone access. Turn it on in System Settings > Privacy & Security > Microphone".to_string()),
+        -5 => Err("Your sound input isn't a microphone. Pick one under Input in System Settings > Sound".to_string()),
         other => Err(format!("Unknown audio capture error: {other}")),
     }
 }

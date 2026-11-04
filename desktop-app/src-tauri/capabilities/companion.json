@@ -10,6 +10,9 @@
     "core:default",
     "opener:default",
     "allow-toggle-companion-rail",
-    "allow-select-companion-view"
+    "allow-select-companion-view",
+    "allow-is-local-capturing",
+    "allow-discard-local-capture",
+    "allow-stop-local-capture-and-upload"
   ]
 }

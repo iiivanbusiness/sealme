@@ -36,26 +36,95 @@ final class MicCapture {
     private var pcm16 = Data()
     private var exportedSamples = 0
     private let lock = NSLock()
+    // Guards running and the engine/tap setup, which a device change redoes
+    // from another thread mid-call.
+    private let stateLock = NSLock()
+    private let restartQueue = DispatchQueue(label: "net.sealme.audio.mic-restart")
+    private var configObserver: NSObjectProtocol?
+    private var tapInstalled = false
     private(set) var running = false
 
-    func start() -> Bool {
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: captureSampleRate, channels: 1, interleaved: true) else {
+    /// A denied (or not yet answered) Microphone prompt doesn't stop the
+    /// engine from starting; the tap just gets silence, so the rep's side of
+    /// the call would go missing without any error.
+    static func hasPermission() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: .audio)
+        default:
             return false
         }
+    }
 
+    /// 0 on success, otherwise the error code sealme_audio_start returns.
+    func start() -> Int32 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        // A tap left installed by a session that didn't shut down cleanly
+        // would make the installTap below throw, which crashes the app.
+        stopObservingDeviceChanges()
+        stopEngine()
+        lock.lock()
         pcm16 = Data()
         exportedSamples = 0
+        lock.unlock()
+
+        let code = installTapAndStart()
+        guard code == 0 else { return code }
+        running = true
+        // The engine stops itself when the input device changes mid-call
+        // (AirPods or a USB headset plugged in or out), and nothing would
+        // start it again.
+        configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            self?.restartQueue.async { self?.restartAfterDeviceChange() }
+        }
+        return 0
+    }
+
+    private func restartAfterDeviceChange() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard running else { return }
+        stopEngine()
+        // Stays silent until the next change brings a usable input back.
+        _ = installTapAndStart()
+    }
+
+    private func stopObservingDeviceChanges() {
+        if let observer = configObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configObserver = nil
+        }
+    }
+
+    private func stopEngine() {
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        if engine.isRunning {
+            engine.stop()
+        }
+    }
+
+    private func installTapAndStart() -> Int32 {
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: captureSampleRate, channels: 1, interleaved: true) else {
+            return -3
+        }
+
         let input = engine.inputNode
         let inputFormat = input.inputFormat(forBus: 0)
+        guard inputFormat.channelCount >= 1, inputFormat.sampleRate > 0 else { return -3 }
 
         // A real microphone is always 1-2 channels. Anything else means the
         // system's default input device is actually some virtual/aggregate
-        // device (e.g. BlackHole set as the default input) rather than a mic
-        // — fail cleanly instead of silently mixing garbage into the call.
-        guard inputFormat.channelCount >= 1, inputFormat.channelCount <= 2, inputFormat.sampleRate > 0 else {
-            return false
-        }
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else { return false }
+        // device (e.g. BlackHole set as the default input) rather than a mic.
+        // Fail cleanly instead of silently mixing garbage into the call.
+        guard inputFormat.channelCount <= 2 else { return -5 }
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else { return -3 }
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
@@ -83,24 +152,32 @@ final class MicCapture {
             self.pcm16.append(data)
             self.lock.unlock()
         }
+        tapInstalled = true
 
         do {
             engine.prepare()
             try engine.start()
-            running = true
-            return true
+            return 0
         } catch {
             input.removeTap(onBus: 0)
-            return false
+            tapInstalled = false
+            return -3
         }
     }
 
+    var sampleCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return pcm16.count / MemoryLayout<Int16>.size
+    }
+
     func stopAndGet() -> Data {
-        if running {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            running = false
-        }
+        stateLock.lock()
+        stopObservingDeviceChanges()
+        stopEngine()
+        running = false
+        stateLock.unlock()
+
         lock.lock()
         let result = pcm16
         pcm16 = Data()
@@ -145,40 +222,31 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         var result: Int32 = 0
 
         Task {
+            guard await MicCapture.hasPermission() else {
+                result = -4
+                sem.signal()
+                return
+            }
             do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                guard let display = content.displays.first else {
+                guard let newStream = try await self.makeStream() else {
                     result = -1
                     sem.signal()
                     return
                 }
-
-                let filter = SCContentFilter(display: display, excludingWindows: [])
-                let config = SCStreamConfiguration()
-                config.capturesAudio = true
-                // 16kHz mono per side is plenty for speech transcription and
-                // keeps a 30-minute call under ~110MB instead of ~660MB at
-                // 48kHz stereo per side.
-                config.sampleRate = Int(captureSampleRate)
-                config.channelCount = 1
-                config.excludesCurrentProcessAudio = true
-                config.width = 2
-                config.height = 2
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-
-                let newStream = SCStream(filter: filter, configuration: config, delegate: self)
-                try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "net.sealme.audio.capture"))
                 try await newStream.startCapture()
 
-                guard self.mic.start() else {
+                let micResult = self.mic.start()
+                guard micResult == 0 else {
                     try? await newStream.stopCapture()
-                    result = -3
+                    result = micResult
                     sem.signal()
                     return
                 }
 
-                self.stream = newStream
-                self.capturing = true
+                self.withState {
+                    self.stream = newStream
+                    self.capturing = true
+                }
                 result = 0
             } catch {
                 result = -2
@@ -190,18 +258,56 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         return result
     }
 
+    /// Audio comes from every app, not only what's on the display the filter
+    /// names, so whichever display is there will do. nil when there's none.
+    private func makeStream() async throws -> SCStream? {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first else { return nil }
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        // 16kHz mono per side is plenty for speech transcription and
+        // keeps a 30-minute call under ~110MB instead of ~660MB at
+        // 48kHz stereo per side.
+        config.sampleRate = Int(captureSampleRate)
+        config.channelCount = 1
+        config.excludesCurrentProcessAudio = true
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+
+        let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+        try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "net.sealme.audio.capture"))
+        return newStream
+    }
+
+    // stream and capturing change from the caller's thread, from start's
+    // Task, and from ScreenCaptureKit's queue when it ends a stream itself.
+    private func withState<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
     func stopAndGetWav() -> Data? {
-        guard capturing, let activeStream = stream else { return nil }
-
-        let sem = DispatchSemaphore(value: 0)
-        Task {
-            try? await activeStream.stopCapture()
-            sem.signal()
+        let (wasCapturing, activeStream) = withState { () -> (Bool, SCStream?) in
+            let state = (self.capturing, self.stream)
+            self.capturing = false
+            self.stream = nil
+            return state
         }
-        sem.wait()
 
-        capturing = false
-        stream = nil
+        if let activeStream {
+            let sem = DispatchSemaphore(value: 0)
+            Task {
+                try? await activeStream.stopCapture()
+                sem.signal()
+            }
+            sem.wait()
+        }
+        // Even with no session running: the mic must never be left on, tap
+        // and all, into the next call.
         let micSamples = mic.stopAndGet()
 
         lock.lock()
@@ -209,7 +315,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         systemPcm16 = Data()
         lock.unlock()
 
-        guard !sysSamples.isEmpty || !micSamples.isEmpty else { return nil }
+        guard wasCapturing, !sysSamples.isEmpty || !micSamples.isEmpty else { return nil }
         return CaptureSession.makeStereoWavFile(systemPcm: sysSamples, micPcm: micSamples, sampleRate: UInt32(captureSampleRate))
     }
 
@@ -266,7 +372,50 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        capturing = false
+        // The system ended the stream itself: the display it was on got
+        // unplugged, Screen Recording access was turned off, and so on. The
+        // session stays open, so the mic keeps recording and what's already
+        // captured still goes out with the next chunk and on stop.
+        let isCurrent = withState { () -> Bool in
+            guard self.capturing, self.stream === stream else { return false }
+            self.stream = nil
+            return true
+        }
+        guard isCurrent else { return }
+        // Stopped by the user from the recording indicator in the menu bar:
+        // they don't want the other side recorded anymore, so it stays off.
+        if let scError = error as? SCStreamError, scError.code == .userStopped { return }
+        Task { await self.restartSystemAudio() }
+    }
+
+    /// One try at a new stream. If none will start, the other side of the
+    /// call is silence from here to the end.
+    private func restartSystemAudio() async {
+        do {
+            if let newStream = try await makeStream() {
+                try await newStream.startCapture()
+                if !adoptRestartedStream(newStream) {
+                    try? await newStream.stopCapture()
+                }
+                return
+            }
+        } catch {}
+        FileHandle.standardError.write(Data("[audio] system audio stopped mid-call and couldn't be restarted\n".utf8))
+    }
+
+    // False when the call ended while the new stream was starting.
+    private func adoptRestartedStream(_ newStream: SCStream) -> Bool {
+        let micSamples = mic.sampleCount
+        return withState {
+            guard self.capturing, self.stream == nil else { return false }
+            self.stream = newStream
+            // Silence for the gap, so both sides stay lined up in time.
+            let missing = micSamples - self.systemPcm16.count / MemoryLayout<Int16>.size
+            if missing > 0 {
+                self.systemPcm16.append(Data(count: missing * MemoryLayout<Int16>.size))
+            }
+            return true
+        }
     }
 
     // MARK: - WAV encoding

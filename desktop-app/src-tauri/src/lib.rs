@@ -1,8 +1,13 @@
 mod audio;
 #[cfg(target_os = "windows")]
 mod audio_windows;
+mod wav;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 #[cfg(all(not(feature = "mas"), not(target_os = "windows")))]
 use tauri::window::{Effect, EffectsBuilder};
 #[cfg(all(not(feature = "mas"), target_os = "macos"))]
@@ -41,18 +46,74 @@ const COMPANION_GAP: f64 = 8.0;
 const COMPANION_RADIUS: f64 = 16.0;
 
 // How often to send a live chunk while the call is still going, mirroring
-// the ~1 minute delay the existing Recall bot flow already has.
+// the ~1 minute delay the existing Recall bot flow already has. Counted from
+// the start of each pass, so a slow upload doesn't stretch the next chunk.
 const LIVE_UPDATE_INTERVAL_SECS: u64 = 60;
 
-// Signals the background live-update loop to stop. A single global is fine
-// here — same as the Swift side's CaptureSession.shared, there is only ever
-// one call being recorded at a time.
-static LIVE_UPDATES_ACTIVE: AtomicBool = AtomicBool::new(false);
+// Vercel turns away a request body over 4.5 MB before the route even runs.
+// 4 MB is about 62 s of the 16 kHz stereo audio both capture backends
+// record, so a normal live chunk goes up whole, and only a longer stretch
+// (the whole call on stop, or audio that piled up while uploads failed) is
+// sent in pieces.
+const MAX_CHUNK_BYTES: usize = 4_000_000;
+
+// The server can't run a request longer than this anyway. Without a limit,
+// a stalled connection would hold up every later chunk, Stop & finish too.
+const UPLOAD_TIMEOUT_SECS: u64 = 300;
+
+// The running live-update loop's wake-up channel, if there is one. Taking or
+// replacing the sender ends that loop right away, even mid-sleep. A single
+// global is fine here, same as the Swift side's CaptureSession.shared: there
+// is only ever one call being recorded at a time.
+static LIVE_LOOP: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+
+// Audio recorded under the current token that the server hasn't accepted
+// yet. Whoever holds this lock is the only one uploading, so chunks always
+// reach the server in the order they were recorded.
+static UPLOADS: tauri::async_runtime::Mutex<Option<Upload>> = tauri::async_runtime::Mutex::const_new(None);
+
+// Keeps cache file names unique when one chunk is saved as several pieces.
+static SAVED_CHUNKS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Serialize)]
 struct StopCaptureResult {
     ok: bool,
     error: Option<String>,
+}
+
+struct PendingChunk {
+    wav: Vec<u8>,
+    // Copy on disk so a flaky connection doesn't lose audio. Only deleted
+    // once the backend confirms it processed the chunk.
+    saved_at: Option<PathBuf>,
+}
+
+// Chunks recorded under one token, oldest first, waiting to go up.
+struct Upload {
+    token: String,
+    pending: VecDeque<PendingChunk>,
+}
+
+impl Upload {
+    fn enqueue(&mut self, app: &tauri::AppHandle, wav: Vec<u8>) {
+        for piece in wav::split(wav, MAX_CHUNK_BYTES) {
+            let saved_at = save_to_cache(app, &piece);
+            self.pending.push_back(PendingChunk { wav: piece, saved_at });
+        }
+    }
+}
+
+fn live_loop() -> MutexGuard<'static, Option<mpsc::Sender<()>>> {
+    LIVE_LOOP.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+// Anything still queued under another token is left over from a call that
+// was discarded, and can't be sent anymore.
+fn upload_for<'a>(slot: &'a mut Option<Upload>, token: &str) -> &'a mut Upload {
+    if slot.as_ref().is_some_and(|u| u.token != token) {
+        *slot = None;
+    }
+    slot.get_or_insert_with(|| Upload { token: token.to_string(), pending: VecDeque::new() })
 }
 
 #[tauri::command]
@@ -61,23 +122,50 @@ fn start_local_capture() -> Result<(), String> {
 }
 
 // Called once the caller has a token (i.e. once startLocalCapture's deal
-// actually exists) — starts a background loop that periodically uploads
+// actually exists). Starts a background loop that periodically uploads
 // whatever's been captured since the last chunk, so deal terms fill in
 // while the call is still happening instead of only at the very end.
 #[tauri::command]
 fn begin_live_updates(app: tauri::AppHandle, token: String) {
-    LIVE_UPDATES_ACTIVE.store(true, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        while LIVE_UPDATES_ACTIVE.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_secs(LIVE_UPDATE_INTERVAL_SECS));
-            if !LIVE_UPDATES_ACTIVE.load(Ordering::SeqCst) {
+    let (wake, stop) = mpsc::channel();
+    // Replacing the sender also ends a loop left over from an earlier call on
+    // the spot, instead of letting it wake up later and send this call's
+    // audio under that call's token.
+    *live_loop() = Some(wake);
+    std::thread::spawn(move || live_update_loop(app, token, stop));
+}
+
+fn live_update_loop(app: tauri::AppHandle, token: String, stop: mpsc::Receiver<()>) {
+    let interval = Duration::from_secs(LIVE_UPDATE_INTERVAL_SECS);
+    let mut next_pass = Instant::now() + interval;
+    loop {
+        let wait = next_pass.saturating_duration_since(Instant::now());
+        if !matches!(stop.recv_timeout(wait), Err(mpsc::RecvTimeoutError::Timeout)) {
+            break;
+        }
+        next_pass = Instant::now() + interval;
+
+        let mut slot = UPLOADS.blocking_lock();
+        let snapshot = {
+            // Checked again under the lock stop and discard take to end this
+            // loop: once they have, the audio from here on is theirs (or
+            // already the next call's), so this pass must not take any.
+            let _live = live_loop();
+            if !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
                 break;
             }
-            if let Ok(Some(wav)) = audio::snapshot_delta_wav() {
-                tauri::async_runtime::block_on(upload_chunk(&app, &token, wav, false));
-            }
+            audio::snapshot_delta_wav()
+        };
+        let upload = upload_for(&mut slot, &token);
+        if let Ok(Some(wav)) = snapshot {
+            upload.enqueue(&app, wav);
         }
-    });
+        // Also retries whatever an earlier pass couldn't get through.
+        let result = tauri::async_runtime::block_on(send_pending(upload, false));
+        if let Some(error) = result.error {
+            eprintln!("[capture] live chunk not sent yet, will retry: {error}");
+        }
+    }
 }
 
 #[tauri::command]
@@ -345,61 +433,80 @@ fn select_companion_view(app: tauri::AppHandle, view: String) -> Result<(), Stri
 // upload it to.
 #[tauri::command]
 fn discard_local_capture() -> Result<(), String> {
-    LIVE_UPDATES_ACTIVE.store(false, Ordering::SeqCst);
+    live_loop().take();
     audio::stop_capture_wav()?;
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_local_capture_and_upload(app: tauri::AppHandle, token: String) -> Result<StopCaptureResult, String> {
-    LIVE_UPDATES_ACTIVE.store(false, Ordering::SeqCst);
+    live_loop().take();
+    // Waits out a live pass that's still uploading, so its chunk lands first.
+    let mut slot = UPLOADS.lock().await;
+    let upload = upload_for(&mut slot, &token);
 
-    // Whatever arrived since the last periodic chunk (or the whole call, if
-    // live updates never got a chance to fire) — every earlier chunk was
-    // already transcribed and appended server-side, so there's no need to
-    // resend anything that's already been sent.
-    let final_chunk = audio::snapshot_delta_wav()?.unwrap_or_default();
+    // Whatever arrived since the last live chunk (or the whole call, if live
+    // updates never got a chance to fire). Chunks the server already took
+    // are transcribed and appended there, so none of those go again. On a
+    // retry after a failed upload, capture has already stopped: nothing new
+    // comes in here, and exactly what didn't get through is sent again.
+    if let Some(wav) = audio::snapshot_delta_wav()? {
+        upload.enqueue(&app, wav);
+    }
     audio::stop_capture_wav()?;
 
-    Ok(upload_chunk(&app, &token, final_chunk, true).await)
+    Ok(send_pending(upload, true).await)
 }
 
-/// Shared by both the periodic live pings and the final call. Persists the
-/// chunk to disk before attempting the upload so a flaky connection doesn't
-/// lose audio — only deleted once the backend confirms it processed it.
-async fn upload_chunk(app: &tauri::AppHandle, token: &str, wav_bytes: Vec<u8>, is_final: bool) -> StopCaptureResult {
-    let file_path = if wav_bytes.is_empty() {
-        None
-    } else {
-        match app.path().app_cache_dir() {
-            Ok(cache_dir) => {
-                let _ = std::fs::create_dir_all(&cache_dir);
-                let millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let suffix = if is_final { "final" } else { "live" };
-                let path = cache_dir.join(format!("call-{millis}-{suffix}.wav"));
-                let _ = std::fs::write(&path, &wav_bytes);
-                Some(path)
-            }
-            Err(_) => None,
+/// Sends what's queued, oldest first, and stops at the first chunk that
+/// doesn't get through, leaving it and everything after it queued for the
+/// next try. With `finish`, the last chunk goes up as the final one, which
+/// ends the call on the server; that one goes even with no audio in it.
+async fn send_pending(upload: &mut Upload, finish: bool) -> StopCaptureResult {
+    if finish && upload.pending.is_empty() {
+        upload.pending.push_back(PendingChunk { wav: Vec::new(), saved_at: None });
+    }
+    while let Some(chunk) = upload.pending.front() {
+        let is_final = finish && upload.pending.len() == 1;
+        let result = upload_chunk(&upload.token, chunk, is_final).await;
+        if !result.ok {
+            return result;
         }
-    };
+        upload.pending.pop_front();
+    }
+    StopCaptureResult { ok: true, error: None }
+}
 
+fn save_to_cache(app: &tauri::AppHandle, wav: &[u8]) -> Option<PathBuf> {
+    let cache_dir = app.path().app_cache_dir().ok()?;
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let n = SAVED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+    let path = cache_dir.join(format!("call-{millis}-{n}.wav"));
+    std::fs::write(&path, wav).ok()?;
+    Some(path)
+}
+
+/// Shared by both the periodic live pings and the final call.
+async fn upload_chunk(token: &str, chunk: &PendingChunk, is_final: bool) -> StopCaptureResult {
     let client = reqwest::Client::new();
     let url = format!("{APP_BASE_URL}/api/local-capture/transcribe?final={}", if is_final { "true" } else { "false" });
     let send_result = client
         .post(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "audio/wav")
-        .body(wav_bytes)
+        .timeout(Duration::from_secs(UPLOAD_TIMEOUT_SECS))
+        .body(chunk.wav.clone())
         .send()
         .await;
 
+    let saved = chunk.saved_at.as_ref().map(|p| format!(" The recording is saved at {}.", p.display())).unwrap_or_default();
     match send_result {
         Ok(res) if res.status().is_success() => {
-            if let Some(path) = &file_path {
+            if let Some(path) = &chunk.saved_at {
                 let _ = std::fs::remove_file(path);
             }
             StopCaptureResult { ok: true, error: None }
@@ -407,13 +514,9 @@ async fn upload_chunk(app: &tauri::AppHandle, token: &str, wav_bytes: Vec<u8>, i
         Ok(res) => {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
-            let saved = file_path.map(|p| format!(" The recording is saved at {}.", p.display())).unwrap_or_default();
             StopCaptureResult { ok: false, error: Some(format!("Upload failed ({status}): {body}.{saved}")) }
         }
-        Err(e) => {
-            let saved = file_path.map(|p| format!(" The recording is saved at {}.", p.display())).unwrap_or_default();
-            StopCaptureResult { ok: false, error: Some(format!("Upload failed: {e}.{saved}")) }
-        }
+        Err(e) => StopCaptureResult { ok: false, error: Some(format!("Upload failed: {e}.{saved}")) },
     }
 }
 
