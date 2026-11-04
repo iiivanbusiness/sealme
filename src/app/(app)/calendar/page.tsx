@@ -2,6 +2,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { isGoogleCalendarConfigured } from "@/lib/google-calendar";
 import { requireWorkspace, requireWorkspaceId } from "@/lib/workspace";
+import { currentUserWithRole } from "@/lib/permissions";
 import { deleteEvent, disconnectGoogleCalendar, syncGoogleCalendarNow } from "./actions";
 import ExternalConnectLink from "@/components/ExternalConnectLink";
 
@@ -26,6 +27,7 @@ const ERROR_MESSAGE: Record<string, string> = {
   google_sync_failed: "Couldn't sync your calendar. Your connection may have expired. Try reconnecting.",
   google_access_denied: "Access was declined on Google's side, so nothing was connected.",
   google_calendar_not_shared: "Google didn't share your calendar, so nothing was connected. Click Connect again and tick \"View events on all your calendars\" on Google's screen.",
+  google_no_permission: "Only someone who manages the workspace can connect or disconnect Google Calendar.",
 };
 
 export default async function CalendarPage({
@@ -35,11 +37,15 @@ export default async function CalendarPage({
 }) {
   const { error, connected, synced } = await searchParams;
   const workspaceId = await requireWorkspaceId();
-  const [workspace, events] = await Promise.all([
+  const [workspace, events, user] = await Promise.all([
     requireWorkspace(),
     prisma.calendarEvent.findMany({ where: { workspaceId }, orderBy: { startTime: "asc" } }),
+    currentUserWithRole(),
   ]);
   const isConnected = Boolean(workspace?.googleRefreshToken);
+  // One Google account feeds the whole workspace, so connecting and
+  // disconnecting are for whoever manages it. Anyone can sync.
+  const canManage = Boolean(user.role?.canManageWorkspace);
   const configured = isGoogleCalendarConfigured();
   const groups = new Map<string, typeof events>();
   for (const event of events) {
@@ -85,7 +91,7 @@ export default async function CalendarPage({
           {isConnected ? (
             <>Connected to Google Calendar{workspace?.googleAccountEmail ? ` (${workspace.googleAccountEmail})` : ""}. Events with a Zoom or Meet link sync automatically.</>
           ) : configured ? (
-            "Not connected. Link your Google Calendar to pull in upcoming calls automatically."
+            canManage ? "Not connected. Link your Google Calendar to pull in upcoming calls automatically." : "Not connected. An admin can link Google Calendar to pull in upcoming calls automatically."
           ) : (
             "Google Calendar integration isn't configured yet (needs GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET)."
           )}
@@ -97,15 +103,17 @@ export default async function CalendarPage({
             <form action={syncGoogleCalendarNow}>
               <button type="submit" className="btn btn-secondary btn-sm">Sync now</button>
             </form>
-            <form action={disconnectGoogleCalendar}>
-              <button type="submit" className="btn btn-secondary btn-sm">Disconnect</button>
-            </form>
+            {canManage && (
+              <form action={disconnectGoogleCalendar}>
+                <button type="submit" className="btn btn-secondary btn-sm">Disconnect</button>
+              </form>
+            )}
           </>
-        ) : (
+        ) : canManage ? (
           <ExternalConnectLink href="/api/google-calendar/connect" className="btn btn-primary btn-sm" style={!configured ? { pointerEvents: "none", opacity: 0.5 } : undefined}>
             Connect Google Calendar
           </ExternalConnectLink>
-        )}
+        ) : null}
       </div>
     </div>
 

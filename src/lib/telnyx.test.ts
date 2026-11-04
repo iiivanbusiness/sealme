@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from "crypto";
-import { describe, expect, it } from "vitest";
-import { verifyTelnyxSignature } from "./telnyx";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { removeVerifiedNumber, verifyTelnyxSignature } from "./telnyx";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 // Mission Control hands out the raw 32-byte key in base64: the last 32
@@ -32,5 +32,26 @@ describe("Telnyx webhook signature", () => {
     expect(verifyTelnyxSignature({ body, signature: null, timestamp: ts, publicKey: rawPublicKey, now: NOW })).toBe(false);
     expect(verifyTelnyxSignature({ body, signature: signed(body), timestamp: null, publicKey: rawPublicKey, now: NOW })).toBe(false);
     expect(verifyTelnyxSignature({ body, signature: signed(body), timestamp: ts, publicKey: "not-a-key", now: NOW })).toBe(false);
+  });
+});
+
+describe("Removing a verified number", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("deletes it from the account", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    await removeVerifiedNumber("+15125550100");
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toBe("https://api.telnyx.com/v2/verified_numbers/%2B15125550100");
+    expect(init.method).toBe("DELETE");
+    expect(init.headers.Authorization).toMatch(/^Bearer /);
+  });
+
+  it("treats a number that's already gone as removed, and throws on anything else", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
+    await expect(removeVerifiedNumber("+15125550100")).resolves.toBeUndefined();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("boom", { status: 500 })));
+    await expect(removeVerifiedNumber("+15125550100")).rejects.toThrow(/500/);
   });
 });

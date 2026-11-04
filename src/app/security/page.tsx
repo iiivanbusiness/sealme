@@ -5,7 +5,7 @@ export const metadata = {
   description: "How SealMe stores, protects and processes your data.",
 };
 
-const LAST_UPDATED = "October 16, 2026";
+const LAST_UPDATED = "November 4, 2026";
 
 export default function SecurityPage() {
   return (
@@ -35,7 +35,7 @@ export default function SecurityPage() {
               <li>All traffic is HTTPS, with HSTS so browsers never fall back to plain HTTP.</li>
               <li>The database is encrypted at rest by Neon.</li>
               <li>
-                On top of that, SealMe encrypts the most sensitive values itself with AES-256-GCM before they reach the database: access tokens for HubSpot, Salesforce, DocuSign, Google and Slack, single sign-on client secrets, two-factor secrets and webhook signing secrets.
+                On top of that, SealMe encrypts the most sensitive values itself with AES-256-GCM before they reach the database: access tokens for HubSpot, Salesforce, GoHighLevel, DocuSign, Google and Slack, single sign-on client secrets, two-factor secrets and webhook signing secrets.
               </li>
               <li>Passwords are stored as scrypt hashes, and API keys and 2FA backup codes only as SHA-256 hashes, so none of them can be read back.</li>
             </ul>
@@ -62,7 +62,7 @@ export default function SecurityPage() {
               <li>API keys belong to one workspace, can be read-only, are rate-limited, and can be revoked one at a time.</li>
               <li>Webhooks are signed with HMAC-SHA256 and only sent to public https addresses; redirects aren&apos;t followed.</li>
               <li>A separate sandbox workspace lets you build an integration without touching real deals or clients.</li>
-              <li>HubSpot, Salesforce, DocuSign, Google Calendar and Slack receive data only after an admin connects them, and only what that integration needs.</li>
+              <li>HubSpot, Salesforce, GoHighLevel, DocuSign, Google Calendar and Slack receive data only after an admin connects them, and only what that integration needs.</li>
             </ul>
             <p>
               Details are in the <Link href="/developers" style={{ color: "var(--accent-blue)" }}>API docs</Link>.
@@ -83,8 +83,7 @@ export default function SecurityPage() {
               <li><strong style={{ color: "var(--ink)" }}>Deepgram</strong>: transcribing recordings.</li>
               <li><strong style={{ color: "var(--ink)" }}>Resend</strong>: sending email, such as contracts to sign.</li>
               <li><strong style={{ color: "var(--ink)" }}>Telnyx</strong>: phone calls placed through SealMe, and their recordings until they&apos;re transcribed.</li>
-              <li><strong style={{ color: "var(--ink)" }}>Recall.ai</strong>: the notetaker that joins Zoom and Google Meet calls when you invite it.</li>
-              <li>Integrations you connect (Google, Slack, HubSpot, Salesforce, DocuSign) act on your instructions.</li>
+              <li>Integrations you connect (Google, Slack, HubSpot, Salesforce, GoHighLevel, DocuSign) act on your instructions.</li>
             </ul>
           </Section>
 

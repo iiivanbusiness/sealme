@@ -117,8 +117,7 @@ export default function TermsPage() {
 
           <Section title="12. Governing Law">
             <p>
-              These Terms are governed by the laws of the jurisdiction in which SealMe is incorporated, without regard to conflict-of-law principles. [Specific
-              jurisdiction to be finalized with counsel.]
+              These Terms are governed by the laws of the jurisdiction in which SealMe is incorporated, without regard to conflict-of-law principles.
             </p>
           </Section>
 

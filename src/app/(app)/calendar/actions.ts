@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { revokeGoogleToken, syncWorkspaceCalendar } from "@/lib/google-calendar";
 import { requireWorkspaceId } from "@/lib/workspace";
+import { requirePermission } from "@/lib/permissions";
 
 export async function createEvent(formData: FormData) {
   const title = String(formData.get("title") ?? "").trim();
@@ -54,8 +55,10 @@ export async function syncGoogleCalendarNow() {
 
 // Disconnecting means we keep nothing from Google: the grant is revoked on
 // Google's side and the events we synced are deleted. Events a rep added by
-// hand stay.
+// hand stay. The connection is the whole workspace's, so only someone who
+// manages the workspace can drop it, same as Slack and the CRMs.
 export async function disconnectGoogleCalendar() {
+  await requirePermission("canManageWorkspace");
   const workspaceId = await requireWorkspaceId();
   const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { googleRefreshToken: true } });
   if (workspace.googleRefreshToken) await revokeGoogleToken(workspace.googleRefreshToken);

@@ -5,7 +5,7 @@ import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { normalizePhone } from "@/lib/phone";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { confirmVerificationCode, isNumberVerified, isTelnyxConfigured, sendVerificationCode } from "@/lib/telnyx";
+import { confirmVerificationCode, isNumberVerified, isTelnyxConfigured, removeVerifiedNumber, sendVerificationCode } from "@/lib/telnyx";
 import { reportError } from "@/lib/error-report";
 
 async function me() {
@@ -36,20 +36,23 @@ export async function saveMyPhoneNumber(raw: string): Promise<{ error?: string; 
   return { phone };
 }
 
-// "Verify by text": Telnyx texts the saved number a code. A number already
-// confirmed there is marked verified straight away.
+// "Verify by text": Telnyx texts the saved number a code. Always a code,
+// even for a number already confirmed at Telnyx: the Telnyx account is
+// SealMe's, shared by every workspace, so that confirmation may have been
+// someone else's. Such a number is taken off the account first, so Telnyx
+// texts a fresh code instead of counting it as already done.
 export async function sendMyPhoneCode(): Promise<{ error?: string; verified?: boolean }> {
   const user = await me();
   if (!user) return { error: "Not signed in" };
   if (!user.phone) return { error: "Save your number first" };
   if (!isTelnyxConfigured()) return { error: "Phone calling isn't set up yet" };
+  // This user already confirmed this number with a code (a new number
+  // clears it). Removing it at Telnyx would only stop their calls until
+  // they type a new code.
+  if (user.phoneVerifiedAt) return { verified: true };
   if (!(await checkRateLimit(`phone-code:${user.id}`, 5, 60 * 60 * 1000))) return { error: "Too many codes sent. Try again in an hour" };
   try {
-    if (await isNumberVerified(user.phone)) {
-      await prisma.user.update({ where: { id: user.id }, data: { phoneVerifiedAt: new Date() } });
-      revalidatePath("/settings");
-      return { verified: true };
-    }
+    if (await isNumberVerified(user.phone)) await removeVerifiedNumber(user.phone);
     await sendVerificationCode(user.phone);
     return {};
   } catch (err) {

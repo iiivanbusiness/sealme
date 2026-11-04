@@ -90,17 +90,21 @@ export async function startLeadCall(leadId: string, input: { mode?: string; temp
   return { kind: "sealme", dial: number, leadPhone: lead.phone, announce, state: consent.state };
 }
 
-// "Cancel" while SealMe is still ringing: both legs are ended.
+// "Cancel" while SealMe is still ringing: both legs are ended. The call is
+// marked cancelled before the hangups, so the hangup events that follow
+// don't record it as the client not picking up.
 export async function cancelLeadCall(callId: string): Promise<void> {
   const workspace = await requireProspecting();
   const access = await leadAccess();
-  const call = await prisma.phoneCall.findFirst({
+  const { count } = await prisma.phoneCall.updateMany({
     where: { id: callId, workspaceId: workspace.id, userId: access.userId, status: "dialing" },
-    select: { id: true, telnyxCallControlId: true, telnyxClientLegId: true },
+    data: { status: "skipped", extracted: { skipped: "cancelled" }, processedAt: new Date() },
   });
-  if (!call) return;
-  for (const leg of [call.telnyxClientLegId, call.telnyxCallControlId]) {
+  // Already past ringing (picked up, or ended on its own).
+  if (count === 0) return;
+  // Read after the change, so a client leg dialed a moment ago is ended too.
+  const call = await prisma.phoneCall.findUnique({ where: { id: callId }, select: { telnyxCallControlId: true, telnyxClientLegId: true } });
+  for (const leg of [call?.telnyxClientLegId, call?.telnyxCallControlId]) {
     if (leg) await callAction(leg, "hangup", { command_id: `cancel-${leg}` }).catch(() => {});
   }
-  await prisma.phoneCall.updateMany({ where: { id: call.id, status: "dialing" }, data: { status: "skipped", extracted: { skipped: "cancelled" }, processedAt: new Date() } });
 }

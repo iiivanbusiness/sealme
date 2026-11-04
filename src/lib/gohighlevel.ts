@@ -93,9 +93,9 @@ export async function createGhlOpportunity(
 }
 
 // The note a call leaves on the contact: what it was, the write-up, and
-// what happens next.
-export function ghlCallNote(call: { title: string; startedAt: Date; summary: string | null; notes: string | null; nextStep: string | null }): string {
-  const day = call.startedAt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+// what happens next. The date is the rep's day (timeZone), UTC if unknown.
+export function ghlCallNote(call: { title: string; startedAt: Date; timeZone?: string; summary: string | null; notes: string | null; nextStep: string | null }): string {
+  const day = call.startedAt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: call.timeZone ?? "UTC" });
   return [
     `${call.title} (${day})`,
     call.summary,

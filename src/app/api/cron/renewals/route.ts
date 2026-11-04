@@ -45,13 +45,21 @@ export async function GET(req: Request) {
         status: "signed",
         renewalDate: { gte: now, lte: windowEnd },
         renewalReminderSentAt: null,
+        deal: { trashedAt: null },
       },
-      include: { deal: { include: { client: true, workspace: { include: { users: true } } } }, template: true },
+      // Active users only: deactivatedAt also covers self-deleted accounts,
+      // whose placeholder address would just bounce.
+      include: { deal: { include: { client: true, workspace: { include: { users: { where: { deactivatedAt: null }, include: { role: true } } } } } }, template: true },
     });
 
     let sent = 0;
     for (const contract of dueContracts) {
-      const recipients = contract.deal.workspace.users.map((u) => u.email);
+      // Same people who can open the deal (see dealVisibilityFilter): its
+      // owner, anyone who sees every deal, and everyone for an ownerless deal.
+      const { ownerId } = contract.deal;
+      const recipients = contract.deal.workspace.users
+        .filter((u) => !ownerId || u.id === ownerId || u.role?.canViewAllDeals)
+        .map((u) => u.email);
       if (recipients.length === 0 || !contract.renewalDate) continue;
       try {
         await sendRenewalReminderEmail({

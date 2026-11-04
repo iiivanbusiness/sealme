@@ -160,13 +160,21 @@ export async function confirmVerificationCode(phone: string, code: string): Prom
   throw new Error(`Telnyx verify failed: ${res.status} ${await res.text()}`);
 }
 
-// Already confirmed at Telnyx (say, before this SealMe account existed).
+// Already confirmed on SealMe's Telnyx account, by whoever held the number
+// before.
 export async function isNumberVerified(phone: string): Promise<boolean> {
   const res = await fetch(`${API}/verified_numbers/${encodeURIComponent(phone)}`, { headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}` } });
   if (res.status === 404) return false;
   if (!res.ok) throw new Error(`Telnyx verified number lookup failed: ${res.status} ${await res.text()}`);
   const { data } = (await res.json()) as { data?: { verified_at?: string | null } };
   return Boolean(data?.verified_at);
+}
+
+// Takes a number off the account's verified list, so it needs a fresh code
+// before it's caller ID again. One that's already gone counts as removed.
+export async function removeVerifiedNumber(phone: string): Promise<void> {
+  const res = await fetch(`${API}/verified_numbers/${encodeURIComponent(phone)}`, { method: "DELETE", headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}` } });
+  if (!res.ok && res.status !== 404) throw new Error(`Telnyx verified number delete failed: ${res.status} ${await res.text()}`);
 }
 
 type DetailRecord = { cost?: string | null; telnyx_session_id?: string | null };

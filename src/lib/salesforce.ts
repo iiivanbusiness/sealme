@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { parseFee } from "@/lib/money";
+import { reportError } from "@/lib/error-report";
 import { generatePkce } from "@/lib/sso";
 import { encode as encodeJwt, decode as decodeJwt } from "next-auth/jwt";
 
@@ -280,10 +281,7 @@ async function upsertOpportunity(
   // Best-effort — an Opportunity synced without its Contact role linked is
   // still useful, so a failure here shouldn't undo the upserts above.
   try {
-    await sfFetch(workspaceId, `/services/data/${API_VERSION}/sobjects/OpportunityContactRole`, {
-      method: "POST",
-      body: JSON.stringify({ OpportunityId: opportunityId, ContactId: contactId, IsPrimary: true }),
-    });
+    await linkContactRole(workspaceId, opportunityId, contactId);
   } catch (err) {
     console.error(`Salesforce OpportunityContactRole link failed for opportunity ${opportunityId}`, err);
   }
@@ -291,10 +289,27 @@ async function upsertOpportunity(
   return opportunityId;
 }
 
+// Salesforce happily stores the same contact on an Opportunity twice, and
+// every push (deal.created, contract.sent, contract.signed) gets here, so
+// the role is only added when it isn't there yet.
+async function linkContactRole(workspaceId: string, opportunityId: string, contactId: string): Promise<void> {
+  if (![opportunityId, contactId].every((id) => /^[a-zA-Z0-9]{15,18}$/.test(id))) throw new Error("Not a Salesforce id");
+  const soql = `SELECT Id FROM OpportunityContactRole WHERE OpportunityId = '${opportunityId}' AND ContactId = '${contactId}' LIMIT 1`;
+  const found = await sfFetch(workspaceId, `/services/data/${API_VERSION}/query?q=${encodeURIComponent(soql)}`);
+  if (!found.ok) throw new Error(`Salesforce OpportunityContactRole lookup failed: ${found.status} ${await found.text()}`);
+  if (((await found.json()) as { totalSize?: number }).totalSize) return;
+
+  const res = await sfFetch(workspaceId, `/services/data/${API_VERSION}/sobjects/OpportunityContactRole`, {
+    method: "POST",
+    body: JSON.stringify({ OpportunityId: opportunityId, ContactId: contactId, IsPrimary: true }),
+  });
+  if (!res.ok) throw new Error(`Salesforce OpportunityContactRole creation failed: ${res.status} ${await res.text()}`);
+}
+
 // Pushes one deal (and its client, as a Contact) to Salesforce — called
 // alongside syncDealToHubspot/dispatchWebhookEvent/notifySlack at the same
 // event sites (deal.created, contract.sent, contract.signed). Never throws
-// into the caller; failures are logged only, same contract as HubSpot's.
+// into the caller; a failure is reported, same contract as HubSpot's.
 export async function syncDealToSalesforce(workspaceId: string, dealId: string): Promise<void> {
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   if (!workspace || !workspace.salesforceEnabled || !workspace.salesforceAccessToken) return;
@@ -307,6 +322,7 @@ export async function syncDealToSalesforce(workspaceId: string, dealId: string):
     await upsertOpportunity(workspaceId, deal, contactId);
   } catch (err) {
     console.error(`Salesforce sync failed for deal ${dealId}`, err);
+    await reportError(err, "Salesforce deal sync", { workspaceId, dealId });
   }
 }
 

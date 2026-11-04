@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { exchangeCodeForTokens, getUserEmail, hasCalendarScope, revokeGoogleToken } from "@/lib/google-calendar";
 import { requireWorkspaceId } from "@/lib/workspace";
+import { requirePermission } from "@/lib/permissions";
 import { isValidOAuthState } from "@/lib/oauth-state";
 
 export async function GET(req: Request) {
@@ -14,6 +15,13 @@ export async function GET(req: Request) {
   }
   if (!code) {
     return NextResponse.redirect(new URL("/calendar?error=google_no_code", req.url));
+  }
+  // Checked again here, before the code is traded for tokens, since the
+  // callback can be reached without going through Connect.
+  try {
+    await requirePermission("canManageWorkspace");
+  } catch {
+    return NextResponse.redirect(new URL("/calendar?error=google_no_permission", req.url));
   }
 
   try {

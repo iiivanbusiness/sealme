@@ -113,6 +113,9 @@ function extractMeetingUrl(event: GoogleEvent): string | null {
   return match ? match[0] : null;
 }
 
+// How many upcoming events one sync reads.
+const MAX_EVENTS = 25;
+
 // Syncs the workspace's connected Google Calendar into CalendarEvent rows.
 // Refreshes the access token first if it's missing/expired.
 export async function syncWorkspaceCalendar(workspaceId: string): Promise<number> {
@@ -130,9 +133,10 @@ export async function syncWorkspaceCalendar(workspaceId: string): Promise<number
     });
   }
 
+  const now = new Date();
   const params = new URLSearchParams({
-    timeMin: new Date().toISOString(),
-    maxResults: "25",
+    timeMin: now.toISOString(),
+    maxResults: String(MAX_EVENTS),
     singleEvents: "true",
     orderBy: "startTime",
   });
@@ -140,12 +144,13 @@ export async function syncWorkspaceCalendar(workspaceId: string): Promise<number
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) throw new Error(`Google Calendar fetch failed: ${res.status} ${await res.text()}`);
-  const data = (await res.json()) as { items?: GoogleEvent[] };
+  const data = (await res.json()) as { items?: GoogleEvent[]; nextPageToken?: string };
+  const items = data.items ?? [];
 
   const ownDomain = workspace.googleAccountEmail?.split("@")[1]?.toLowerCase();
 
   let synced = 0;
-  for (const event of data.items ?? []) {
+  for (const event of items) {
     const start = event.start?.dateTime ?? event.start?.date;
     if (!start || !event.id) continue;
     const startTime = new Date(start);
@@ -153,30 +158,46 @@ export async function syncWorkspaceCalendar(workspaceId: string): Promise<number
     const durationMinutes = end ? Math.max(5, Math.round((new Date(end).getTime() - startTime.getTime()) / 60000)) : 30;
     const clientName =
       event.attendees?.find((a) => a.email && (!ownDomain || !a.email.toLowerCase().endsWith(`@${ownDomain}`)))?.displayName ?? null;
-    const meetingUrl = extractMeetingUrl(event);
+    const fields = {
+      title: event.summary ?? "Untitled event",
+      clientName,
+      startTime,
+      durationMinutes,
+      platform: detectPlatform(event),
+      meetingUrl: extractMeetingUrl(event),
+    };
 
-    await prisma.calendarEvent.upsert({
-      where: { googleEventId: event.id },
-      create: {
-        workspaceId,
-        googleEventId: event.id,
-        title: event.summary ?? "Untitled event",
-        clientName,
-        startTime,
-        durationMinutes,
-        platform: detectPlatform(event),
-        meetingUrl,
-      },
-      update: {
-        title: event.summary ?? "Untitled event",
-        clientName,
-        startTime,
-        durationMinutes,
-        platform: detectPlatform(event),
-        meetingUrl,
-      },
-    });
+    // googleEventId is unique across every workspace, and Google gives each
+    // attendee's copy of a meeting the same id, so a row another workspace
+    // already has is left alone rather than overwritten with this one's data.
+    const existing = await prisma.calendarEvent.findUnique({ where: { googleEventId: event.id }, select: { id: true, workspaceId: true } });
+    if (existing && existing.workspaceId !== workspaceId) continue;
+    if (existing) {
+      await prisma.calendarEvent.update({ where: { id: existing.id }, data: fields });
+    } else {
+      try {
+        await prisma.calendarEvent.create({ data: { workspaceId, googleEventId: event.id, ...fields } });
+      } catch (err) {
+        // Another sync made it a moment ago.
+        if ((err as { code?: string }).code === "P2002") continue;
+        throw err;
+      }
+    }
     synced++;
   }
+
+  // A cancelled or deleted event just stops coming back, so an upcoming one
+  // missing from this answer is gone from Google. When the answer was cut
+  // off at MAX_EVENTS, only the stretch it covers can be judged.
+  const truncated = Boolean(data.nextPageToken) || items.length >= MAX_EVENTS;
+  const lastStart = items.at(-1)?.start;
+  const coveredUntil = truncated ? new Date(lastStart?.dateTime ?? lastStart?.date ?? now) : null;
+  await prisma.calendarEvent.deleteMany({
+    where: {
+      workspaceId,
+      googleEventId: { not: null, notIn: items.map((e) => e.id).filter(Boolean) },
+      startTime: { gte: now, ...(coveredUntil ? { lt: coveredUntil } : {}) },
+    },
+  });
   return synced;
 }

@@ -3,6 +3,7 @@ import { CALL_OUTCOME_LABEL, UNREACHED_OUTCOMES } from "@/lib/call-outcomes";
 import { salesforceGet, salesforceRequest, SALESFORCE_API_VERSION } from "@/lib/salesforce";
 import { reportError } from "@/lib/error-report";
 import { NEW_LEAD_NAME } from "@/lib/cold-call";
+import { isValidTimeZone } from "@/lib/tasks";
 import { addGhlNote, addGhlTask, createGhlOpportunity, ghlCallNote, upsertGhlContact } from "@/lib/gohighlevel";
 
 const HUBSPOT_API = "https://api.hubapi.com";
@@ -37,6 +38,12 @@ export function salesforceLeadStatusFor(outcome: string, available: string[]): s
 // Statuses a call shouldn't overwrite: converted or closed leads.
 const SALESFORCE_SETTLED = /converted|closed|qualified/i;
 
+// The day the call happened on the rep's own clock, as YYYY-MM-DD: an
+// evening call in California is already the next day in UTC.
+export function callDay(startedAt: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(startedAt);
+}
+
 function callTitle(call: { mode: string; outcome: string | null }): string {
   if (call.mode === "sales") return "SealMe sales call";
   return `SealMe call: ${CALL_OUTCOME_LABEL[call.outcome ?? ""] ?? "Call"}`;
@@ -55,6 +62,7 @@ type CallForCrm = {
   summary: string | null;
   durationSec: number | null;
   startedAt: Date;
+  timeZone: string;
   hubspotCallId: string | null;
   salesforceTaskId: string | null;
 };
@@ -97,7 +105,7 @@ async function logToSalesforce(workspaceId: string, recordId: string, recordType
     Subject: callTitle(call),
     Description: call.summary ?? "",
     Status: "Completed",
-    ActivityDate: call.startedAt.toISOString().slice(0, 10),
+    ActivityDate: callDay(call.startedAt, call.timeZone),
   };
   // The call-specific fields make it show up as a logged call; an org that
   // trimmed the Task picklists still gets a plain completed task.
@@ -160,7 +168,7 @@ async function logToGohighlevel(workspace: GhlWorkspace, lead: GhlLead, call: Ca
   const noteId = await addGhlNote(
     token,
     contactId,
-    ghlCallNote({ title: callTitle(call), startedAt: call.startedAt, summary: call.summary, notes: call.notes, nextStep: next ? [nextTitle, next.note].filter(Boolean).join(": ") : null }),
+    ghlCallNote({ title: callTitle(call), startedAt: call.startedAt, timeZone: call.timeZone, summary: call.summary, notes: call.notes, nextStep: next ? [nextTitle, next.note].filter(Boolean).join(": ") : null }),
   );
   // Midday UTC of the due day, so it lands on the same date in any timezone.
   if (next && nextTitle) await addGhlTask(token, contactId, { title: nextTitle, body: next.note, dueDate: new Date(next.dueDate.getTime() + 12 * 60 * 60 * 1000) });
@@ -200,6 +208,7 @@ export async function pushCallToCrm(callId: string): Promise<void> {
       hubspotCallId: true,
       salesforceTaskId: true,
       ghlNoteId: true,
+      user: { select: { timezone: true } },
       lead: {
         select: {
           id: true,
@@ -234,10 +243,13 @@ export async function pushCallToCrm(callId: string): Promise<void> {
   // which logs it to their CRM already.
   if (!call || call.status !== "processed" || !call.lead || call.source === "api") return;
   const { lead, workspace } = call;
+  // Dates in the CRM fall on the rep's day, not UTC's.
+  const tz = call.user?.timezone;
+  const crmCall = { ...call, timeZone: tz && isValidTimeZone(tz) ? tz : "UTC" };
 
   if (lead.hubspotContactId && workspace.hubspotEnabled && workspace.hubspotAccessToken && !call.hubspotCallId) {
     try {
-      const hubspotCallId = await logToHubspot(workspace.hubspotAccessToken, lead.hubspotContactId, call);
+      const hubspotCallId = await logToHubspot(workspace.hubspotAccessToken, lead.hubspotContactId, crmCall);
       await prisma.phoneCall.update({ where: { id: call.id }, data: { hubspotCallId } });
     } catch (err) {
       await reportError(err, "Logging a call to HubSpot", { workspaceId: workspace.id, callId });
@@ -251,7 +263,7 @@ export async function pushCallToCrm(callId: string): Promise<void> {
       const ghlNoteId = await logToGohighlevel(
         { ghlLocationId: workspace.ghlLocationId, ghlAccessToken: workspace.ghlAccessToken, ghlPipelineId: workspace.ghlPipelineId, ghlStageId: workspace.ghlStageId },
         lead,
-        call,
+        crmCall,
       );
       await prisma.phoneCall.update({ where: { id: call.id }, data: { ghlNoteId } });
     } catch (err) {
@@ -261,7 +273,7 @@ export async function pushCallToCrm(callId: string): Promise<void> {
 
   if (lead.salesforceRecordId && workspace.salesforceEnabled && workspace.salesforceRefreshToken && !call.salesforceTaskId) {
     try {
-      const salesforceTaskId = await logToSalesforce(workspace.id, lead.salesforceRecordId, lead.salesforceRecordType, call);
+      const salesforceTaskId = await logToSalesforce(workspace.id, lead.salesforceRecordId, lead.salesforceRecordType, crmCall);
       await prisma.phoneCall.update({ where: { id: call.id }, data: { salesforceTaskId } });
     } catch (err) {
       await reportError(err, "Logging a call to Salesforce", { workspaceId: workspace.id, callId });

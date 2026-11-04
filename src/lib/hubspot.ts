@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { parseFee } from "@/lib/money";
+import { reportError } from "@/lib/error-report";
 
 // A per-workspace HubSpot Private App token, pasted in Settings — not
 // OAuth. HubSpot disabled creating new "public" OAuth apps outside their
@@ -107,7 +108,7 @@ async function upsertDeal(
 // Pushes one deal (and its client, as a Contact) to HubSpot — called
 // alongside dispatchWebhookEvent/notifySlack at the same event sites
 // (deal.created, contract.sent, contract.signed). Never throws into the
-// caller; failures are logged only, same contract as the other two.
+// caller; a failure is reported, same contract as Salesforce's.
 export async function syncDealToHubspot(workspaceId: string, dealId: string): Promise<void> {
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   if (!workspace || !workspace.hubspotEnabled || !workspace.hubspotAccessToken) return;
@@ -120,5 +121,6 @@ export async function syncDealToHubspot(workspaceId: string, dealId: string): Pr
     await upsertDeal(workspace.hubspotAccessToken, deal, contactId);
   } catch (err) {
     console.error(`HubSpot sync failed for deal ${dealId}`, err);
+    await reportError(err, "HubSpot deal sync", { workspaceId, dealId });
   }
 }

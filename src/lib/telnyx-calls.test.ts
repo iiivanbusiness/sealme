@@ -1,17 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { db, telnyx } = vi.hoisted(() => ({
+const { db, telnyx, webhooks } = vi.hoisted(() => ({
   db: {
     user: { findFirst: vi.fn() },
     callIntent: { findFirst: vi.fn(), update: vi.fn() },
-    phoneCall: { create: vi.fn(), update: vi.fn(), findUnique: vi.fn() },
+    phoneCall: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), findUnique: vi.fn() },
   },
   telnyx: { callAction: vi.fn(), deleteRecording: vi.fn(), findRecordingId: vi.fn(), dial: vi.fn() },
+  webhooks: { dispatchCallCompleted: vi.fn() },
 }));
 vi.mock("@/lib/db", () => ({ prisma: db }));
 vi.mock("@/lib/error-report", () => ({ reportError: async () => {} }));
 vi.mock("@/lib/call-inbox", () => ({ MIN_PROCESS_SECONDS: 30 }));
 vi.mock("@/lib/telnyx", async (original) => ({ ...(await original<typeof import("./telnyx")>()), ...telnyx }));
+vi.mock("@/lib/webhook-events", () => webhooks);
 
 import { handleTelnyxEvent } from "./telnyx-calls";
 import { decodeClientState, encodeClientState } from "./telnyx";
@@ -28,6 +30,7 @@ describe("Calls to the SealMe number", () => {
     vi.resetAllMocks();
     telnyx.callAction.mockResolvedValue({ data: { result: "ok" } });
     db.phoneCall.create.mockResolvedValue({ id: "call1" });
+    db.phoneCall.updateMany.mockResolvedValue({ count: 1 });
     telnyx.deleteRecording.mockResolvedValue(undefined);
   });
 
@@ -165,7 +168,7 @@ describe("Calls to the SealMe number", () => {
   });
 
   describe("when SealMe places the call", () => {
-    const dialing = { id: "call9", status: "dialing", fromNumber: "+15125550100", toNumber: "+15125550188", telnyxCallControlId: "rep-leg", telnyxClientLegId: null, endedAt: null };
+    const dialing = { id: "call9", workspaceId: "w1", status: "dialing", fromNumber: "+15125550100", toNumber: "+15125550188", telnyxCallControlId: "rep-leg", telnyxClientLegId: null, endedAt: null };
 
     it("dials the client from the rep's number once the rep picks up, ringing back to the rep", async () => {
       db.phoneCall.findUnique.mockResolvedValue(dialing);
@@ -214,14 +217,42 @@ describe("Calls to the SealMe number", () => {
       const [leg, action, body] = lastAction();
       expect([leg, action]).toEqual(["rep-leg", "speak"]);
       expect(body.payload).toMatch(/didn't pick up/);
-      expect(db.phoneCall.update.mock.calls[0][0].data).toMatchObject({ status: "skipped", outcome: "no_answer", extracted: { skipped: "no_pickup" } });
+      expect(db.phoneCall.updateMany.mock.calls[0][0]).toMatchObject({ where: { id: "call9", status: "dialing" }, data: { status: "skipped", outcome: "no_answer", extracted: { skipped: "no_pickup" } } });
+      expect(webhooks.dispatchCallCompleted).toHaveBeenCalledWith("w1", "call9");
+    });
+
+    it("leaves a call the rep cancelled while the client rang as cancelled", async () => {
+      // Read as "dialing", but Cancel marked it before the write.
+      db.phoneCall.findUnique.mockResolvedValue({ ...dialing, telnyxClientLegId: "client-leg" });
+      db.phoneCall.updateMany.mockResolvedValueOnce({ count: 0 });
+      await handleTelnyxEvent(event("call.hangup", { call_control_id: "client-leg", client_state: encodeClientState({ k: "client", c: "call9" }), hangup_cause: "normal_clearing" }));
+      expect(telnyx.callAction).not.toHaveBeenCalled();
+      expect(webhooks.dispatchCallCompleted).not.toHaveBeenCalled();
+      expect(db.phoneCall.update).not.toHaveBeenCalled();
+      expect(db.phoneCall.updateMany.mock.calls[1][0]).toEqual({ where: { id: "call9", endedAt: null }, data: { endedAt: expect.any(Date) } });
+    });
+
+    it("ends the client's leg when the call was cancelled while it was being dialed", async () => {
+      db.phoneCall.findUnique.mockResolvedValueOnce(dialing).mockResolvedValueOnce({ status: "skipped" });
+      telnyx.dial.mockResolvedValue("client-leg");
+      await handleTelnyxEvent(event("call.answered", { call_control_id: "rep-leg", client_state: encodeClientState({ k: "rep", c: "call9" }) }));
+      expect(db.phoneCall.update).toHaveBeenCalledWith({ where: { id: "call9" }, data: { telnyxClientLegId: "client-leg" } });
+      expect(telnyx.callAction.mock.calls.map((c) => [c[0], c[1]])).toEqual([["client-leg", "hangup"]]);
+    });
+
+    it("still joins the rep when the client picked up before the leg was saved", async () => {
+      db.phoneCall.findUnique.mockResolvedValueOnce(dialing).mockResolvedValueOnce({ status: "recording" });
+      telnyx.dial.mockResolvedValue("client-leg");
+      await handleTelnyxEvent(event("call.answered", { call_control_id: "rep-leg", client_state: encodeClientState({ k: "rep", c: "call9" }) }));
+      expect(telnyx.callAction.mock.calls.map((c) => [c[0], c[1]])).toEqual([["rep-leg", "bridge"]]);
     });
 
     it("sets the call aside when the rep doesn't answer SealMe", async () => {
       db.phoneCall.findUnique.mockResolvedValue(dialing);
       await handleTelnyxEvent(event("call.hangup", { call_control_id: "rep-leg", client_state: encodeClientState({ k: "rep", c: "call9" }), hangup_cause: "timeout" }));
       expect(telnyx.callAction).not.toHaveBeenCalled();
-      expect(db.phoneCall.update.mock.calls[0][0].data).toMatchObject({ status: "skipped", extracted: { skipped: "rep_missed" } });
+      expect(db.phoneCall.updateMany.mock.calls[0][0]).toMatchObject({ where: { id: "call9", status: "dialing" }, data: { status: "skipped", extracted: { skipped: "rep_missed" } } });
+      expect(webhooks.dispatchCallCompleted).not.toHaveBeenCalled();
     });
   });
 });

@@ -73,4 +73,9 @@ describe("What a call looks like in GoHighLevel", () => {
       "SealMe call: Meeting booked (Oct 26, 2026)\n\nLaura wants a demo for 25 reps.\n\n- Budget around $30,000 a year\n\nNext step: Sales call with Laura Chen: demo with IT\n\nWritten up by SealMe",
     );
   });
+
+  it("dates the note on the rep's day", () => {
+    const note = ghlCallNote({ title: "SealMe sales call", startedAt: new Date("2026-11-06T02:30:00Z"), timeZone: "America/Los_Angeles", summary: null, notes: null, nextStep: null });
+    expect(note).toBe("SealMe sales call (Nov 5, 2026)\n\nWritten up by SealMe");
+  });
 });

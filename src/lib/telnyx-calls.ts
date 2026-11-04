@@ -195,6 +195,14 @@ async function repAnswered(repLeg: string, state: CallState): Promise<void> {
     commandId: `client-${call.id}`,
   });
   await prisma.phoneCall.update({ where: { id: call.id }, data: { telnyxClientLegId: clientLeg } });
+  // Cancel (or the rep hanging up) may have landed while the client was
+  // being dialed, before this leg was saved for it to end: end it here.
+  // "recording" means the client already picked up, so the rep still joins.
+  const latest = await prisma.phoneCall.findUnique({ where: { id: call.id }, select: { status: true } });
+  if (latest?.status !== "dialing" && latest?.status !== "recording") {
+    await callAction(clientLeg, "hangup", { command_id: `hangup-client-${call.id}` }).catch(() => {});
+    return;
+  }
   if (state.a) await callAction(repLeg, "speak", { ...VOICE, payload: SAY.holding, command_id: `holding-${call.id}` });
   else await callAction(repLeg, "bridge", { call_control_id: clientLeg, play_ringtone: true, command_id: `bridge-${call.id}` });
 }
@@ -231,7 +239,9 @@ async function startRecordingClientLeg(clientLeg: string, callId: string): Promi
 
 // A leg ended before the two were talking: the rep didn't pick up, the
 // client didn't, or the rep gave up. The other leg is ended too, and the
-// call is set aside with the reason.
+// call is set aside with the reason. Each write only lands while the call
+// is still "dialing": Cancel can mark it cancelled between the read and the
+// write, and that must not turn into "they didn't pick up".
 async function outboundLegEnded(leg: string, state: CallState, cause: string | null): Promise<void> {
   const call = await prisma.phoneCall.findUnique({ where: { id: state.c! } });
   if (!call) return;
@@ -241,18 +251,35 @@ async function outboundLegEnded(leg: string, state: CallState, cause: string | n
   }
   const now = new Date();
   if (state.k === "client") {
+    const { count } = await prisma.phoneCall.updateMany({
+      where: { id: call.id, status: "dialing" },
+      data: { status: "skipped", outcome: "no_answer", extracted: { skipped: "no_pickup" }, endedAt: now, processedAt: now },
+    });
+    if (count === 0) {
+      await endedMeanwhile(call.id, now);
+      return;
+    }
     // The rep is still on: tell them, then hang up.
     if (call.telnyxCallControlId) {
       await callAction(call.telnyxCallControlId, "speak", { ...VOICE, payload: SAY.nopickup, client_state: encodeClientState({ k: "bye", m: "nopickup", c: call.id }), command_id: `nopickup-${call.id}` }).catch(() => {});
     }
-    await prisma.phoneCall.update({ where: { id: call.id }, data: { status: "skipped", outcome: "no_answer", extracted: { skipped: "no_pickup" }, endedAt: now, processedAt: now } });
     await dispatchCallCompleted(call.workspaceId, call.id);
     return;
   }
   // The rep's leg ended: stop ringing the client if it got that far.
   if (call.telnyxClientLegId) await callAction(call.telnyxClientLegId, "hangup", { command_id: `hangup-client-${call.id}` }).catch(() => {});
   const missed = cause === "timeout" || cause === "no_answer" || cause === "user_busy" || cause === "call_rejected";
-  await prisma.phoneCall.update({ where: { id: call.id }, data: { status: "skipped", extracted: { skipped: missed && !call.telnyxClientLegId ? "rep_missed" : "cancelled" }, endedAt: now, processedAt: now } });
+  const { count } = await prisma.phoneCall.updateMany({
+    where: { id: call.id, status: "dialing" },
+    data: { status: "skipped", extracted: { skipped: missed && !call.telnyxClientLegId ? "rep_missed" : "cancelled" }, endedAt: now, processedAt: now },
+  });
+  if (count === 0) await endedMeanwhile(call.id, now);
+}
+
+// The call left "dialing" while a hangup was being handled (cancelled, or
+// picked up): keep whatever it became, just note when it ended.
+async function endedMeanwhile(callId: string, now: Date): Promise<void> {
+  await prisma.phoneCall.updateMany({ where: { id: callId, endedAt: null }, data: { endedAt: now } });
 }
 
 async function findCall(callControlId: string, state: CallState | null) {
