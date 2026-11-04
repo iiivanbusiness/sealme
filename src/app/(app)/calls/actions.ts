@@ -12,6 +12,10 @@ import { NEW_LEAD_NAME } from "@/lib/cold-call";
 
 const MAX_CHARS = 100_000;
 
+// Where the Notes page's calls come from: a recording or a pasted transcript
+// someone sent in on purpose, or a meeting recorded in the iPhone app.
+const NOTES_SOURCES = new Set(["upload", "paste", "app"]);
+
 // Whose calls someone may act on: their own, or everyone's for people who
 // see all deals or run the team.
 async function callScope() {
@@ -72,6 +76,14 @@ export async function processCall(callId: string, input: { leadId: string; mode?
     templateId = template.id;
   }
 
+  // "Process again" on notes that couldn't be written up: written up
+  // whatever its length or voices, the way the Notes page sends it in the
+  // first place (see saveNotesCall), so one voice in the room doesn't get it
+  // set aside this time round. A phone or dialer call still gets the
+  // voicemail check its first pass had.
+  const before = await prisma.phoneCall.findFirst({ where: { ...callWhere, id: callId }, select: { status: true, mode: true, source: true } });
+  const force = input.force || (mode === "notes" && before?.mode === "notes" && before.status === "failed" && NOTES_SOURCES.has(before.source));
+
   const allowed = input.force ? ["pending", "failed", "skipped"] : ["pending", "failed"];
   const { count } = await prisma.phoneCall.updateMany({
     where: { ...callWhere, id: callId, status: { in: allowed } },
@@ -80,7 +92,7 @@ export async function processCall(callId: string, input: { leadId: string; mode?
   if (count === 0) throw new Error("That call was already handled");
 
   const timeZone = await cookieTimeZone();
-  after(() => runCallProcessing(callId, timeZone, { force: input.force }));
+  after(() => runCallProcessing(callId, timeZone, { force }));
   revalidatePath("/calls");
 }
 

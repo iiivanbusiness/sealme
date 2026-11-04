@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { after } from "next/server";
+import { revalidatePath } from "next/cache";
 import crypto from "crypto";
 import { prisma } from "@/lib/db";
 import { requireWorkspace } from "@/lib/workspace";
@@ -16,7 +17,8 @@ import { extractPlaceholderKeys } from "@/lib/contract";
 import { buildDealFieldRows, fieldMeta } from "@/lib/extract-deal";
 import { requireProspecting } from "@/lib/prospecting";
 import { leadAccess } from "@/lib/lead-visibility";
-import { runCallProcessing } from "@/lib/call-inbox";
+import { dealVisibilityFilter } from "@/lib/deal-visibility";
+import { PENDING_TTL_MS, runCallProcessing } from "@/lib/call-inbox";
 import { NEW_LEAD_NAME } from "@/lib/cold-call";
 import { cookieTimeZone } from "@/lib/viewer-time";
 
@@ -150,6 +152,14 @@ async function saveNotesCall(formData: FormData): Promise<void> {
 
   const workspace = await requireProspecting();
   const access = await leadAccess();
+  // The app sends a meeting again when the answer to its first save got lost
+  // (a weak signal). If that save went through, the same transcript from the
+  // same person is already being written up.
+  if (fromApp) {
+    const since = new Date(Date.now() - PENDING_TTL_MS);
+    const already = await prisma.phoneCall.findFirst({ where: { workspaceId: workspace.id, userId: access.userId, source: "app", transcript, startedAt: { gte: since } }, select: { id: true } });
+    if (already) return;
+  }
   const lead =
     leadId === "new"
       ? await prisma.lead.create({ data: { workspaceId: workspace.id, ownerId: access.userId, name: NEW_LEAD_NAME, source: "call" }, select: { id: true } })
@@ -171,10 +181,12 @@ async function saveNotesCall(formData: FormData): Promise<void> {
     select: { id: true },
   });
   const timeZone = await cookieTimeZone();
-  // A meeting recorded in the app was recorded on purpose, and one phone in a
-  // room often hears everyone as one voice: write it up anyway. (The app
+  // Notes are asked for on purpose, so nothing is set aside as a voicemail:
+  // one phone or laptop in a room often hears everyone as one voice, and a
+  // pasted transcript has no length to tell a voicemail by. Notes has no
+  // Process anyway either, so a set-aside call would just vanish. (The app
   // doesn't send recordings under MIN_PROCESS_SECONDS.)
-  after(() => runCallProcessing(call.id, timeZone, { force: fromApp }));
+  after(() => runCallProcessing(call.id, timeZone, { force: true }));
 }
 
 // Desktop-app-only: starts a deal backed by a locally-recorded call instead
@@ -242,19 +254,24 @@ export async function startLocalCapture(formData: FormData): Promise<{ dealId: s
   return { dealId: deal.id, token: rawToken };
 }
 
+// The same hash the upload route looks a token up by.
+function hashCaptureToken(rawToken: string): string {
+  return crypto.createHash("sha256").update(rawToken).digest("hex");
+}
+
 // Shared by startLocalCapture (brand-new deal) and continueLocalCapture (a
 // follow-up call on an existing deal) — one Call, one token, always.
 async function mintLocalCaptureToken(workspaceId: string, dealId: string, callId: string): Promise<string> {
   const rawToken = crypto.randomBytes(32).toString("hex");
-  const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const tokenHash = hashCaptureToken(rawToken);
   await prisma.localCaptureToken.create({
     data: {
       workspaceId,
       dealId,
       callId,
       tokenHash,
-      // 4h covers even an unusually long call — the token is single-use and
-      // burned the moment the recording is uploaded, well before that.
+      // 4h covers even an unusually long call. The token is spent once the
+      // call's final upload gets through, well before that.
       expiresAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
     },
   });
@@ -265,9 +282,10 @@ async function mintLocalCaptureToken(workspaceId: string, dealId: string, callId
 // spawning a new deal + client for what's really a continuation of the
 // same negotiation. Reuses the deal's existing template.
 export async function continueLocalCapture(dealId: string): Promise<{ dealId: string; token: string } | { error: string }> {
-  const workspace = await requireWorkspace();
+  const [workspace, { where }] = await Promise.all([requireWorkspace(), dealVisibilityFilter()]);
 
-  const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId: workspace.id } });
+  // Only a deal this person may see: the call rewrites its terms.
+  const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId: workspace.id, ...where } });
   if (!deal) return { error: "Deal not found" };
   if (deal.status === "signed") return { error: "This deal is already signed. Start a new deal instead" };
 
@@ -282,3 +300,31 @@ export async function continueLocalCapture(dealId: string): Promise<{ dealId: st
   return { dealId, token: rawToken };
 }
 
+// "Discard" on a call recorded in the desktop app, once the app has stopped
+// recording it. The call ends here and its token is spent, so a live chunk
+// still on its way (or a final sent again) can't add to it. A deal that was
+// waiting on the call to be read gets the status its terms call for, instead
+// of "SealMe is reading the call" for good. A call that isn't there anymore,
+// or isn't on a deal this person may see, leaves nothing to do.
+export async function discardLocalCapture(dealId: string, token: string): Promise<void> {
+  if (typeof dealId !== "string" || typeof token !== "string" || !dealId || !token) return;
+  const [workspace, { where }] = await Promise.all([requireWorkspace(), dealVisibilityFilter()]);
+
+  const [record, deal] = await Promise.all([
+    prisma.localCaptureToken.findFirst({ where: { tokenHash: hashCaptureToken(token), dealId, workspaceId: workspace.id }, select: { id: true, callId: true } }),
+    prisma.deal.findFirst({ where: { id: dealId, workspaceId: workspace.id, ...where }, select: { id: true } }),
+  ]);
+  if (!record || !deal) return;
+
+  const now = new Date();
+  await prisma.call.updateMany({ where: { id: record.callId, endedAt: null }, data: { endedAt: now } });
+  // Spent the way a finished call's token is (expired as of when it was
+  // used): live chunks are turned away, and a final is told it's in.
+  await prisma.localCaptureToken.update({ where: { id: record.id }, data: { usedAt: now, expiresAt: now } });
+
+  // Whatever the live passes already read stays; anything still missing is
+  // for the rep to fill in.
+  const missing = await prisma.dealField.count({ where: { dealId, status: "missing" } });
+  await prisma.deal.updateMany({ where: { id: dealId, status: "processing" }, data: { status: missing > 0 ? "missing_info" : "ready" } });
+  revalidatePath(`/deals/${dealId}`);
+}

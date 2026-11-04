@@ -6,6 +6,7 @@ import { leadAccess } from "@/lib/lead-visibility";
 import { workspaceCampaigns } from "@/lib/campaigns";
 import { overviewFromCall } from "@/lib/lead-overview";
 import { noteLines } from "@/lib/note-lines";
+import { failStuckCalls } from "@/lib/call-inbox";
 import CallUploadForm from "@/components/CallUploadForm";
 import NotesFilterBar from "@/components/NotesFilterBar";
 import RefreshWhile from "@/components/RefreshWhile";
@@ -35,6 +36,10 @@ export default async function NotesPage({ searchParams }: { searchParams: Promis
   const [access, phone] = await Promise.all([leadAccess(), isPhoneApp()]);
   const { q, campaign, added } = await searchParams;
   const term = q?.trim().slice(0, 100) ?? "";
+
+  // A call whose write-up was cut off shows as one that didn't make it, not
+  // as being written up for good.
+  await failStuckCalls({ workspaceId: workspace.id, userId: access.userId, mode: "notes" });
 
   const withNotes = { phoneCalls: { some: { status: "processed", notes: { not: null } } } };
   const [leads, total, working, campaigns, justDone] = await Promise.all([

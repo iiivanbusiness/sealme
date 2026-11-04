@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 const { phoneCall, cold, sales, classify, notify, telnyx } = vi.hoisted(() => ({
-  phoneCall: { findUnique: vi.fn(), update: vi.fn() },
+  phoneCall: { findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
   cold: vi.fn(),
   sales: vi.fn(),
   classify: vi.fn(),
@@ -17,7 +17,7 @@ vi.mock("@/lib/call-kind", () => ({ classifyCallKind: classify }));
 vi.mock("@/lib/notifications", () => ({ createNotification: notify }));
 vi.mock("@/lib/telnyx", () => telnyx);
 
-import { callCostUsd, runCallProcessing, skipReason, speakerCount } from "./call-inbox";
+import { callCostUsd, discardStaleCalls, failStuckCalls, runCallProcessing, skipReason, speakerCount } from "./call-inbox";
 
 const twoVoices = "Speaker 1: Hi, is this Dana?\nSpeaker 2: Speaking, who's this?\nSpeaker 1: It's Sam from SealMe.";
 
@@ -134,5 +134,21 @@ describe("Calls inbox", () => {
     await runCallProcessing("call3", "America/Chicago");
     expect(classify).not.toHaveBeenCalled();
     expect(sales).toHaveBeenLastCalledWith("call3", { draftOnly: false });
+  });
+
+  it("hands back a call whose processing was cut off as failed, so it can be tried again", async () => {
+    const now = new Date("2026-11-04T12:00:00Z");
+    phoneCall.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    phoneCall.findMany.mockReset().mockResolvedValue([]);
+
+    expect(await failStuckCalls({ workspaceId: "w1", userId: "u1" }, now)).toBe(1);
+    expect(phoneCall.updateMany).toHaveBeenLastCalledWith({
+      where: { workspaceId: "w1", userId: "u1", status: "processing", updatedAt: { lt: new Date("2026-11-04T11:45:00Z") } },
+      data: { status: "failed" },
+    });
+
+    // The daily cleanup does it across the board, before it drops what's a day old.
+    await discardStaleCalls(now);
+    expect(phoneCall.updateMany.mock.calls.at(-1)?.[0]).toEqual({ where: { status: "processing", updatedAt: { lt: new Date("2026-11-04T11:45:00Z") } }, data: { status: "failed" } });
   });
 });

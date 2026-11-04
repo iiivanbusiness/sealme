@@ -11,12 +11,15 @@ import { formatCallDuration, formatFileSize } from "@/lib/recording-upload";
 // isn't written up; matches MIN_PROCESS_SECONDS in lib/call-inbox.ts.
 const MIN_SECONDS = 30;
 
+// What Deepgram heard, kept so a retry after a failed save only saves.
+type Heard = { transcript: string; seconds: number };
+
 type Phase =
   | { kind: "loading" }
   | { kind: "ready" }
   | { kind: "live"; status: RecorderStatus }
   | { kind: "sending"; step: "uploading" | "transcribing" | "saving"; progress: number }
-  | { kind: "error"; message: string; recording: SavedRecording | null }
+  | { kind: "error"; message: string; recording: SavedRecording | null; leadId?: string; heard?: Heard | null }
   | { kind: "too-short"; recording: SavedRecording };
 
 const STATE_LINE: Record<string, string> = {
@@ -93,12 +96,34 @@ export default function MeetingRecorder({ save, searchLeads }: { save: (formData
     await send(saved);
   }
 
-  async function send(recording: SavedRecording) {
+  // A retry carries the lead picked when the recording was first sent (the
+  // picker isn't on screen once something went wrong) and, when only the
+  // save failed, the transcript, so the recording isn't transcribed twice.
+  async function send(recording: SavedRecording, retry?: { leadId: string; heard: Heard | null }) {
     if (recording.seconds < MIN_SECONDS) {
       setPhase({ kind: "too-short", recording });
       return;
     }
-    const leadId = form.current ? String(new FormData(form.current).get("leadId") ?? "new") : "new";
+    const leadId = retry?.leadId ?? (form.current ? String(new FormData(form.current).get("leadId") ?? "new") : "new");
+    let heard = retry?.heard ?? null;
+    try {
+      if (!heard) heard = await transcribe(recording);
+
+      setPhase({ kind: "sending", step: "saving", progress: 1 });
+      const data = new FormData();
+      data.set("transcript", heard.transcript);
+      data.set("seconds", String(Math.round(recording.seconds || heard.seconds)));
+      data.set("leadId", leadId);
+      await save(data);
+      // Saved: the recording can go from the phone.
+      await recorder.discard(recording.path).catch(() => {});
+      router.push("/notes?added=1");
+    } catch (err) {
+      setPhase({ kind: "error", message: err instanceof Error ? err.message : recorderError(err).message, recording, leadId, heard });
+    }
+  }
+
+  async function transcribe(recording: SavedRecording): Promise<Heard> {
     setPhase({ kind: "sending", step: "uploading", progress: 0 });
     const progress = setInterval(() => {
       recorder
@@ -117,23 +142,12 @@ export default function MeetingRecorder({ save, searchLeads }: { save: (formData
       if (!tokenRes.ok) throw new Error(grant.error || "Recordings can't be sent right now");
       if (grant.mode !== "direct" || !grant.token || !grant.listenUrl) throw new Error("Recordings can't be sent right now. Try again in a minute");
       const res = await recorder.upload({ path: recording.path, url: grant.listenUrl, token: grant.token, contentType: "audio/aac" });
-      clearInterval(progress);
       if (res.status < 200 || res.status >= 300) throw new Error(`The recording couldn't be transcribed (error ${res.status}). Try again`);
       const result = transcriptFromListenResponse(JSON.parse(res.body));
       if (!result.transcript.trim()) throw new Error("No one could be heard on the recording");
-
-      setPhase({ kind: "sending", step: "saving", progress: 1 });
-      const data = new FormData();
-      data.set("transcript", result.transcript);
-      data.set("seconds", String(Math.round(recording.seconds || result.seconds)));
-      data.set("leadId", leadId);
-      await save(data);
-      // Saved: the recording can go from the phone.
-      await recorder.discard(recording.path).catch(() => {});
-      router.push("/notes?added=1");
-    } catch (err) {
+      return { transcript: result.transcript, seconds: result.seconds };
+    } finally {
       clearInterval(progress);
-      setPhase({ kind: "error", message: err instanceof Error ? err.message : recorderError(err).message, recording });
     }
   }
 
@@ -219,7 +233,7 @@ export default function MeetingRecorder({ save, searchLeads }: { save: (formData
           <div className="flex gap-2.5">
             {phase.recording ? (
               <>
-                <button type="button" onClick={() => send(phase.recording!)} className="btn btn-primary flex-1 justify-center">
+                <button type="button" onClick={() => send(phase.recording!, { leadId: phase.leadId ?? "new", heard: phase.heard ?? null })} className="btn btn-primary flex-1 justify-center">
                   Try again
                 </button>
                 <button

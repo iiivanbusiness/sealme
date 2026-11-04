@@ -1,3 +1,4 @@
+import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/db";
 import { applyColdCall } from "@/lib/cold-call";
 import { INPUT_USD_PER_MTOK, OUTPUT_USD_PER_MTOK } from "@/lib/extract-cold-call";
@@ -18,6 +19,11 @@ export const MIN_PROCESS_SECONDS = 30;
 // Calls nobody acts on are dropped after a day, so a transcript doesn't sit
 // around unasked for (see the daily cron).
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+// Processing runs in after(), which a timeout, a deploy or a crash can cut
+// off before it marks the call either way. Nothing runs anywhere near this
+// long, so a call still processing this long after it last changed isn't
+// being worked on anymore.
+export const PROCESSING_STUCK_MS = 15 * 60 * 1000;
 // Deepgram Nova-3, prerecorded, pay as you go. Checked against the Deepgram
 // dashboard when call costs were first compared (Phase 3.4).
 export const STT_USD_PER_MINUTE = 0.0043;
@@ -218,10 +224,22 @@ export async function dropRecording(recordingId: string | null, callId: string):
   await deleteRecording(recordingId).catch((err) => reportError(err, "Deleting a call recording at Telnyx", { callId }));
 }
 
+// A call whose processing was cut off goes back as failed, so it gets Try
+// again and Discard, and the cleanup below can drop it. Run when Calls or
+// Notes is opened, and by the daily cron.
+export async function failStuckCalls(where: Prisma.PhoneCallWhereInput = {}, now = new Date()): Promise<number> {
+  const { count } = await prisma.phoneCall.updateMany({
+    where: { ...where, status: "processing", updatedAt: { lt: new Date(now.getTime() - PROCESSING_STUCK_MS) } },
+    data: { status: "failed" },
+  });
+  return count;
+}
+
 // For the daily cron: calls left unprocessed for a day are dropped, with
 // their transcripts and any recording still at Telnyx. So is a call whose
-// recording never arrived.
+// recording never arrived, and one whose processing was cut off a day ago.
 export async function discardStaleCalls(now = new Date()): Promise<number> {
+  await failStuckCalls({}, now);
   const before = new Date(now.getTime() - PENDING_TTL_MS);
   const where = { status: { in: ["pending", "failed", "recording", "dialing"] }, startedAt: { lt: before } };
   const stale = await prisma.phoneCall.findMany({ where, select: { id: true, telnyxRecordingId: true } });

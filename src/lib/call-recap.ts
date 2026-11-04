@@ -33,7 +33,9 @@ export async function generateCallRecapScript(dealId: string): Promise<string | 
   const filledLines = filled.map((f) => f.label).join(", ") || "(none)";
   const missingLines = missing.map((f) => f.label).join(", ") || "(none)";
 
-  const client = new Anthropic();
+  // 120 s and one retry, not the SDK's 10 minutes and two: one slow or
+  // overloaded call can't run past the 300 s its request gets.
+  const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
   const response = await client.messages.create({
     model: "claude-sonnet-5",
     max_tokens: 120,

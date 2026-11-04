@@ -5,7 +5,7 @@ import { isPhoneApp } from "@/lib/phone-app-server";
 import { leadAccess } from "@/lib/lead-visibility";
 import { cookieTimeZone } from "@/lib/viewer-time";
 import { CALL_OUTCOME_CHIP, CALL_OUTCOME_LABEL } from "@/lib/call-outcomes";
-import { SKIP_LABEL, callCostUsd } from "@/lib/call-inbox";
+import { SKIP_LABEL, callCostUsd, failStuckCalls } from "@/lib/call-inbox";
 import { formatCallDuration } from "@/lib/recording-upload";
 import CallRecordingUploader from "@/components/CallRecordingUploader";
 import PendingCallCard from "@/components/PendingCallCard";
@@ -36,6 +36,9 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
   const timeZone = await cookieTimeZone();
   const tab = (await searchParams).tab === "history" ? "history" : "pending";
   const callWhere = { workspaceId: workspace.id, ...(seesAll ? {} : { userId: access.userId }) };
+  // Before the list: a call whose processing was cut off shows as failed,
+  // with Try again, instead of "Processing" for good.
+  await failStuckCalls(callWhere);
 
   const [pending, history, leads, pendingCount] = await Promise.all([
     tab === "pending"
@@ -195,7 +198,7 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
                       Logged in {[c.hubspotCallId ? "HubSpot" : null, c.salesforceTaskId ? "Salesforce" : null].filter(Boolean).join(" and ")}
                     </div>
                   )}
-                  {c.status === "skipped" && c.lead && c.transcript && (c.mode === "cold" || c.mode === "sales") && (
+                  {c.status === "skipped" && c.lead && c.transcript && (c.mode === "cold" || c.mode === "sales" || c.mode === "notes") && (
                     <div>
                       <ProcessAnywayButton action={processCall.bind(null, c.id, { leadId: c.lead.id, mode: c.mode, templateId: c.templateId, force: true })} />
                     </div>

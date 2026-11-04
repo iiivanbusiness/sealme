@@ -8,7 +8,9 @@ export type CallKind = "cold" | "sales";
 // longer pick this before calling; the call says. When it isn't clear,
 // cold: that only writes notes, while sales drafts a deal and a contract.
 export async function classifyCallKind(transcript: string): Promise<{ kind: CallKind; inputTokens: number; outputTokens: number }> {
-  const client = new Anthropic();
+  // 120 s and one retry, not the SDK's 10 minutes and two: one slow or
+  // overloaded call can't run past the 300 s its request gets.
+  const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
   const message = await client.messages.create({
     model: "claude-haiku-4-5",
     max_tokens: 5,

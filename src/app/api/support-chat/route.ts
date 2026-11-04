@@ -62,7 +62,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const client = new Anthropic();
+  const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
 
   try {
     const response = await client.messages.create({

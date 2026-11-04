@@ -4,6 +4,23 @@ export function isDeepgramConfigured(): boolean {
   return Boolean(process.env.DEEPGRAM_API_KEY);
 }
 
+// What Deepgram answered when it didn't transcribe, so a caller can tell
+// audio it will never take from a hiccup worth sending again.
+export class DeepgramError extends Error {
+  status: number;
+  constructor(status: number, body: string) {
+    super(`Deepgram transcription failed: ${status} ${body}`);
+    this.name = "DeepgramError";
+    this.status = status;
+  }
+}
+
+// 400 is Deepgram saying the audio itself is corrupt or unsupported (and
+// 413 too big): sending the same bytes again gets the same answer.
+export function isUnusableAudio(err: unknown): boolean {
+  return err instanceof DeepgramError && (err.status === 400 || err.status === 413);
+}
+
 type DeepgramWord = { word: string; punctuated_word?: string; start: number };
 type DeepgramResponse = {
   results?: {
@@ -16,6 +33,45 @@ type DeepgramResponse = {
 // plays through the speakers), right = microphone (you). See
 // desktop-app/src-tauri/native/audio_capture.swift.
 const CHANNEL_LABELS = ["Client", "You"];
+
+export type TranscriptWord = { text: string; start: number; speaker: string };
+
+// The mic is recorded without echo cancellation, so on laptop speakers the
+// client's words also reach the "You" channel a few tens of ms later. Kept
+// under a second: a rep saying the same word back on purpose is slower.
+const MIC_ECHO_WINDOW_SECONDS = 1.0;
+
+function echoKey(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+// Drops the "You" words that are the client's own words coming back through
+// the mic: the same word (case and punctuation aside) starting 0 to 1 s
+// after the client said it. Left in, every echoed word splits the client's
+// sentence into "Client: we / You: we / Client: can / You: can ...".
+export function dropMicEcho(words: TranscriptWord[]): TranscriptWord[] {
+  const client = words
+    .filter((w) => w.speaker === CHANNEL_LABELS[0])
+    .map((w) => ({ start: w.start, key: echoKey(w.text) }))
+    .sort((a, b) => a.start - b.start);
+  return words.filter((w) => {
+    if (w.speaker !== CHANNEL_LABELS[1]) return true;
+    const key = echoKey(w.text);
+    if (!key) return true;
+    // First client word that could still be the one this echoes.
+    let lo = 0;
+    let hi = client.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (client[mid].start < w.start - MIC_ECHO_WINDOW_SECONDS) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo; i < client.length && client[i].start <= w.start; i++) {
+      if (client[i].key === key) return false;
+    }
+    return true;
+  });
+}
 
 // Batch (prerecorded) transcription of a full call, recorded locally on the
 // user's machine. Multichannel rather than diarized: the two speakers are
@@ -49,21 +105,22 @@ export async function transcribeWav(wavBytes: Buffer): Promise<string> {
     },
     body: new Uint8Array(wavBytes),
   });
-  if (!res.ok) throw new Error(`Deepgram transcription failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new DeepgramError(res.status, await res.text());
 
   const data = (await res.json()) as DeepgramResponse;
   const channels = data.results?.channels ?? [];
 
-  const allWords: { text: string; start: number; speaker: string }[] = [];
+  const heardWords: TranscriptWord[] = [];
   channels.forEach((channel, i) => {
     const words = channel.alternatives?.[0]?.words ?? [];
     const speaker = CHANNEL_LABELS[i] ?? `Speaker ${i}`;
     for (const w of words) {
-      allWords.push({ text: w.punctuated_word ?? w.word, start: w.start, speaker });
+      heardWords.push({ text: w.punctuated_word ?? w.word, start: w.start, speaker });
     }
   });
+  heardWords.sort((a, b) => a.start - b.start);
+  const allWords = dropMicEcho(heardWords);
   if (allWords.length === 0) return "";
-  allWords.sort((a, b) => a.start - b.start);
 
   const lines: string[] = [];
   let currentSpeaker = allWords[0].speaker;
@@ -97,7 +154,7 @@ export async function transcribeVoiceClip(audioBytes: Buffer, contentType: strin
     },
     body: new Uint8Array(audioBytes),
   });
-  if (!res.ok) throw new Error(`Deepgram transcription failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new DeepgramError(res.status, await res.text());
 
   const data = (await res.json()) as { results?: { channels?: { alternatives?: { transcript?: string }[] }[] } };
   return data.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";

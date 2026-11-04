@@ -89,7 +89,9 @@ async function confirmLeadMatch<T extends Candidate & { title: string | null; su
   const list = options
     .map((o, i) => `${i + 1}. ${o.name}${o.title ? `, ${o.title}` : ""}${o.company ? ` at ${o.company}` : ""}. Last call: ${o.summary ?? "none on file"}`)
     .join("\n");
-  const response = await new Anthropic().messages.create({
+  // 120 s and one retry, not the SDK's 10 minutes and two: one slow or
+  // overloaded call can't run past the 300 s its request gets.
+  const response = await new Anthropic({ timeout: 120_000, maxRetries: 1 }).messages.create({
     model: "claude-haiku-4-5",
     max_tokens: 200,
     system:

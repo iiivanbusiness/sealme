@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureForm";
+import { discardLocalCapture } from "@/app/(app)/deals/new/actions";
+import { captureErrorText } from "@/lib/capture-error";
 
 type Session = { dealId: string; token: string; startedAt: number };
 type StopResult = { ok: boolean; error?: string };
@@ -42,7 +44,7 @@ export default function LocalCaptureBanner() {
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<StopResult>("stop_local_capture_and_upload", { token: session.token });
       if (!result.ok) {
-        setError(result.error ?? "Something went wrong stopping the recording");
+        setError(captureErrorText(result.error, "Something went wrong stopping the recording"));
         setBusy(false);
         return;
       }
@@ -56,29 +58,45 @@ export default function LocalCaptureBanner() {
       router.push(`/deals/${dealId}`);
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong stopping the recording");
+      setError(captureErrorText(err, "Something went wrong stopping the recording"));
       setBusy(false);
     }
   }
 
-  // Recovery path for a stuck banner — e.g. the app was closed (or crashed)
-  // before Stop & finish was ever pressed, leaving this session sitting in
-  // localStorage on next launch with a token that may no longer be valid.
-  // Clears local state unconditionally regardless of whether the native
-  // side has anything to stop. Confirmation is inline, not window.confirm() —
-  // Tauri's WKWebView doesn't reliably surface native JS dialogs, so that
-  // silently did nothing when clicked.
+  // Throws the call away. Also the recovery path for a stuck banner, e.g.
+  // the app was closed (or crashed) before Stop & finish was ever pressed,
+  // leaving this session sitting in localStorage on next launch. The app has
+  // nothing to stop then and says so without an error. The session is only
+  // forgotten once the recording has really stopped and SealMe has closed
+  // the call: otherwise the banner would vanish while the mic keeps going,
+  // or leave the deal waiting on a call that never ends. Confirmation is
+  // inline, not window.confirm(): Tauri's WKWebView doesn't reliably surface
+  // native JS dialogs, so that silently did nothing when clicked.
   async function handleDiscard() {
+    if (!session) return;
     setBusy(true);
+    setError(null);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("discard_local_capture").catch(() => {});
-    } finally {
-      localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
-      setSession(null);
+      await invoke("discard_local_capture");
+    } catch (err) {
+      setError(captureErrorText(err, "Couldn't stop the recording"));
       setBusy(false);
-      setConfirmingDiscard(false);
+      return;
     }
+    try {
+      await discardLocalCapture(session.dealId, session.token);
+    } catch {
+      setError("The recording is stopped, but SealMe couldn't close the call. Check your connection and discard it again");
+      setBusy(false);
+      return;
+    }
+    localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
+    setSession(null);
+    setBusy(false);
+    setConfirmingDiscard(false);
+    // The deal it was for, if that's the page open, is no longer waiting on it.
+    router.refresh();
   }
 
   if (!session) return null;

@@ -7,6 +7,8 @@ import CallHighlightsList, { type CallHighlightItem } from "./CallHighlightsList
 import RecentNotesList, { type RecentNoteItem } from "./RecentNotesList";
 import ClientText from "@/components/ClientText";
 import { useInDesktopApp } from "@/lib/native-shell";
+import { captureErrorText } from "@/lib/capture-error";
+import { discardLocalCapture } from "@/app/(app)/deals/new/actions";
 
 type Session = { dealId: string; token: string; startedAt: number };
 type StopResult = { ok: boolean; error?: string };
@@ -248,7 +250,7 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
       await openUrl(url);
     } catch (err) {
       console.error("[companion] openUrl failed:", err);
-      setError("Couldn't open that link");
+      setError(captureErrorText(err, "Couldn't open that link"));
     }
   }
 
@@ -268,7 +270,7 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
       await invoke("toggle_companion_rail");
     } catch (err) {
       console.error("[companion] toggle_companion_rail failed:", err);
-      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Couldn't open the main app");
+      setError(captureErrorText(err, "Couldn't open the main app"));
     }
   }
 
@@ -280,7 +282,7 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<StopResult>("stop_local_capture_and_upload", { token: session.token });
       if (!result.ok) {
-        setError(result.error ?? "Something went wrong stopping the recording");
+        setError(captureErrorText(result.error, "Something went wrong stopping the recording"));
         setBusy(false);
         return;
       }
@@ -289,23 +291,38 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
       setSession(null);
       setBusy(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong stopping the recording");
+      setError(captureErrorText(err, "Something went wrong stopping the recording"));
       setBusy(false);
     }
   }
 
+  // Same as the main window's banner: the session is only forgotten once the
+  // recording has really stopped and SealMe has closed the call, so the panel
+  // never says "No active call" while the mic is still going.
   async function handleDiscard() {
+    if (!session) return;
     setBusy(true);
+    setError(null);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("discard_local_capture").catch(() => {});
-    } finally {
-      localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
-      window.dispatchEvent(new Event(LOCAL_CAPTURE_EVENT));
-      setSession(null);
+      await invoke("discard_local_capture");
+    } catch (err) {
+      setError(captureErrorText(err, "Couldn't stop the recording"));
       setBusy(false);
-      setConfirmingDiscard(false);
+      return;
     }
+    try {
+      await discardLocalCapture(session.dealId, session.token);
+    } catch {
+      setError("The recording is stopped, but SealMe couldn't close the call. Check your connection and discard it again");
+      setBusy(false);
+      return;
+    }
+    localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
+    window.dispatchEvent(new Event(LOCAL_CAPTURE_EVENT));
+    setSession(null);
+    setBusy(false);
+    setConfirmingDiscard(false);
   }
 
   if (isTauri === null) return null;
@@ -378,7 +395,7 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
                     <div className="flex items-center gap-2">
                       <span className="flex-1 text-[11.5px]" style={{ color: glass.textDim }}>Discard this recording?</span>
                       <button type="button" disabled={busy} onClick={handleDiscard} style={glassButtonStyle("danger")}>
-                        Yes, discard
+                        {busy ? "Discarding…" : "Yes, discard"}
                       </button>
                       <button type="button" disabled={busy} onClick={() => setConfirmingDiscard(false)} style={glassButtonStyle("neutral")}>
                         Cancel

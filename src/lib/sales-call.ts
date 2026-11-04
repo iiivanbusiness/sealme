@@ -19,7 +19,9 @@ type TemplateOption = { id: string; name: string; description: string };
 export async function suggestTemplateId(transcript: string, templates: TemplateOption[]): Promise<string> {
   if (templates.length <= 1) return templates[0].id;
   try {
-    const client = new Anthropic();
+    // 120 s and one retry, not the SDK's 10 minutes and two: one slow or
+    // overloaded call can't run past the 300 s its request gets.
+    const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
     const message = await client.messages.create({
       model: "claude-haiku-4-5",
       max_tokens: 50,

@@ -61,7 +61,9 @@ export async function extractDealFromTranscript(
   placeholderKeys: string[],
   previousTranscript?: string | null
 ): Promise<ExtractedDeal> {
-  const client = new Anthropic();
+  // 120 s and one retry, not the SDK's 10 minutes and two: one slow or
+  // overloaded call can't run past the 300 s its request gets.
+  const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
 
   const fieldKeys = [...new Set(["service", "fee", ...placeholderKeys])];
 

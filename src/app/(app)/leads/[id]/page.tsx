@@ -26,7 +26,7 @@ import { mergeLeadInto, moveCallToLead, searchLeadsToJoin } from "../merge-actio
 
 // Processing a pasted call transcript (an action on this page) waits on
 // Claude; give it room beyond the default.
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 function formatDay(date: Date): string {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
