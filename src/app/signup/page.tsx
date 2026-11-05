@@ -2,6 +2,7 @@ import Link from "next/link";
 import ThemeToggle from "@/components/ThemeToggle";
 import BrandLogo from "@/components/BrandLogo";
 import GoogleIcon from "@/components/GoogleIcon";
+import SubmitButton from "@/components/SubmitButton";
 import { signIn } from "@/lib/auth";
 import { signup } from "./actions";
 
@@ -43,10 +44,10 @@ export default async function SignupPage({
         <div className="card flex flex-col gap-3 p-6">
           <div className="web-only contents">
             <form action={continueWithGoogle}>
-              <button type="submit" className="btn btn-secondary w-full justify-center gap-2.5">
+              <SubmitButton pendingText="Opening Google…" className="btn btn-secondary w-full justify-center gap-2.5">
                 <GoogleIcon />
                 Continue with Google
-              </button>
+              </SubmitButton>
             </form>
 
             <div className="my-1 flex items-center gap-3">
@@ -73,9 +74,9 @@ export default async function SignupPage({
               <span className="text-[13px] font-medium">Password</span>
               <input name="password" type="password" required minLength={8} placeholder="At least 8 characters" className="input" />
             </label>
-            <button type="submit" className="btn btn-primary mt-2 w-full justify-center">
+            <SubmitButton pendingText="Creating your workspace…" className="btn btn-primary mt-2 w-full justify-center">
               Create workspace
-            </button>
+            </SubmitButton>
           </form>
         </div>
       </div>

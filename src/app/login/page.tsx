@@ -5,6 +5,7 @@ import { signIn } from "@/lib/auth";
 import ThemeToggle from "@/components/ThemeToggle";
 import BrandLogo from "@/components/BrandLogo";
 import GoogleIcon from "@/components/GoogleIcon";
+import SubmitButton from "@/components/SubmitButton";
 import { phoneAppViewport } from "@/lib/phone-app-server";
 
 // Codes only, never text from the URL, so a link can't put its own
@@ -109,10 +110,10 @@ export default async function LoginPage({
         <div className="card flex flex-col gap-3 p-6">
           <div className="web-only contents">
             <form action={continueWithGoogle}>
-              <button type="submit" className="btn btn-secondary w-full justify-center gap-2.5">
+              <SubmitButton pendingText="Opening Google…" className="btn btn-secondary w-full justify-center gap-2.5">
                 <GoogleIcon />
                 Continue with Google
-              </button>
+              </SubmitButton>
             </form>
 
             <div className="my-1 flex items-center gap-3">
@@ -140,9 +141,9 @@ export default async function LoginPage({
               <span className="text-[13px] font-medium">2FA code <span style={{ color: "var(--ink-muted)", fontWeight: 400 }}>(if enabled)</span></span>
               <input name="code" inputMode="numeric" placeholder="123456 or backup code" className="input" />
             </label>
-            <button type="submit" className="btn btn-primary mt-2 w-full justify-center">
+            <SubmitButton pendingText="Signing in…" className="btn btn-primary mt-2 w-full justify-center">
               Sign in
-            </button>
+            </SubmitButton>
           </form>
           {error !== "CredentialsSignin" && <AppPasswordNote />}
 
@@ -157,9 +158,9 @@ export default async function LoginPage({
               <span className="text-[13px] font-medium">Company SSO</span>
               <input name="email" type="email" required placeholder="you@company.com" className="input" />
             </label>
-            <button type="submit" className="btn btn-secondary w-full justify-center">
+            <SubmitButton pendingText="Opening your sign-in…" className="btn btn-secondary w-full justify-center">
               Continue with SSO
-            </button>
+            </SubmitButton>
           </form>
         </div>
       </div>
