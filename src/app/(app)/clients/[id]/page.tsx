@@ -4,30 +4,10 @@ import { prisma } from "@/lib/db";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import { computeClientRisk } from "@/lib/client-risk";
+import { dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
+import { contractExpired } from "@/lib/contract-status";
 import ClientProfileForm from "@/components/ClientProfileForm";
 import { updateClientDetails } from "../actions";
-
-const STATUS_LABEL: Record<string, string> = {
-  processing: "Analyzing call…",
-  missing_info: "Missing info",
-  extraction_failed: "Couldn't process call",
-  ready: "Ready for review",
-  pending_approval: "Awaiting approval",
-  changes_requested: "Changes requested",
-  sent: "Sent - awaiting signature",
-  signed: "Signed",
-};
-
-const STATUS_CHIP: Record<string, string> = {
-  processing: "chip-neutral chip-live",
-  missing_info: "chip-warn",
-  extraction_failed: "chip-warn",
-  ready: "chip-active",
-  pending_approval: "chip-neutral",
-  changes_requested: "chip-warn",
-  sent: "chip-neutral",
-  signed: "chip-success",
-};
 
 const RISK_LABEL: Record<string, string> = { high: "At risk", watch: "Watch" };
 const RISK_CHIP: Record<string, string> = { high: "chip-warn", watch: "chip-neutral" };
@@ -56,7 +36,7 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
         where: dealVisibility,
         include: {
           actionItems: true,
-          contract: { include: { clauseComments: true } },
+          contract: { select: { status: true, deliveryMethod: true, expiresAt: true, clauseComments: { select: { resolved: true } } } },
           notes: { orderBy: { createdAt: "desc" } },
         },
         orderBy: { updatedAt: "desc" },
@@ -73,6 +53,9 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
   const allNotes = client.deals
     .flatMap((deal) => deal.notes.map((note) => ({ ...note, dealService: deal.service, dealId: deal.id })))
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  // A sent deal whose SealMe sign link ran out reads "Sign link expired",
+  // same as on the Deals page.
+  const expiredDealIds = new Set(client.deals.filter((deal) => deal.status === "sent" && contractExpired(deal.contract)).map((deal) => deal.id));
 
   return (
     <>
@@ -130,8 +113,8 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
                     <div className="mt-0.5 text-[12px]" style={{ color: "var(--ink-muted)" }}>{timeAgo(deal.updatedAt)}</div>
                   </div>
                   <span className="font-mono-tab flex-none text-[13px] font-medium">{deal.feeDisplay || "—"}</span>
-                  <span className={`chip flex-none ${STATUS_CHIP[deal.status] ?? "chip-neutral"}`} style={{ fontSize: 11 }}>
-                    {STATUS_LABEL[deal.status] ?? deal.status}
+                  <span className={`chip flex-none ${dealStatusChip(deal.status, expiredDealIds.has(deal.id))}`} style={{ fontSize: 11 }}>
+                    {dealStatusLabel(deal.status, expiredDealIds.has(deal.id))}
                   </span>
                 </Link>
               ))

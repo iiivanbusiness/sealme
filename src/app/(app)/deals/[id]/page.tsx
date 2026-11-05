@@ -5,6 +5,7 @@ import { requireWorkspaceId, requireWorkspace } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import { contractExpired } from "@/lib/contract-status";
+import { docusignVoid } from "@/lib/docusign-sync";
 import {
   addDealNote,
   applyVoiceFieldCorrection,
@@ -127,6 +128,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
       docusignEnabled={Boolean(workspace?.docusignEnabled)}
       contractStatus={deal.contract?.status ?? null}
       contractExpired={contractExpired(deal.contract)}
+      docusignVoid={deal.contract ? await docusignVoid({ id: deal.contract.id, dealId: deal.id, status: deal.contract.status, deliveryMethod: deal.contract.deliveryMethod }, workspaceId) : undefined}
       clientHasEmail={Boolean(deal.client.email)}
       sendViaDocusignNowAction={sendViaDocusignNow}
       reviewPanel={

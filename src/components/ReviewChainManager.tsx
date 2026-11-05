@@ -2,7 +2,9 @@
 
 import { useState, useTransition } from "react";
 
-type Step = { id: string; order: number; assigneeId: string; assigneeName: string };
+// left: the assignee has since left the workspace (SCIM deactivation, or they
+// deleted their account), so the step needs someone else.
+type Step = { id: string; order: number; assigneeId: string; assigneeName: string; left?: boolean };
 type Chain = { id: string; name: string; order: number; teamId: string | null; teamName: string | null; minDealValue: number | null; steps: Step[] };
 type TeammateOption = { id: string; name: string };
 type TeamOption = { id: string; name: string };
@@ -86,11 +88,16 @@ function ChainCard({
 
         {chain.steps.map((step, i) => (
           <div key={step.id} className="flex items-center justify-between gap-3.5 border-b py-2.5 last:border-b-0" style={{ borderColor: "var(--hairline-soft)" }}>
-            <div className="flex items-center gap-2.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
               <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full text-[10.5px] font-semibold" style={{ background: "var(--surface-2)", color: "var(--ink)" }}>{initials(step.assigneeName)}</span>
               <span className="text-[13px] font-medium">{step.assigneeName}</span>
+              {step.left && (
+                <span className="chip chip-warn flex-none" style={{ fontSize: 11 }}>
+                  No longer on the team
+                </span>
+              )}
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-none items-center gap-3">
               <button type="button" disabled={i === 0 || isPending} onClick={() => run(() => moveStepAction(step.id, "up"))} className="text-[12.5px]" style={{ color: i === 0 ? "var(--ink-muted)" : "var(--accent-blue)", opacity: i === 0 ? 0.4 : 1 }}>↑</button>
               <button type="button" disabled={i === chain.steps.length - 1 || isPending} onClick={() => run(() => moveStepAction(step.id, "down"))} className="text-[12.5px]" style={{ color: i === chain.steps.length - 1 ? "var(--ink-muted)" : "var(--accent-blue)", opacity: i === chain.steps.length - 1 ? 0.4 : 1 }}>↓</button>
               <button type="button" disabled={isPending} onClick={() => run(() => removeStepAction(step.id))} className="text-[11.5px] font-medium" style={{ color: "var(--ink-muted)" }}>Remove</button>

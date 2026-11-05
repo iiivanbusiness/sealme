@@ -133,6 +133,7 @@ export default function LiveDealView({
   docusignEnabled,
   contractStatus: initialContractStatus,
   contractExpired: initialContractExpired,
+  docusignVoid,
   clientHasEmail,
   sendViaDocusignNowAction,
   reviewPanel,
@@ -170,6 +171,9 @@ export default function LiveDealView({
   // The SealMe sign link ran out (contractExpired in contract-status.ts),
   // worked out on the server, which knows expiresAt.
   contractExpired: boolean;
+  // Set when a DocuSign envelope was voided rather than anyone asking for
+  // changes; reason is DocuSign's, when it gave one.
+  docusignVoid?: { reason: string | null };
   clientHasEmail: boolean;
   sendViaDocusignNowAction: (dealId: string) => Promise<{ error?: string; heldForReviewBy?: string }>;
   reviewPanel: {
@@ -304,7 +308,9 @@ export default function LiveDealView({
             : status === "pending_approval"
               ? { title: "Waiting for approval", detail: "It goes to the client as soon as it's approved.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
               : status === "changes_requested"
-                ? { title: "Make the requested changes", detail: "A reviewer asked for changes before it goes out.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
+                ? docusignVoid
+                  ? { title: "Voided in DocuSign", detail: `${docusignVoid.reason ? `${docusignVoid.reason}. ` : ""}Make any changes, then send it again.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
+                  : { title: "Make the requested changes", detail: "A reviewer asked for changes before it goes out.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
                 : status === "sent" && contractExpired
                   ? { title: "Sign link expired", detail: `${firstName} can't sign it anymore. Send it again for a new link.`, action: <Link href={`/deals/${dealId}/send`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Send again</Link> }
                   : status === "sent"

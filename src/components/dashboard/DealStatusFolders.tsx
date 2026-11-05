@@ -1,8 +1,12 @@
 import Link from "next/link";
-import { STATUS_LABEL } from "@/lib/deal-status";
+import { dealStatusLabel } from "@/lib/deal-status";
 import FolderIcon from "./FolderIcon";
 
-export type StatusCount = { status: string; count: number };
+// expired: how many of the "sent" ones have a SealMe sign link that ran out
+// (contractExpired in contract-status.ts). They still sit in this folder,
+// but the client can't sign them: the caption counts them, and once every
+// one has run out the folder stops saying "awaiting signature".
+export type StatusCount = { status: string; count: number; expired?: number };
 
 // Finder-style icon grid — the same neutral glass folder for every status
 // (see FolderIcon), title + count caption below, exactly like the
@@ -13,8 +17,9 @@ export default function DealStatusFolders({ counts }: { counts: StatusCount[] })
     // Columns follow the widget's own width (a container query), since on
     // the dashboard it can be resized independently of the window.
     <div className="grid grid-cols-2 gap-1 @sm:grid-cols-4 @3xl:grid-cols-8">
-      {counts.map(({ status, count }) => {
+      {counts.map(({ status, count, expired = 0 }) => {
         const empty = count === 0;
+        const allExpired = !empty && expired >= count;
         return (
           <Link
             key={status}
@@ -27,11 +32,16 @@ export default function DealStatusFolders({ counts }: { counts: StatusCount[] })
             </span>
             <div>
               <div className="text-[12.5px] font-medium" style={{ color: "var(--ink)" }}>
-                {STATUS_LABEL[status] ?? status}
+                {dealStatusLabel(status, allExpired)}
               </div>
               <div className="text-[11px]" style={{ color: "var(--ink-muted)" }}>
                 {count} {count === 1 ? "deal" : "deals"}
               </div>
+              {expired > 0 && !allExpired && (
+                <div className="text-[11px] font-medium" style={{ color: "var(--warn)" }}>
+                  {expired} sign {expired === 1 ? "link" : "links"} expired
+                </div>
+              )}
             </div>
           </Link>
         );

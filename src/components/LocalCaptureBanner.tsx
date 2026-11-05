@@ -31,9 +31,29 @@ export default function LocalCaptureBanner() {
     // AppShell is a persistent layout that doesn't remount on navigation —
     // without this listener, a recording started after the first page load
     // would never make the banner appear.
-    const onChange = () => setSession(readSession());
+    const onChange = () => {
+      const next = readSession();
+      setSession(next);
+      // Finished or discarded somewhere else: a half-open "Discard this
+      // recording?" or an old error shouldn't greet the next call.
+      if (!next) {
+        setConfirmingDiscard(false);
+        setError(null);
+      }
+    };
+    // LOCAL_CAPTURE_EVENT only reaches this window. Stop & finish or Discard
+    // in the floating panel (another webview on the same origin) changes the
+    // same localStorage key, which arrives here as a "storage" event, so the
+    // banner goes away in the main window too.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === LOCAL_CAPTURE_STORAGE_KEY) onChange();
+    };
     window.addEventListener(LOCAL_CAPTURE_EVENT, onChange);
-    return () => window.removeEventListener(LOCAL_CAPTURE_EVENT, onChange);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(LOCAL_CAPTURE_EVENT, onChange);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   async function handleStop() {
@@ -51,6 +71,9 @@ export default function LocalCaptureBanner() {
       localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
       const dealId = session.dealId;
       setSession(null);
+      // This banner lives in the persistent layout, so the next call's banner
+      // would otherwise come up stuck on "Finishing…".
+      setBusy(false);
       // Best-effort spoken recap of what the call produced — 204 (not
       // configured, nothing extracted, provider hiccup) just means no
       // audio plays. Never blocks the navigation below.

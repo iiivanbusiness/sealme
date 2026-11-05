@@ -1,12 +1,20 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import ClientText from "@/components/ClientText";
 
 type Teammate = { id: string; name: string };
 type Delegation = { id: string; fromUserId: string; fromName: string; toUserId: string; toName: string; endsAt: string | null };
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+// endsAt is the end of the picked day in the viewer's own time zone
+// (delegation-actions.ts), so it's formatted in the browser: on the server
+// (UTC) it can land on the next day and React throws a hydration mismatch.
+function Until({ iso }: { iso: string }) {
+  return <ClientText text={() => `until ${formatDate(iso)}`} />;
 }
 
 export default function ApprovalDelegatesPanel({
@@ -55,7 +63,7 @@ export default function ApprovalDelegatesPanel({
               <div className="text-[12.5px]">
                 <span className="font-medium">{d.fromName}</span> → <span className="font-medium">{d.toName}</span>
                 <span className="ml-2 text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
-                  {d.endsAt ? `until ${formatDate(d.endsAt)}` : "open-ended"}
+                  {d.endsAt ? <Until iso={d.endsAt} /> : "open-ended"}
                 </span>
               </div>
               {(isAdmin || d.fromUserId === currentUserId) && (

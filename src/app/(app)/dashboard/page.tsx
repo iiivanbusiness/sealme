@@ -5,7 +5,8 @@ import { prisma } from "@/lib/db";
 import { parseFee } from "@/lib/money";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
-import { STATUS_LABEL, BOARD_COLUMNS } from "@/lib/deal-status";
+import { BOARD_COLUMNS, dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
+import { contractExpired } from "@/lib/contract-status";
 import GlassStatCard from "@/components/GlassStatCard";
 import DealStatusFolders from "@/components/dashboard/DealStatusFolders";
 import DealValueHeroCard from "@/components/dashboard/DealValueHeroCard";
@@ -50,18 +51,6 @@ function formatEventTime(date: Date): string {
 function daysUntil(date: Date): number {
   return Math.ceil((date.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
 }
-
-// Chip-tone map kept local — only used for the Recent deals table below.
-const STATUS_CHIP: Record<string, string> = {
-  processing: "chip-neutral chip-live",
-  missing_info: "chip-warn",
-  extraction_failed: "chip-warn",
-  ready: "chip-active",
-  pending_approval: "chip-neutral",
-  changes_requested: "chip-warn",
-  sent: "chip-neutral",
-  signed: "chip-success",
-};
 
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ todo?: string; queue?: string; guide?: string }> }) {
   const now = new Date();
@@ -119,7 +108,16 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     // call transcript, and this runs over every deal on each dashboard load.
     prisma.deal.findMany({
       where: { workspaceId, trashedAt: null, ...visibility },
-      select: { id: true, status: true, service: true, feeDisplay: true, createdAt: true, updatedAt: true, client: { select: { name: true } } },
+      select: {
+        id: true,
+        status: true,
+        service: true,
+        feeDisplay: true,
+        createdAt: true,
+        updatedAt: true,
+        client: { select: { name: true } },
+        contract: { select: { status: true, deliveryMethod: true, expiresAt: true } },
+      },
       orderBy: { updatedAt: "desc" },
     }),
     prisma.client.count({ where: { workspaceId } }),
@@ -163,6 +161,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const newClientsPct = clientCount > 0 ? Math.round((newClientsThisMonth / clientCount) * 100) : 0;
 
   const recentDeals = deals.slice(0, 15);
+  // A sent deal whose SealMe sign link ran out reads "Sign link expired",
+  // same as on the Deals page: the client can't sign it anymore.
+  const expiredDealIds = new Set(deals.filter((d) => d.status === "sent" && contractExpired(d.contract, now)).map((d) => d.id));
 
   // The setup guide until every step this person can do is done, or they
   // hide it. "Setup guide" in the menu (?guide=open) brings it back.
@@ -215,7 +216,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const statusCounts = new Map<string, number>();
   for (const col of BOARD_COLUMNS) statusCounts.set(col, 0);
   for (const deal of deals) statusCounts.set(deal.status, (statusCounts.get(deal.status) ?? 0) + 1);
-  const statusFolderCounts = BOARD_COLUMNS.map((status) => ({ status, count: statusCounts.get(status) ?? 0 }));
+  const statusFolderCounts = BOARD_COLUMNS.map((status) => ({
+    status,
+    count: statusCounts.get(status) ?? 0,
+    expired: status === "sent" ? expiredDealIds.size : 0,
+  }));
 
 
   // Shared frame for the list widgets: fills its grid cell, list scrolls.
@@ -336,7 +341,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] font-medium">{deal.client.name}</div>
                 <div className="text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
-                  {STATUS_LABEL[deal.status] ?? deal.status}
+                  {dealStatusLabel(deal.status)}
                 </div>
               </div>
             </Link>
@@ -388,9 +393,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                     {deal.feeDisplay}
                   </td>
                   <td className="border-b px-5 py-3.5" style={{ borderColor: "var(--hairline-soft)" }}>
-                    <span className={`chip ${STATUS_CHIP[deal.status] ?? "chip-neutral"}`}>
+                    <span className={`chip ${dealStatusChip(deal.status, expiredDealIds.has(deal.id))}`}>
                       <span className="chip-dot" />
-                      {STATUS_LABEL[deal.status] ?? deal.status}
+                      {dealStatusLabel(deal.status, expiredDealIds.has(deal.id))}
                     </span>
                   </td>
                   <td className="border-b px-5 py-3.5 text-[13px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline-soft)" }}>
