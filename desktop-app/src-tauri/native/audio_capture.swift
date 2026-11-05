@@ -43,6 +43,10 @@ final class MicCapture {
     private var configObserver: NSObjectProtocol?
     private var tapInstalled = false
     private(set) var running = false
+    // While the engine has no input after a device change: the uptime (ns)
+    // from which the gap still has to be filled with silence. nil while
+    // it's recording. Guarded by lock, like pcm16.
+    private var stalledSince: UInt64?
 
     /// A denied (or not yet answered) Microphone prompt doesn't stop the
     /// engine from starting; the tap just gets silence, so the rep's side of
@@ -70,6 +74,7 @@ final class MicCapture {
         lock.lock()
         pcm16 = Data()
         exportedSamples = 0
+        stalledSince = nil
         lock.unlock()
 
         let code = installTapAndStart()
@@ -89,8 +94,35 @@ final class MicCapture {
         defer { stateLock.unlock() }
         guard running else { return }
         stopEngine()
+        lock.lock()
+        if stalledSince == nil {
+            stalledSince = DispatchTime.now().uptimeNanoseconds
+        }
+        lock.unlock()
         // Stays silent until the next change brings a usable input back.
-        _ = installTapAndStart()
+        guard installTapAndStart() == 0 else { return }
+        // Silence for the gap, so the rep's words from here on stay lined up
+        // in time with the other side, the same way the system side fills
+        // its own gap after a restart.
+        lock.lock()
+        fillStall(until: DispatchTime.now().uptimeNanoseconds)
+        stalledSince = nil
+        lock.unlock()
+    }
+
+    // Samples of silence owed for the stall, from stalledSince to `now`.
+    // Called with lock held.
+    private func stallSamples(until now: UInt64) -> Int {
+        guard let since = stalledSince, now > since else { return 0 }
+        return Int(Double(now - since) / 1_000_000_000 * captureSampleRate)
+    }
+
+    // Called with lock held.
+    private func fillStall(until now: UInt64) {
+        let missing = stallSamples(until: now)
+        if missing > 0 {
+            pcm16.append(Data(count: missing * MemoryLayout<Int16>.size))
+        }
     }
 
     private func stopObservingDeviceChanges() {
@@ -165,10 +197,12 @@ final class MicCapture {
         }
     }
 
+    /// Counts a stall still going on as the silence it will be filled with,
+    /// so the system side can line itself up against this even then.
     var sampleCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return pcm16.count / MemoryLayout<Int16>.size
+        return pcm16.count / MemoryLayout<Int16>.size + stallSamples(until: DispatchTime.now().uptimeNanoseconds)
     }
 
     func stopAndGet() -> Data {
@@ -181,6 +215,7 @@ final class MicCapture {
         lock.lock()
         let result = pcm16
         pcm16 = Data()
+        stalledSince = nil
         lock.unlock()
         return result
     }
@@ -192,6 +227,14 @@ final class MicCapture {
     func snapshotDelta() -> Data {
         lock.lock()
         defer { lock.unlock() }
+        // Still no input since a device change: the part of the gap this
+        // chunk covers goes out as silence now, so the restart only fills
+        // what comes after it.
+        if stalledSince != nil {
+            let now = DispatchTime.now().uptimeNanoseconds
+            fillStall(until: now)
+            stalledSince = now
+        }
         let totalSamples = pcm16.count / MemoryLayout<Int16>.size
         guard totalSamples > exportedSamples else { return Data() }
         let delta = pcm16.suffix(from: exportedSamples * MemoryLayout<Int16>.size)
@@ -212,6 +255,10 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var capturing = false
     private let mic = MicCapture()
 
+    /// Blocks until capture is running or has failed, which includes waiting
+    /// on the Microphone and Screen Recording prompts for as long as they're
+    /// open. Never call it on the main thread (lib.rs runs it on a
+    /// background one), or the app hangs while the prompt is up.
     func start() -> Int32 {
         if capturing { return -100 }
 

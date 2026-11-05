@@ -1,6 +1,7 @@
 mod audio;
 #[cfg(target_os = "windows")]
 mod audio_windows;
+mod saved_queue;
 mod wav;
 
 use std::collections::VecDeque;
@@ -75,6 +76,13 @@ static UPLOADS: tauri::async_runtime::Mutex<Option<Upload>> = tauri::async_runti
 // Keeps cache file names unique when one chunk is saved as several pieces.
 static SAVED_CHUNKS: AtomicU64 = AtomicU64::new(0);
 
+// Starting waits on the macOS Microphone (and Screen Recording) prompt for as
+// long as it's open, so it runs on a background thread: on the main thread,
+// where a plain command runs, the whole app hung until it was answered.
+// Starts still go one at a time, as they did there, since neither capture
+// backend's "already running" check holds up against two at once.
+static STARTING: Mutex<()> = Mutex::new(());
+
 #[derive(serde::Serialize)]
 struct StopCaptureResult {
     ok: bool,
@@ -82,7 +90,9 @@ struct StopCaptureResult {
 }
 
 struct PendingChunk {
-    wav: Vec<u8>,
+    // None for a chunk restored after a restart: read back from saved_at
+    // when it's sent instead of all being loaded at launch.
+    wav: Option<Vec<u8>>,
     // Copy on disk so a flaky connection doesn't lose audio. Only deleted
     // once the backend confirms it processed the chunk.
     saved_at: Option<PathBuf>,
@@ -90,7 +100,12 @@ struct PendingChunk {
 
 // Chunks recorded under one token, oldest first, waiting to go up.
 struct Upload {
+    // Empty for a queue restored after a restart, until the Stop & finish
+    // for its call passes it in (see upload_for).
     token: String,
+    // saved_queue::call_key of the token, which is what the index on disk
+    // knows the call by.
+    call: String,
     pending: VecDeque<PendingChunk>,
 }
 
@@ -98,7 +113,17 @@ impl Upload {
     fn enqueue(&mut self, app: &tauri::AppHandle, wav: Vec<u8>) {
         for piece in wav::split(wav, MAX_CHUNK_BYTES) {
             let saved_at = save_to_cache(app, &piece);
-            self.pending.push_back(PendingChunk { wav: piece, saved_at });
+            self.pending.push_back(PendingChunk { wav: Some(piece), saved_at });
+        }
+        self.save(app);
+    }
+
+    // Brings the index on disk in line with the queue, so a crash or quit
+    // from here on loses nothing that's queued and resends nothing that's
+    // already gone up.
+    fn save(&self, app: &tauri::AppHandle) {
+        if let Ok(cache_dir) = app.path().app_cache_dir() {
+            saved_queue::save(&cache_dir, &self.call, self.pending.iter().filter_map(|chunk| chunk.saved_at.as_deref()));
         }
     }
 }
@@ -108,17 +133,43 @@ fn live_loop() -> MutexGuard<'static, Option<mpsc::Sender<()>>> {
 }
 
 // Anything still queued under another token is left over from a call that
-// was discarded, and can't be sent anymore.
-fn upload_for<'a>(slot: &'a mut Option<Upload>, token: &str) -> &'a mut Upload {
-    if slot.as_ref().is_some_and(|u| u.token != token) {
+// was discarded (or never finished before the app restarted), and can't be
+// sent anymore. A queue restored after a restart gets its token back here.
+fn upload_for<'a>(app: &tauri::AppHandle, slot: &'a mut Option<Upload>, token: &str) -> &'a mut Upload {
+    let call = saved_queue::call_key(token);
+    if slot.as_ref().is_some_and(|u| u.call != call) {
         *slot = None;
+        if let Ok(cache_dir) = app.path().app_cache_dir() {
+            saved_queue::clear(&cache_dir);
+        }
     }
-    slot.get_or_insert_with(|| Upload { token: token.to_string(), pending: VecDeque::new() })
+    let upload = slot.get_or_insert_with(|| Upload { token: String::new(), call, pending: VecDeque::new() });
+    upload.token = token.to_string();
+    upload
+}
+
+// Puts back the queue a run that quit or crashed mid-call left on disk, so
+// that call's next Stop & finish (or a retry of it) sends what never got
+// through, instead of an empty final.
+fn restore_saved_queue(app: &tauri::AppHandle) {
+    let Ok(cache_dir) = app.path().app_cache_dir() else { return };
+    let Some((call, chunks)) = saved_queue::load(&cache_dir) else { return };
+    let Ok(mut slot) = UPLOADS.try_lock() else { return };
+    if slot.is_none() {
+        eprintln!("[capture] {} unsent chunk(s) from the last run will go with the next Stop & finish", chunks.len());
+        let pending = chunks.into_iter().map(|path| PendingChunk { wav: None, saved_at: Some(path) }).collect();
+        *slot = Some(Upload { token: String::new(), call, pending });
+    }
 }
 
 #[tauri::command]
-fn start_local_capture() -> Result<(), String> {
-    audio::start_capture()
+async fn start_local_capture() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _one_at_a_time = STARTING.lock().unwrap_or_else(PoisonError::into_inner);
+        audio::start_capture()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // Called once the caller has a token (i.e. once startLocalCapture's deal
@@ -156,12 +207,12 @@ fn live_update_loop(app: tauri::AppHandle, token: String, stop: mpsc::Receiver<(
             }
             audio::snapshot_delta_wav()
         };
-        let upload = upload_for(&mut slot, &token);
+        let upload = upload_for(&app, &mut slot, &token);
         if let Ok(Some(wav)) = snapshot {
             upload.enqueue(&app, wav);
         }
         // Also retries whatever an earlier pass couldn't get through.
-        let result = tauri::async_runtime::block_on(send_pending(upload, false));
+        let result = tauri::async_runtime::block_on(send_pending(&app, upload, false));
         if let Some(error) = result.error {
             eprintln!("[capture] live chunk not sent yet, will retry: {error}");
         }
@@ -443,28 +494,30 @@ async fn stop_local_capture_and_upload(app: tauri::AppHandle, token: String) -> 
     live_loop().take();
     // Waits out a live pass that's still uploading, so its chunk lands first.
     let mut slot = UPLOADS.lock().await;
-    let upload = upload_for(&mut slot, &token);
+    let upload = upload_for(&app, &mut slot, &token);
 
     // Whatever arrived since the last live chunk (or the whole call, if live
     // updates never got a chance to fire). Chunks the server already took
     // are transcribed and appended there, so none of those go again. On a
     // retry after a failed upload, capture has already stopped: nothing new
-    // comes in here, and exactly what didn't get through is sent again.
+    // comes in here, and exactly what didn't get through is sent again. The
+    // same goes after the app restarted mid-call, from the queue restored
+    // at launch.
     if let Some(wav) = audio::snapshot_delta_wav()? {
         upload.enqueue(&app, wav);
     }
     audio::stop_capture_wav()?;
 
-    Ok(send_pending(upload, true).await)
+    Ok(send_pending(&app, upload, true).await)
 }
 
 /// Sends what's queued, oldest first, and stops at the first chunk that
 /// doesn't get through, leaving it and everything after it queued for the
 /// next try. With `finish`, the last chunk goes up as the final one, which
 /// ends the call on the server; that one goes even with no audio in it.
-async fn send_pending(upload: &mut Upload, finish: bool) -> StopCaptureResult {
+async fn send_pending(app: &tauri::AppHandle, upload: &mut Upload, finish: bool) -> StopCaptureResult {
     if finish && upload.pending.is_empty() {
-        upload.pending.push_back(PendingChunk { wav: Vec::new(), saved_at: None });
+        upload.pending.push_back(PendingChunk { wav: Some(Vec::new()), saved_at: None });
     }
     while let Some(chunk) = upload.pending.front() {
         let is_final = finish && upload.pending.len() == 1;
@@ -473,6 +526,9 @@ async fn send_pending(upload: &mut Upload, finish: bool) -> StopCaptureResult {
             return result;
         }
         upload.pending.pop_front();
+        // Right away, before the next one goes: a crash after this point
+        // must not send this chunk a second time.
+        upload.save(app);
     }
     StopCaptureResult { ok: true, error: None }
 }
@@ -492,6 +548,14 @@ fn save_to_cache(app: &tauri::AppHandle, wav: &[u8]) -> Option<PathBuf> {
 
 /// Shared by both the periodic live pings and the final call.
 async fn upload_chunk(token: &str, chunk: &PendingChunk, is_final: bool) -> StopCaptureResult {
+    // A chunk restored after a restart is read back from the cache. If its
+    // file has gone since (the system may clear caches), it goes up empty:
+    // there's nothing left of it to transcribe, and as the final it still
+    // ends the call.
+    let body = match &chunk.wav {
+        Some(wav) => wav.clone(),
+        None => chunk.saved_at.as_ref().and_then(|path| std::fs::read(path).ok()).unwrap_or_default(),
+    };
     let client = reqwest::Client::new();
     let url = format!("{APP_BASE_URL}/api/local-capture/transcribe?final={}", if is_final { "true" } else { "false" });
     let send_result = client
@@ -499,7 +563,7 @@ async fn upload_chunk(token: &str, chunk: &PendingChunk, is_final: bool) -> Stop
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "audio/wav")
         .timeout(Duration::from_secs(UPLOAD_TIMEOUT_SECS))
-        .body(chunk.wav.clone())
+        .body(body)
         .send()
         .await;
 
@@ -571,16 +635,16 @@ pub fn run() {
     // skipped for `mas` builds (see check_for_update's doc comment above).
     #[cfg(all(desktop, not(feature = "mas")))]
     {
-        builder = builder
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            .setup(|app| {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(check_for_update(handle));
-                Ok(())
-            });
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder
+        .setup(|app| {
+            restore_saved_queue(app.handle());
+            #[cfg(all(desktop, not(feature = "mas")))]
+            tauri::async_runtime::spawn(check_for_update(app.handle().clone()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_local_capture,
             begin_live_updates,
