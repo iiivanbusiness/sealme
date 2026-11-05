@@ -11,6 +11,7 @@ import { createSenderDomain, getSenderDomainStatus, removeSenderDomain } from "@
 import { sendTeammateInviteEmail, sendVerificationEmail } from "@/lib/email";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
+import { isValidDomain, lookupDomainVerification, newDomainVerificationToken, normalizeDomain } from "@/lib/domain-verification";
 
 type ToggleField = "requireApproval" | "notifyOnSigned" | "autoRemind" | "zoomConnected" | "meetConnected";
 
@@ -208,6 +209,8 @@ export async function removeTeammate(userId: string): Promise<{ error?: string }
         phoneVerifiedAt: null,
         scimExternalId: null,
         deactivatedAt: removed.deactivatedAt ?? new Date(),
+        // Signs them out of every device they're still signed in on.
+        sessionVersion: { increment: 1 },
       },
     }),
     prisma.reviewChainStep.deleteMany({ where: { assigneeId: removed.id } }),
@@ -293,27 +296,109 @@ function domainError(message: string): never {
   redirect(`/settings?error=${encodeURIComponent(message)}`);
 }
 
+// The domain only limits invites until the workspace proves it owns it
+// (verifyAllowedDomain); SSO and SCIM need that proof. Several workspaces
+// can type in the same domain, so someone squatting on a company's domain
+// can't lock the company out, but once one has verified it, it's theirs.
+// A new domain gets a new token and starts unverified, and since SSO is
+// only for a verified domain, changing it turns SSO off.
 export async function updateAllowedDomain(formData: FormData) {
-  const raw = String(formData.get("domain") ?? "").trim().toLowerCase();
-  const domain = raw.replace(/^@/, "") || null;
-  if (domain && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) {
+  const domain = normalizeDomain(String(formData.get("domain") ?? "")) || null;
+  if (domain && !isValidDomain(domain)) {
     domainError("That doesn't look like a domain, e.g. yourcompany.com");
   }
 
   const user = await requirePermission("canManageWorkspace");
-  // Nothing proves a workspace owns its domain yet, and SSO sign-in finds
-  // the workspace by it, so a domain stays with the first workspace that
-  // set it.
-  if (domain) {
-    const taken = await prisma.workspace.findFirst({ where: { allowedEmailDomain: domain, id: { not: user.workspaceId } }, select: { id: true } });
-    if (taken) domainError("Another SealMe workspace already uses that domain. Contact SealMe support if it's yours");
+  const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: user.workspaceId } });
+  if (domain === workspace.allowedEmailDomain) {
+    revalidatePath("/settings");
+    return;
   }
-  await prisma.workspace.update({ where: { id: user.workspaceId }, data: { allowedEmailDomain: domain } });
+  if (domain) {
+    const taken = await prisma.workspace.findFirst({
+      where: { allowedEmailDomain: domain, allowedEmailDomainVerifiedAt: { not: null }, id: { not: user.workspaceId } },
+      select: { id: true },
+    });
+    if (taken) domainError("Another SealMe workspace has verified that domain. Contact SealMe support if it's yours");
+  }
+  await prisma.workspace.update({
+    where: { id: user.workspaceId },
+    data: {
+      allowedEmailDomain: domain,
+      domainVerificationToken: domain ? newDomainVerificationToken() : null,
+      allowedEmailDomainVerifiedAt: null,
+      ssoEnabled: false,
+    },
+  });
 
   const session = await auth();
   await logAudit({ workspaceId: user.workspaceId, actorEmail: session?.user?.email, action: "workspace.domain_restriction_updated", metadata: { domain } });
+  if (workspace.ssoEnabled) {
+    await logAudit({ workspaceId: user.workspaceId, actorEmail: session?.user?.email, action: "workspace.sso_disabled", metadata: { reason: "domain_changed" } });
+  }
 
   revalidatePath("/settings");
+}
+
+// A domain set before verification existed has no token yet; this gives it
+// one so the TXT record can be shown. Never replaces an existing token, or
+// a record the admin already added would stop matching.
+export async function startDomainVerification(): Promise<{ error?: string }> {
+  const user = await requirePermission("canManageWorkspace");
+  const updated = await prisma.workspace.updateMany({
+    where: { id: user.workspaceId, allowedEmailDomain: { not: null }, domainVerificationToken: null },
+    data: { domainVerificationToken: newDomainVerificationToken() },
+  });
+  if (updated.count === 0) {
+    const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: user.workspaceId }, select: { allowedEmailDomain: true } });
+    if (!workspace.allowedEmailDomain) return { error: "Save an email domain first" };
+  }
+  revalidatePath("/settings");
+  return {};
+}
+
+// Looks for the TXT record on the domain. Returns { error } as data for the
+// same reason inviteTeammate does.
+export async function verifyAllowedDomain(): Promise<{ error?: string }> {
+  const user = await requirePermission("canManageWorkspace");
+  const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: user.workspaceId } });
+  const domain = workspace.allowedEmailDomain;
+  const token = workspace.domainVerificationToken;
+  if (!domain || !token) return { error: "Save an email domain first" };
+  if (workspace.allowedEmailDomainVerifiedAt) return {};
+
+  const allowed = await checkRateLimit(`verify-domain:${workspace.id}`, 20, 60 * 60 * 1000);
+  if (!allowed) return { error: "Too many checks in the last hour. Try again later" };
+
+  const claimedElsewhere = () =>
+    prisma.workspace.count({ where: { allowedEmailDomain: domain, allowedEmailDomainVerifiedAt: { not: null }, id: { not: workspace.id } } });
+  if ((await claimedElsewhere()) > 0) {
+    return { error: "Another SealMe workspace has already verified this domain. Contact SealMe support if it's yours" };
+  }
+
+  const result = await lookupDomainVerification(domain, token);
+  if (result === "lookup_failed") return { error: `Couldn't look up the DNS records for ${domain}. Try again in a few minutes` };
+  if (result === "missing") {
+    return { error: `The TXT record isn't on ${domain} yet. DNS changes can take a while to show up, so try again in a few minutes` };
+  }
+
+  // Checked again after the lookup, since it can take a few seconds.
+  if ((await claimedElsewhere()) > 0) {
+    return { error: "Another SealMe workspace has already verified this domain. Contact SealMe support if it's yours" };
+  }
+  // Only if the domain and token are still the ones that were checked: an
+  // admin could have changed the domain while the lookup ran.
+  const updated = await prisma.workspace.updateMany({
+    where: { id: workspace.id, allowedEmailDomain: domain, domainVerificationToken: token },
+    data: { allowedEmailDomainVerifiedAt: new Date() },
+  });
+  if (updated.count === 0) return { error: "The domain changed while it was being checked. Check it again" };
+
+  const session = await auth();
+  await logAudit({ workspaceId: workspace.id, actorEmail: session?.user?.email, action: "workspace.domain_verified", metadata: { domain } });
+
+  revalidatePath("/settings");
+  return {};
 }
 
 // Returns the raw token exactly once — only the hash is ever stored, same
@@ -380,13 +465,32 @@ export async function toggleSso(): Promise<{ error?: string }> {
     if (!workspace.allowedEmailDomain) {
       return { error: "Set an allowed email domain above first. It's how sign-ins get matched to this workspace" };
     }
-    const shared = await prisma.workspace.count({ where: { allowedEmailDomain: workspace.allowedEmailDomain, id: { not: workspace.id } } });
-    if (shared > 0) {
-      return { error: "Another SealMe workspace uses the same email domain, so SSO can't tell them apart. Contact SealMe support" };
+    // Sign-ins are matched to a workspace by domain, so only one that has
+    // proven it owns the domain gets them.
+    if (!workspace.allowedEmailDomainVerifiedAt) {
+      return { error: "Verify the email domain above first. SSO only works for a domain this workspace has proven it owns" };
+    }
+    const claimed = await prisma.workspace.count({
+      where: { allowedEmailDomain: workspace.allowedEmailDomain, allowedEmailDomainVerifiedAt: { not: null }, id: { not: workspace.id } },
+    });
+    if (claimed > 0) {
+      return { error: "Another SealMe workspace has also verified this email domain. Contact SealMe support" };
     }
   }
 
-  await prisma.workspace.update({ where: { id: user.workspaceId }, data: { ssoEnabled: !workspace.ssoEnabled } });
+  // Only if nothing changed since the checks above: a domain saved in the
+  // meantime turns SSO off and clears the verification, and this mustn't
+  // turn it back on for the new, unverified domain.
+  const updated = await prisma.workspace.updateMany({
+    where: workspace.ssoEnabled
+      ? { id: workspace.id, ssoEnabled: true }
+      : { id: workspace.id, ssoEnabled: false, allowedEmailDomain: workspace.allowedEmailDomain, allowedEmailDomainVerifiedAt: { not: null } },
+    data: { ssoEnabled: !workspace.ssoEnabled },
+  });
+  if (updated.count === 0) {
+    revalidatePath("/settings");
+    return { error: "These settings changed while saving. Check them and try again" };
+  }
 
   const session = await auth();
   await logAudit({

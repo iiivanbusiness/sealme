@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { discoverOidcConfig, generatePkce, signSsoState, ssoCallbackUrl } from "@/lib/sso";
-import { pickSsoWorkspace } from "@/lib/auth-rules";
+import { pickSsoWorkspaceForDomain } from "@/lib/domain-verification";
 import { randomBytes } from "crypto";
 
 // A code from the login page's ERROR_MESSAGE list.
@@ -11,18 +11,22 @@ function loginError(code: string): NextResponse {
 
 // There's no per-workspace vanity login URL, so the tenant is resolved the
 // same way the rest of enterprise access control already works here: by
-// matching the email's domain against the workspace's allowedEmailDomain,
-// and only for someone already on that workspace (see pickSsoWorkspace).
+// matching the email's domain against the workspace's allowedEmailDomain.
+// A workspace that proved it owns the domain takes everyone at it; before
+// anyone has, only someone already on a workspace is sent there (see
+// pickSsoWorkspaceForDomain).
 export async function GET(req: Request) {
   const email = new URL(req.url).searchParams.get("email")?.trim().toLowerCase();
   const domain = email?.split("@")[1];
   if (!email || !domain) return loginError("SsoNoEmail");
 
   const [candidates, member] = await Promise.all([
-    prisma.workspace.findMany({ where: { allowedEmailDomain: domain, ssoEnabled: true } }),
+    prisma.workspace.findMany({
+      where: { allowedEmailDomain: domain, OR: [{ ssoEnabled: true }, { allowedEmailDomainVerifiedAt: { not: null } }] },
+    }),
     prisma.user.findUnique({ where: { email }, select: { workspaceId: true } }),
   ]);
-  const picked = pickSsoWorkspace(candidates, member?.workspaceId);
+  const picked = pickSsoWorkspaceForDomain(candidates, member?.workspaceId);
   if ("error" in picked) return loginError(picked.error);
   const { workspace } = picked;
   if (!workspace.ssoIssuer || !workspace.ssoClientId) return loginError("SsoNotConfigured");

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { authenticateScimRequest, parseUserNameEqFilter, scimError, scimJson, scimListResponse, toScimUser } from "@/lib/scim";
 import { sendTeammateInviteEmail } from "@/lib/email";
+import { emailInDomain } from "@/lib/domain-verification";
 
 function appUrl(): string {
   return process.env.NEXT_PUBLIC_APP_URL ?? "";
@@ -37,6 +38,10 @@ export async function GET(req: Request) {
 // POST /api/scim/v2/Users — provisions a new teammate, same shape as
 // inviting one by hand (no password, email pre-verified since the IdP
 // already vouches for their identity, no role until an admin assigns one).
+// Only for addresses at the domain this workspace proved it owns: anyone
+// can generate a SCIM token for their own workspace, so without that an
+// attacker could create accounts for other companies' people and hold on
+// to their addresses.
 export async function POST(req: Request) {
   const workspace = await authenticateScimRequest(req);
   if (!workspace) return scimError(401, "Invalid or missing bearer token");
@@ -58,7 +63,10 @@ export async function POST(req: Request) {
   const email = (body.userName || body.emails?.[0]?.value || "").trim().toLowerCase();
   if (!email) return scimError(400, "userName (or an email) is required");
 
-  if (workspace.allowedEmailDomain && !email.endsWith(`@${workspace.allowedEmailDomain}`)) {
+  if (!workspace.allowedEmailDomain || !workspace.allowedEmailDomainVerifiedAt) {
+    return scimError(403, "Verify this workspace's email domain in SealMe Settings (Access & provisioning) before provisioning new users");
+  }
+  if (!emailInDomain(email, workspace.allowedEmailDomain)) {
     return scimError(400, `This workspace only accepts @${workspace.allowedEmailDomain} email addresses`);
   }
 

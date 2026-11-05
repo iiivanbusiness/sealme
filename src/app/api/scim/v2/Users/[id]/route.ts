@@ -5,6 +5,12 @@ function appUrl(): string {
   return process.env.NEXT_PUBLIC_APP_URL ?? "";
 }
 
+// Deactivating someone also signs them out everywhere: a session signed
+// with an older sessionVersion stops working. Updating and deactivating
+// people who are already here works whether or not the workspace has
+// verified its domain; only creating new ones needs that (see ../route.ts).
+const END_SESSIONS = { sessionVersion: { increment: 1 } };
+
 // Refuses to deactivate the workspace's last teammate who can manage the
 // team — same safety net the manual "remove teammate" flow already
 // enforces, applied here too since an IdP-driven offboarding queue can hit
@@ -59,6 +65,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       name: body.name?.formatted || body.displayName || existing.name,
       scimExternalId: body.externalId ?? existing.scimExternalId,
       deactivatedAt: body.active === false ? (existing.deactivatedAt ?? new Date()) : body.active === true ? null : existing.deactivatedAt,
+      ...(deactivating ? END_SESSIONS : {}),
     },
   });
 
@@ -98,7 +105,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     }
   }
 
-  if (active === false && !existing.deactivatedAt) {
+  const deactivating = active === false && !existing.deactivatedAt;
+  if (deactivating) {
     const blocked = await guardLastTeamManager(id, workspace.id);
     if (blocked) return blocked;
   }
@@ -108,6 +116,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     data: {
       name: name ?? existing.name,
       deactivatedAt: active === false ? (existing.deactivatedAt ?? new Date()) : active === true ? null : existing.deactivatedAt,
+      ...(deactivating ? END_SESSIONS : {}),
     },
   });
 
@@ -130,7 +139,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   if (!existing.deactivatedAt) {
     const blocked = await guardLastTeamManager(id, workspace.id);
     if (blocked) return blocked;
-    await prisma.user.update({ where: { id }, data: { deactivatedAt: new Date() } });
+    await prisma.user.update({ where: { id }, data: { deactivatedAt: new Date(), ...END_SESSIONS } });
   }
 
   return new Response(null, { status: 204 });
