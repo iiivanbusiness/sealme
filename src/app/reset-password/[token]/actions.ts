@@ -25,10 +25,17 @@ export async function resetPassword(token: string, joining: boolean, formData: F
     redirect(back(joining ? "This invite link was already used or has expired. Use Forgot password on the sign-in page, or ask for a new invite." : "This reset link is invalid or has expired. Request a new one."));
   }
 
+  // A new password signs out every session, this browser's too: whoever
+  // knew the old one is out, and the owner signs in again with the new one.
   const current = await prisma.user.findUniqueOrThrow({ where: { id: resetToken.userId }, select: { emailVerifiedAt: true } });
   const user = await prisma.user.update({
     where: { id: resetToken.userId },
-    data: { passwordHash: hashPassword(password), emailVerifiedAt: current.emailVerifiedAt ?? new Date(), ...(joining ? { name } : {}) },
+    data: {
+      passwordHash: hashPassword(password),
+      emailVerifiedAt: current.emailVerifiedAt ?? new Date(),
+      sessionVersion: { increment: 1 },
+      ...(joining ? { name } : {}),
+    },
   });
   await prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } });
   await logAudit({ workspaceId: user.workspaceId, actorEmail: user.email, action: joining ? "teammate.joined" : "password.reset" });

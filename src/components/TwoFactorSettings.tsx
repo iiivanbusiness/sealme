@@ -111,7 +111,7 @@ export default function TwoFactorSettings({ enabled }: { enabled: boolean }) {
         className="flex flex-col gap-3"
       >
         <p className="text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
-          Scan this with Google Authenticator, 1Password, or any TOTP app, then enter the 6-digit code it shows.
+          Scan this with Google Authenticator, 1Password, or any TOTP app, then enter the 6-digit code it shows and your password. Once it&apos;s on, you stay signed in here and every other device is signed out.
         </p>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={qr.qrCodeDataUrl} alt="2FA setup QR code" width={180} height={180} className="rounded-[10px]" style={{ border: "1px solid var(--hairline)" }} />
@@ -122,7 +122,11 @@ export default function TwoFactorSettings({ enabled }: { enabled: boolean }) {
           <span className="text-[13px] font-medium">6-digit code</span>
           <input name="code" required inputMode="numeric" maxLength={6} placeholder="123456" className="input" style={{ maxWidth: 160 }} />
         </label>
-        {error && <div className="chip chip-warn max-w-full whitespace-normal break-words px-3 py-2 text-[12.5px]">{error}</div>}
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[13px] font-medium">Current password</span>
+          <input name="password" type="password" required autoComplete="current-password" className="input" style={{ maxWidth: 260 }} />
+        </label>
+        {error &&<div className="chip chip-warn max-w-full whitespace-normal break-words px-3 py-2 text-[12.5px]">{error}</div>}
         <div className="flex gap-2">
           <button type="submit" disabled={busy} className="btn btn-primary btn-sm">
             {busy ? "Confirming…" : "Confirm & enable"}
@@ -148,7 +152,7 @@ export default function TwoFactorSettings({ enabled }: { enabled: boolean }) {
     return (
       <form action={handleDisable} className="flex flex-col gap-3">
         <p className="text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
-          Confirm your password to turn off two-factor authentication.
+          Confirm your password to turn off two-factor authentication. You stay signed in here, and every other device is signed out.
         </p>
         <input name="password" type="password" required placeholder="Current password" className="input" style={{ maxWidth: 260 }} />
         {error && <div className="chip chip-warn max-w-full whitespace-normal break-words px-3 py-2 text-[12.5px]">{error}</div>}

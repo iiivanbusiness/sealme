@@ -37,7 +37,7 @@ export default async function ResetPasswordPage({
           {joining ? `Join ${workspaceName ?? "your team"} on SealMe` : "Set a new password"}
         </h1>
         <p className="mb-6 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>
-          {joining ? "Add your name and choose a password, then sign in." : "Choose a new password for your SealMe account."}
+          {joining ? "Add your name and choose a password, then sign in." : "Choose a new password for your SealMe account. Every device signed in with the old one is signed out."}
         </p>
 
         {error && (

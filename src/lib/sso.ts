@@ -90,13 +90,13 @@ export async function verifyIdToken(idToken: string, jwksUri: string, issuer: st
 // uses (same salt convention: the cookie's own name), so every existing
 // auth()/session() call in the app reads an SSO-issued session no
 // differently than one NextAuth minted itself.
-export async function mintSessionCookie(user: { id: string; name: string; email: string; workspaceId: string }) {
+export async function mintSessionCookie(user: { id: string; name: string; email: string; workspaceId: string; sessionVersion: number }) {
   const useSecureCookies = appUrl().startsWith("https://");
   const cookieName = useSecureCookies ? "__Secure-authjs.session-token" : "authjs.session-token";
   const maxAge = 30 * 24 * 60 * 60; // matches Auth.js's own default session length
 
   const token = await encodeJwt({
-    token: { name: user.name, email: user.email, picture: null, sub: user.id, workspaceId: user.workspaceId },
+    token: { name: user.name, email: user.email, picture: null, sub: user.id, workspaceId: user.workspaceId, sessionVersion: user.sessionVersion },
     secret: authSecret(),
     salt: cookieName,
     maxAge,

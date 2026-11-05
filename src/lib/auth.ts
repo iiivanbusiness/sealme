@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { cache } from "react";
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
@@ -12,13 +13,45 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { notifySignup } from "@/lib/signup-alert";
 import { verifyTotpCode, consumeBackupCode, type BackupCode } from "@/lib/two-factor";
-import { googleSignInChanges, googleSignInRefusal, normalizeEmail } from "@/lib/auth-rules";
+import {
+  googleSignInChanges,
+  googleSignInRefusal,
+  isSessionCurrent,
+  normalizeEmail,
+  signSessionReissue,
+  verifySessionReissue,
+} from "@/lib/auth-rules";
 
-const findSessionAccount = cache((email: string) =>
-  prisma.user.findUnique({ where: { email }, select: { workspaceId: true, deactivatedAt: true } })
-);
+const loadSessionAccount = (email: string) =>
+  prisma.user.findUnique({ where: { email }, select: { workspaceId: true, deactivatedAt: true, sessionVersion: true } });
+const findSessionAccount = cache(loadSessionAccount);
 
-export const { handlers, signIn, signOut, auth } = NextAuth({
+// Signs the reissue keepThisSession hands the jwt callback below. It only
+// ever travels inside this process (unstable_update calls Auth.js
+// directly, nothing goes through the browser), so a key made at startup
+// is enough and nothing outside can sign one.
+const sessionReissueKey = randomBytes(32);
+
+// The cookie a reissue replaced, by its token id, for the rest of that
+// request: Next renders the page again in the same response, and auth()
+// there still reads the cookie the request came in with (headers(), not
+// the cookie the action just set), which carries the old version. Only
+// that one token, and only for seconds; never other sessions on the account.
+const REISSUED_TOKEN_TTL_MS = 15_000;
+const reissuedTokens = new Map<string, { version: number; until: number }>();
+
+function rememberReissuedToken(jti: unknown, version: number, now: number) {
+  if (typeof jti !== "string") return;
+  for (const [id, entry] of reissuedTokens) if (entry.until <= now) reissuedTokens.delete(id);
+  reissuedTokens.set(jti, { version, until: now + REISSUED_TOKEN_TTL_MS });
+}
+
+function reissuedVersion(jti: unknown, now: number): number | null {
+  const entry = typeof jti === "string" ? reissuedTokens.get(jti) : undefined;
+  return entry && entry.until > now ? entry.version : null;
+}
+
+const nextAuth = NextAuth({
   ...authConfig,
   providers: [
     Credentials({
@@ -72,12 +105,13 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             }
             await prisma.user.update({ where: { id: user.id }, data: { twoFactorBackupCodes: JSON.stringify(updated) } });
             await logAudit({ workspaceId: user.workspaceId, actorEmail: email, action: "login.success", metadata: { provider: "credentials", via: "backup_code" } });
-            return { id: user.id, name: user.name, email: user.email, workspaceId: user.workspaceId };
+            return { id: user.id, name: user.name, email: user.email, workspaceId: user.workspaceId, sessionVersion: user.sessionVersion };
           }
         }
 
         await logAudit({ workspaceId: user.workspaceId, actorEmail: email, action: "login.success", metadata: { provider: "credentials" } });
-        return { id: user.id, name: user.name, email: user.email, workspaceId: user.workspaceId };
+        // The version read with the password it was checked against.
+        return { id: user.id, name: user.name, email: user.email, workspaceId: user.workspaceId, sessionVersion: user.sessionVersion };
       },
     }),
     Google({
@@ -116,7 +150,11 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     // ever fires on an actual Google sign-in, never on routine session reads.
     async jwt(params) {
       const token = await authConfig.callbacks.jwt(params);
-      const { account, profile } = params;
+      const { account, profile, trigger, session } = params;
+
+      if (account?.provider === "credentials" && params.user && "sessionVersion" in params.user) {
+        token.sessionVersion = params.user.sessionVersion;
+      }
 
       if (account?.provider === "google" && !token.workspaceId && profile?.email) {
         const email = normalizeEmail(profile.email);
@@ -158,17 +196,54 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         token.workspaceId = user.workspaceId;
         // The session check below looks the account up by this address.
         token.email = user.email;
+        // After the update above, so wiping a squatter's password signs
+        // out their sessions but not this one.
+        token.sessionVersion = user.sessionVersion;
       }
 
-      // Deactivation, removal, and self-deletion are otherwise only enforced at
-      // sign-in, and a JWT lives for 30 days. Returning null clears the cookie.
+      // keepThisSession: this person just changed their own password or 2FA
+      // here, so this session moves to the account's new version.
+      const now = Date.now();
+      const reissued = trigger === "update" && typeof token.email === "string"
+        ? verifySessionReissue(sessionReissueKey, session?.sessionReissue, token.email, now)
+        : null;
+      if (reissued !== null) {
+        rememberReissuedToken(token.jti, reissued, now);
+        token.sessionVersion = reissued;
+      } else {
+        const carried = reissuedVersion(token.jti, now);
+        if (carried !== null) token.sessionVersion = carried;
+      }
+
+      // Deactivation, removal, self-deletion and password or 2FA changes are
+      // otherwise only enforced at sign-in, and a JWT lives for 30 days.
+      // Returning null clears the cookie.
       if (typeof token.email === "string") {
-        const account = await findSessionAccount(token.email);
+        // Fresh from the database for a reissue: the version was bumped
+        // after this request may already have looked the account up.
+        const account = reissued !== null ? await loadSessionAccount(token.email) : await findSessionAccount(token.email);
         if (!account || account.deactivatedAt) return null;
         if (token.workspaceId && token.workspaceId !== account.workspaceId) return null;
+        if (!isSessionCurrent(token.sessionVersion, account.sessionVersion)) return null;
       }
 
       return token;
     },
   },
 });
+
+export const { handlers, signIn, signOut, auth } = nextAuth;
+
+// Call right after bumping the signed-in user's sessionVersion for a change
+// they made themselves (2FA on or off), so that change signs out their
+// other sessions but not the one they made it from. Only works inside a
+// Server Action or Route Handler, where the new cookie can be set. If it
+// fails they're signed out here too and sign in again, so it never throws.
+export async function keepThisSession(email: string, sessionVersion: number): Promise<void> {
+  const data = { user: {}, sessionReissue: signSessionReissue(sessionReissueKey, email, sessionVersion, Date.now()) };
+  try {
+    await nextAuth.unstable_update(data);
+  } catch (err) {
+    console.error("Couldn't keep the session after a security change", err);
+  }
+}

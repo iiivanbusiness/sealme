@@ -76,6 +76,8 @@ export async function deleteMyAccount(formData: FormData): Promise<{ error?: str
         twoFactorSecret: null,
         twoFactorBackupCodes: null,
         deactivatedAt: new Date(),
+        // Signs out every other device too, not just this one.
+        sessionVersion: { increment: 1 },
       },
     }),
     prisma.reviewChainStep.deleteMany({ where: { assigneeId: user.id } }),
