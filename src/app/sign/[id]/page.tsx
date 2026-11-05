@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { dispatchWebhookEvent } from "@/lib/webhooks";
-import { contractParty, fillClauses } from "@/lib/contract";
+import { readContractText } from "@/lib/contract-snapshot";
 import { signContract, requestClauseChange } from "./actions";
 import BrandLogo from "@/components/BrandLogo";
 import SignForm from "@/components/SignForm";
@@ -17,7 +17,10 @@ export default async function SignPage({ params, searchParams }: { params: Promi
     where: { id },
     include: { deal: { include: { client: true, fields: true, workspace: true } }, template: true, signers: { orderBy: { order: "asc" } } },
   });
-  if (!contract || !contract.template) notFound();
+  if (!contract) notFound();
+  // What the client was sent, never the deal's terms or template as they are now.
+  const agreement = await readContractText(contract);
+  if (!agreement) notFound();
 
   if (!contract.viewedAt) {
     // updateMany so two tabs opening at once announce it only once.
@@ -28,7 +31,6 @@ export default async function SignPage({ params, searchParams }: { params: Promi
     }
   }
 
-  const clauses = fillClauses(contract.template.clauses, contract.deal.fields);
   // The client is the only signer whose page this is — "signed" here means
   // the CLIENT'S OWN part is done, whether or not counter-signers still
   // need to act (partially_signed) or everyone's fully done (signed).
@@ -92,11 +94,11 @@ export default async function SignPage({ params, searchParams }: { params: Promi
         )}
 
         <div className="card px-5 py-7 md:px-[46px] md:py-[42px]">
-          <div className="mb-1.5 text-[22px] font-medium" style={{ letterSpacing: "-0.6px" }}>{contract.template.name}</div>
+          <div className="mb-1.5 text-[22px] font-medium" style={{ letterSpacing: "-0.6px" }}>{agreement.templateName}</div>
           <div className="mb-7 border-b pb-[22px] text-[13.5px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline-soft)" }}>
-            Between {contract.deal.workspace.name} and {contractParty(contract.deal.fields, contract.deal.client)}
+            Between {agreement.agencyName} and {agreement.clientName}
           </div>
-          {clauses.map((clause, i) => (
+          {agreement.clauses.map((clause, i) => (
             <div key={clause.title} className="mb-5 max-w-[64ch]">
               <h3 className="mb-1.5 flex gap-2 text-[14px] font-semibold">
                 <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{i + 1}.</span>

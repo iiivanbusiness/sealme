@@ -6,6 +6,7 @@ import { notifySlack } from "@/lib/slack";
 import { syncDealToHubspot } from "@/lib/hubspot";
 import { syncDealToSalesforce } from "@/lib/salesforce";
 import { logAudit } from "@/lib/audit";
+import { parseContractSnapshot } from "@/lib/contract-snapshot";
 
 function appUrl(): string {
   return process.env.NEXT_PUBLIC_APP_URL ?? "";
@@ -50,7 +51,7 @@ export async function finalizeContractSigned(contractId: string): Promise<void> 
       await sendSignedNotificationEmail({
         to: contract.deal.workspace.users.map((u) => u.email),
         clientName: contract.signerName ?? contract.deal.client.name,
-        templateName: contract.template?.name ?? "contract",
+        templateName: parseContractSnapshot(contract.snapshot)?.templateName ?? contract.template?.name ?? "contract",
         contractUrl: `${appUrl()}/deals/${contract.dealId}/contract`,
       });
     } catch (err) {
@@ -117,7 +118,7 @@ export async function advanceSigningOrFinalize(contractId: string): Promise<void
       to: nextSigner.email,
       signerName: nextSigner.name,
       clientName: contract.deal.client.name,
-      templateName: contract.template?.name ?? "contract",
+      templateName: parseContractSnapshot(contract.snapshot)?.templateName ?? contract.template?.name ?? "contract",
       signLink: `${appUrl()}/sign/${contract.id}/countersign/${nextSigner.token}`,
       workspaceName: contract.deal.workspace.name,
       verifiedSenderEmail: contract.deal.workspace.senderDomainStatus === "verified" ? contract.deal.workspace.senderEmail : null,

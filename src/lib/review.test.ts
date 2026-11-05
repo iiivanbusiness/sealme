@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prisma, sendContractEmail } = vi.hoisted(() => ({
+const { prisma, sendContractEmail, renderToBuffer } = vi.hoisted(() => ({
   prisma: {
     deal: { findUnique: vi.fn(), update: vi.fn() },
     contract: { findUnique: vi.fn(), update: vi.fn() },
@@ -9,10 +9,11 @@ const { prisma, sendContractEmail } = vi.hoisted(() => ({
     reviewChain: { findMany: vi.fn() },
   },
   sendContractEmail: vi.fn(),
+  renderToBuffer: vi.fn(),
 }));
 vi.mock("@/lib/db", () => ({ prisma }));
 vi.mock("@/lib/email", () => ({ sendContractEmail, sendReviewAssignedEmail: vi.fn(), sendChangesRequestedEmail: vi.fn() }));
-vi.mock("@react-pdf/renderer", () => ({ renderToBuffer: vi.fn() }));
+vi.mock("@react-pdf/renderer", () => ({ renderToBuffer }));
 vi.mock("@/lib/contract-pdf", () => ({ ContractPdfDocument: () => null }));
 vi.mock("@/lib/docusign", () => ({ sendDocusignEnvelope: vi.fn() }));
 vi.mock("@/lib/notifications", () => ({ createNotification: vi.fn() }));
@@ -98,6 +99,18 @@ describe("Sending a contract", () => {
     prisma.contract.findUnique.mockResolvedValue(approved);
     await performActualSend("k1");
     expect(sendContractEmail.mock.calls[2][0].replyTo).toBe(admin.email);
+  });
+
+  it("freezes what goes out, and builds the DocuSign PDF from that same text", async () => {
+    prisma.contract.findUnique.mockResolvedValue(contract());
+    await performActualSend("k1", PENDING);
+    const sent = prisma.contract.update.mock.calls[0][0].data.snapshot;
+    expect(sent).toEqual({ templateName: "Retainer", agencyName: "Agency", clientName: "Priya Shah", clauses: [{ title: "Fees", body: "The fee is $5,000 / month." }] });
+
+    prisma.contract.findUnique.mockResolvedValue(contract({ deliveryMethod: "docusign" }));
+    await performActualSend("k1", PENDING);
+    expect(renderToBuffer.mock.calls[0][0].props).toMatchObject({ templateName: sent.templateName, agencyName: sent.agencyName, clientName: sent.clientName, clauses: sent.clauses });
+    expect(prisma.contract.update.mock.calls[1][0].data.snapshot).toEqual(sent);
   });
 
   it("starts a fresh signing round on a resend", async () => {

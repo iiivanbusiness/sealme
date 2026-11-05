@@ -11,6 +11,7 @@ import { syncCrmLeadsIfDue } from "@/lib/crm-lead-autosync";
 import { cleanupRateLimitHits } from "@/lib/rate-limit-cleanup";
 import { reportError } from "@/lib/error-report";
 import { retryDueWebhookDeliveries } from "@/lib/webhooks";
+import { parseContractSnapshot } from "@/lib/contract-snapshot";
 
 const WINDOW_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -65,7 +66,7 @@ export async function GET(req: Request) {
         await sendRenewalReminderEmail({
           to: recipients,
           clientName: contract.deal.client.name,
-          templateName: contract.template?.name ?? "contract",
+          templateName: parseContractSnapshot(contract.snapshot)?.templateName ?? contract.template?.name ?? "contract",
           renewalDate: contract.renewalDate,
           autoRenews: contract.autoRenews,
           renewalNote: contract.renewalNote,

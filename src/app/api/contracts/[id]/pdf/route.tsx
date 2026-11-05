@@ -1,7 +1,8 @@
 import { renderToBuffer } from "@react-pdf/renderer";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { contractParty, fillClauses } from "@/lib/contract";
+import { auth } from "@/lib/auth";
+import { readContractText } from "@/lib/contract-snapshot";
 import { ContractPdfDocument, attachmentDisposition } from "@/lib/contract-pdf";
 import { embedTamperEvidentSignature, isPdfSigningConfigured } from "@/lib/pdf-sign";
 
@@ -15,19 +16,27 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       signers: { where: { status: "signed" }, orderBy: { order: "asc" } },
     },
   });
-  if (!contract || !contract.template) {
+  if (!contract) {
     return new NextResponse("Not found", { status: 404 });
   }
 
-  const clauses = fillClauses(contract.template.clauses, contract.deal.fields);
+  // The client (and anyone else with the link) gets the contract as it was
+  // sent. The workspace's own team gets what its contract page shows, which
+  // previews the live terms while the contract is being reworked.
+  const session = await auth();
+  const agreement = await readContractText(contract, { asTeam: session?.user?.workspaceId === contract.deal.workspaceId });
+  if (!agreement) {
+    return new NextResponse("Not found", { status: 404 });
+  }
+
   const countersigners = contract.signers.flatMap((s) => (s.signedAt ? [{ name: s.name, role: s.role, signedAt: s.signedAt, signatureImage: s.signatureImage }] : []));
   let buffer = await renderToBuffer(
     <ContractPdfDocument
-      templateName={contract.template.name}
-      agencyName={contract.deal.workspace.name}
+      templateName={agreement.templateName}
+      agencyName={agreement.agencyName}
       agencyLogo={contract.deal.workspace.logoImage}
-      clientName={contractParty(contract.deal.fields, contract.deal.client)}
-      clauses={clauses}
+      clientName={agreement.clientName}
+      clauses={agreement.clauses}
       signedBy={contract.signerName}
       signedAt={contract.signedAt}
       signatureImage={contract.signatureImage}
@@ -56,7 +65,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return new NextResponse(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": attachmentDisposition(`${contract.template.name.replace(/\s+/g, "-")}-${contract.deal.client.name.replace(/\s+/g, "-")}.pdf`),
+      "Content-Disposition": attachmentDisposition(`${agreement.templateName.replace(/\s+/g, "-")}-${contract.deal.client.name.replace(/\s+/g, "-")}.pdf`),
     },
   });
 }

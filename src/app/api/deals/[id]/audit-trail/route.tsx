@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { currentUserWithRole } from "@/lib/permissions";
 import { AuditTrailPdfDocument, formatAuditTime, type AuditEvent } from "@/lib/audit-trail-pdf";
 import { attachmentDisposition } from "@/lib/contract-pdf";
+import { parseContractSnapshot } from "@/lib/contract-snapshot";
 
 const CALL_SOURCE_LABEL: Record<string, string> = {
   local: "Recorded locally",
@@ -130,7 +131,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const buffer = await renderToBuffer(
     <AuditTrailPdfDocument
       clientName={deal.client.name}
-      templateName={deal.contract?.template?.name ?? deal.service}
+      templateName={parseContractSnapshot(deal.contract?.snapshot)?.templateName ?? deal.contract?.template?.name ?? deal.service}
       workspaceName={deal.workspace.name}
       generatedAt={new Date()}
       events={events}

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { contractParty, fillClauses } from "@/lib/contract";
+import { readContractText } from "@/lib/contract-snapshot";
 import { signAsCountersigner, declineToSign } from "./actions";
 import BrandLogo from "@/components/BrandLogo";
 import CountersignForm from "@/components/CountersignForm";
@@ -14,12 +14,14 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
     where: { id },
     include: { deal: { include: { client: true, fields: true, workspace: true } }, template: true },
   });
-  if (!contract || !contract.template) notFound();
+  if (!contract) notFound();
 
   const signer = await prisma.contractSigner.findFirst({ where: { contractId: id, token } });
   if (!signer) notFound();
 
-  const clauses = fillClauses(contract.template.clauses, contract.deal.fields);
+  // What went out, the same text the client signs.
+  const agreement = await readContractText(contract);
+  if (!agreement) notFound();
   const decided = signer.status !== "pending";
   // Signing (or declining) only while the contract is out for signature;
   // a draft, review or change the client asked for comes back as a new send.
@@ -80,11 +82,11 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
         )}
 
         <div className="card px-5 py-7 md:px-[46px] md:py-[42px]">
-          <div className="mb-1.5 text-[22px] font-medium" style={{ letterSpacing: "-0.6px" }}>{contract.template.name}</div>
+          <div className="mb-1.5 text-[22px] font-medium" style={{ letterSpacing: "-0.6px" }}>{agreement.templateName}</div>
           <div className="mb-7 border-b pb-[22px] text-[13.5px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline-soft)" }}>
-            Between {contract.deal.workspace.name} and {contractParty(contract.deal.fields, contract.deal.client)}
+            Between {agreement.agencyName} and {agreement.clientName}
           </div>
-          {clauses.map((clause, i) => (
+          {agreement.clauses.map((clause, i) => (
             <div key={clause.title} className="mb-5 max-w-[64ch]">
               <h3 className="mb-1.5 flex gap-2 text-[14px] font-semibold">
                 <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{i + 1}.</span>

@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import BrandLogo from "@/components/BrandLogo";
 import DownloadContractButton from "@/components/DownloadContractButton";
+import { parseContractSnapshot } from "@/lib/contract-snapshot";
 
 // partially_signed: the client has signed and someone after them (a
 // counter-signer) still has to.
@@ -77,7 +78,7 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
                 <div key={deal.id} className="card p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <div className="text-[15px] font-medium">{deal.template?.name ?? deal.service}</div>
+                      <div className="text-[15px] font-medium">{parseContractSnapshot(contract.snapshot)?.templateName ?? deal.template?.name ?? deal.service}</div>
                       <div className="mt-0.5 text-[12.5px]" style={{ color: "var(--ink-muted)" }}>{deal.service} · {deal.feeDisplay}</div>
                     </div>
                     <span className={`chip ${STATUS_CHIP[contract.status] ?? "chip-neutral"}`}>

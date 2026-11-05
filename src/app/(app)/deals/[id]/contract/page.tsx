@@ -1,7 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { contractParty, fillClauses } from "@/lib/contract";
+import { contractExpired } from "@/lib/contract-status";
+import { readContractText } from "@/lib/contract-snapshot";
+import { docusignVoid } from "@/lib/docusign-sync";
+import { canSendContract } from "@/lib/review";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
@@ -41,10 +44,10 @@ export default async function ContractPage({
     where: { id, workspaceId, ...visibility },
     include: {
       client: true,
-      template: true,
       fields: true,
       contract: {
         include: {
+          template: true,
           clauseComments: { where: { resolved: false }, orderBy: { createdAt: "asc" } },
           signers: { orderBy: { order: "asc" } },
         },
@@ -52,21 +55,23 @@ export default async function ContractPage({
       workspace: true,
     },
   });
-  if (!deal || !deal.contract || !deal.template) notFound();
+  if (!deal || !deal.contract) notFound();
 
-  const clauses = fillClauses(deal.template.clauses, deal.fields);
+  // While the contract is being worked on (draft, review, changes asked for,
+  // a lapsed link) this previews what the next send carries; once it's out,
+  // it shows exactly what the client got.
+  const agreement = await readContractText({ ...deal.contract, deal }, { asTeam: true });
+  if (!agreement) notFound();
   // The sign page stops taking signatures the moment expiresAt passes; the
   // daily cron only catches up on the status later, so both count here.
-  // DocuSign runs its own expiry.
-  const expired =
-    deal.contract.status === "expired" ||
-    (deal.contract.status === "sent" && deal.contract.deliveryMethod === "sealme" && deal.contract.expiresAt != null && deal.contract.expiresAt <= new Date());
-  const canResend = deal.contract.status === "draft" || deal.contract.status === "changes_requested" || expired;
+  const expired = contractExpired(deal.contract);
+  const canResend = canSendContract(deal.contract);
+  const voided = await docusignVoid({ id: deal.contract.id, dealId: deal.id, status: deal.contract.status, deliveryMethod: deal.contract.deliveryMethod }, workspaceId);
   const waitingOn = deal.contract.signers.filter((s) => s.status === "pending").map((s) => `${s.name} (${s.role})`).join(", ");
   // Which deal fields each clause pulls in (e.g. "Fees & Payment" -> {fee}),
   // so a client's change request can be answered right under the comment.
   const fieldsByClause = new Map<string, typeof deal.fields>();
-  for (const raw of JSON.parse(deal.template.clauses) as { title: string; body: string }[]) {
+  for (const raw of deal.contract.template ? (JSON.parse(deal.contract.template.clauses) as { title: string; body: string }[]) : []) {
     const keys = new Set([...raw.body.matchAll(/\{(\w+)\}/g)].map((m) => m[1]));
     fieldsByClause.set(raw.title, deal.fields.filter((f) => keys.has(f.fieldKey) && f.status !== "missing"));
   }
@@ -116,7 +121,11 @@ export default async function ContractPage({
     {deal.contract.status === "changes_requested" && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className={`chip ${updated ? "chip-success" : "chip-warn"} px-4 py-3 text-[13.5px]`}>
-          {updated ? "Contract updated. Click Send again so the client gets this version" : "Changes requested. Update the terms below each comment, then send again"}
+          {updated
+            ? "Contract updated. Click Send again so the client gets this version"
+            : voided
+              ? `Voided in DocuSign${voided.reason ? `: ${voided.reason}` : ""}. Make any changes, then send it again`
+              : "Changes requested. Update the terms below each comment, then send again"}
         </div>
       </div>
     )}
@@ -149,11 +158,11 @@ export default async function ContractPage({
 
     <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-[1fr_300px]">
       <div className="card px-5 py-7 md:px-[46px] md:py-[42px]">
-        <div className="mb-1.5 text-[21px] font-medium" style={{ letterSpacing: "-0.6px" }}>{deal.template.name}</div>
+        <div className="mb-1.5 text-[21px] font-medium" style={{ letterSpacing: "-0.6px" }}>{agreement.templateName}</div>
         <div className="mb-7 border-b pb-[22px] text-[13.5px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline-soft)" }}>
-          Between {deal.workspace.name} and {contractParty(deal.fields, deal.client)}
+          Between {agreement.agencyName} and {agreement.clientName}
         </div>
-        {clauses.map((clause, i) => (
+        {agreement.clauses.map((clause, i) => (
           <div key={clause.title} className="mb-5 max-w-[64ch]">
             <h3 className="mb-1.5 flex gap-2 text-[14px] font-semibold">
               <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{i + 1}.</span>
@@ -194,7 +203,7 @@ export default async function ContractPage({
           <h2 className="text-[15px] font-medium">Send</h2>
         </div>
         <div className="mx-5 my-3.5 flex items-center justify-between rounded-[10px] px-3 py-2.5 text-[13px] font-medium" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)" }}>
-          {deal.template.name}
+          {agreement.templateName}
         </div>
         <div className="flex flex-col gap-2.5 p-5 pt-2">
           {canResend ? (

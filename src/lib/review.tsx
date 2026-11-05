@@ -10,8 +10,9 @@ import { dispatchWebhookEvent } from "@/lib/webhooks";
 import { notifySlack } from "@/lib/slack";
 import { syncDealToHubspot } from "@/lib/hubspot";
 import { syncDealToSalesforce } from "@/lib/salesforce";
-import { contractParty, extractPlaceholderKeys, fillClauses } from "@/lib/contract";
+import { extractPlaceholderKeys } from "@/lib/contract";
 import { contractExpired } from "@/lib/contract-status";
+import { buildContractSnapshot } from "@/lib/contract-snapshot";
 import { ContractPdfDocument } from "@/lib/contract-pdf";
 import { sendDocusignEnvelope, type EnvelopeSigner } from "@/lib/docusign";
 
@@ -156,6 +157,9 @@ export async function performActualSend(contractId: string, pendingOverride?: Pe
   const { deal } = contract;
   const { workspace } = deal;
   const signLink = `${appUrl()}/sign/${contract.id}`;
+  // What goes out now is what the client sees and signs from here on, however
+  // the deal's terms or the template change later.
+  const snapshot = buildContractSnapshot(contract.template, deal);
 
   let docusignEnvelopeId: string | undefined;
   if (contract.deliveryMethod === "docusign") {
@@ -164,14 +168,13 @@ export async function performActualSend(contractId: string, pendingOverride?: Pe
       { name: deal.client.name, email: to, routingOrder: 1, anchor: anchorFor(1) },
       ...contract.signers.map((s, i) => ({ name: s.name, email: s.email, routingOrder: i + 2, anchor: anchorFor(i + 2) })),
     ];
-    const clauses = fillClauses(contract.template.clauses, deal.fields);
     const pdfBuffer = await renderToBuffer(
       <ContractPdfDocument
-        templateName={contract.template.name}
-        agencyName={workspace.name}
+        templateName={snapshot.templateName}
+        agencyName={snapshot.agencyName}
         agencyLogo={workspace.logoImage}
-        clientName={contractParty(deal.fields, deal.client)}
-        clauses={clauses}
+        clientName={snapshot.clientName}
+        clauses={snapshot.clauses}
         docusignAnchors={signers.map((s) => ({ label: `${s.name} (${s.routingOrder === 1 ? "Client" : "Signer " + s.routingOrder})`, anchor: s.anchor }))}
       />
     );
@@ -213,6 +216,7 @@ export async function performActualSend(contractId: string, pendingOverride?: Pe
       status: "sent",
       sentAt,
       expiresAt,
+      snapshot,
       reminderSentAt: null,
       docusignEnvelopeId,
       pendingTo: null,

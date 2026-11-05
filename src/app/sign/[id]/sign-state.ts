@@ -1,3 +1,5 @@
+import { contractExpired } from "@/lib/contract-status";
+
 export type SignPageState = "open" | "signed" | "docusign" | "expired" | "updating";
 
 type SignableContract = { status: string; deliveryMethod: string; expiresAt: Date | null };
@@ -10,7 +12,7 @@ type SignableContract = { status: string; deliveryMethod: string; expiresAt: Dat
 export function signPageState(contract: SignableContract, now = new Date()): SignPageState {
   if (contract.status === "signed" || contract.status === "partially_signed") return "signed";
   if (contract.deliveryMethod === "docusign") return "docusign";
-  if (contract.status === "expired" || (contract.status === "sent" && contract.expiresAt != null && contract.expiresAt <= now)) return "expired";
+  if (contractExpired(contract, now)) return "expired";
   return contract.status === "sent" ? "open" : "updating";
 }
 

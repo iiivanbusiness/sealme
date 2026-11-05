@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/db";
-import { fillClauses } from "@/lib/contract";
+import { readContractText } from "@/lib/contract-snapshot";
 import { isValidTimeZone } from "@/lib/tasks";
 import { dayInZone } from "@/lib/viewer-time";
 
@@ -12,12 +12,14 @@ import { dayInZone } from "@/lib/viewer-time";
 export async function extractRenewalTerms(contractId: string): Promise<void> {
   const contract = await prisma.contract.findUnique({
     where: { id: contractId },
-    include: { deal: { include: { fields: true, owner: { select: { timezone: true } } } }, template: true },
+    include: { deal: { include: { fields: true, client: { select: { name: true, company: true } }, workspace: { select: { name: true } }, owner: { select: { timezone: true } } } }, template: true },
   });
-  if (!contract || !contract.template || !contract.signedAt) return;
+  if (!contract || !contract.signedAt) return;
 
-  const clauses = fillClauses(contract.template.clauses, contract.deal.fields);
-  const contractText = clauses.map((c) => `${c.title}\n${c.body}`).join("\n\n");
+  // The text the client signed, not the deal's terms as they are now.
+  const agreement = await readContractText(contract);
+  if (!agreement) return;
+  const contractText = agreement.clauses.map((c) => `${c.title}\n${c.body}`).join("\n\n");
   if (!contractText.trim()) return;
 
   const client = new Anthropic({ timeout: 120_000, maxRetries: 1 });
