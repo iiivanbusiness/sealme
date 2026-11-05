@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { prisma } from "@/lib/db";
-import { announceCreatedLeads, membersByEmail, notifyCrmAssignments, readHubspotFilter, summarize, upsertCrmLead, type CrmLeadRecord, type HubspotLeadFilter, type SyncSummary, type UpsertResult } from "@/lib/crm-leads";
+import { announceCreatedLeads, findLeadByCrmId, membersByEmail, notifyCrmAssignments, readHubspotFilter, summarize, upsertCrmLead, type CrmLeadRecord, type HubspotLeadFilter, type SyncSummary, type UpsertResult } from "@/lib/crm-leads";
 
 const API = "https://api.hubapi.com";
 const CONTACT_PROPS = ["firstname", "lastname", "email", "phone", "mobilephone", "company", "jobtitle", "website", "hubspot_owner_id", "lifecyclestage", "hs_lead_status", "lastmodifieddate"];
@@ -139,7 +139,7 @@ export async function importHubspotContacts(workspaceId: string, contactIds: str
     for (const c of batch.results) {
       // A contact that doesn't match the filter (yet) isn't brought in; one
       // already here keeps updating.
-      const known = await prisma.lead.findFirst({ where: { workspaceId, hubspotContactId: c.id }, select: { id: true } });
+      const known = await findLeadByCrmId(workspaceId, "hubspot", c.id);
       if (!known && !matchesFilter(c, filter)) continue;
       results.push(await upsertCrmLead(workspaceId, await toRecord(c, ownerEmail), { members, teamOwnedOnly: filter.teamOwnedOnly }));
     }

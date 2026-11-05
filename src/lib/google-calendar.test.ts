@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// The rows already saved, by googleEventId, and every write a sync makes.
+// The rows already saved, by "workspaceId:googleEventId", and every write a sync makes.
+type Upsert = { where: { workspaceId_googleEventId: { workspaceId: string; googleEventId: string } }; create: { workspaceId: string; title: string }; update: { title: string } };
 const db = vi.hoisted(() => ({
-  rows: new Map<string, { id: string; workspaceId: string }>(),
+  rows: new Map<string, { workspaceId: string; title: string }>(),
   writes: [] as { op: string; args: unknown }[],
 }));
 vi.mock("@/lib/db", () => ({
@@ -16,9 +17,12 @@ vi.mock("@/lib/db", () => ({
       }),
     },
     calendarEvent: {
-      findUnique: async ({ where }: { where: { googleEventId: string } }) => db.rows.get(where.googleEventId) ?? null,
-      update: async (args: unknown) => db.writes.push({ op: "update", args }),
-      create: async (args: unknown) => db.writes.push({ op: "create", args }),
+      upsert: async (args: Upsert) => {
+        db.writes.push({ op: "upsert", args });
+        const { workspaceId, googleEventId } = args.where.workspaceId_googleEventId;
+        const key = `${workspaceId}:${googleEventId}`;
+        db.rows.set(key, db.rows.has(key) ? { ...db.rows.get(key)!, ...args.update } : args.create);
+      },
       deleteMany: async (args: unknown) => db.writes.push({ op: "deleteMany", args }),
     },
   },
@@ -57,17 +61,27 @@ describe("Syncing Google Calendar", () => {
     );
   }
 
-  it("leaves another workspace's copy of a meeting alone", async () => {
-    db.rows.set("shared", { id: "row-a", workspaceId: "ws-a" });
-    db.rows.set("mine", { id: "row-b", workspaceId: "ws-b" });
+  it("gives each workspace its own copy of a shared meeting", async () => {
+    db.rows.set("ws-a:shared", { workspaceId: "ws-a", title: "Kickoff (A's notes)" });
     googleAnswers([
       { id: "shared", start: "2026-12-01T10:00:00Z" },
-      { id: "mine", start: "2026-12-02T10:00:00Z" },
       { id: "new", start: "2026-12-03T10:00:00Z" },
     ]);
     expect(await syncWorkspaceCalendar("ws-b")).toBe(2);
-    const touched = db.writes.filter((w) => w.op !== "deleteMany").map((w) => w.args as { where?: { id: string }; data: { googleEventId?: string } });
-    expect(touched.map((t) => t.where?.id ?? t.data.googleEventId)).toEqual(["row-b", "new"]);
+    const keys = db.writes.filter((w) => w.op === "upsert").map((w) => (w.args as Upsert).where.workspaceId_googleEventId);
+    expect(keys).toEqual([
+      { workspaceId: "ws-b", googleEventId: "shared" },
+      { workspaceId: "ws-b", googleEventId: "new" },
+    ]);
+    expect(db.rows.get("ws-a:shared")?.title).toBe("Kickoff (A's notes)");
+    expect(db.rows.get("ws-b:shared")).toMatchObject({ workspaceId: "ws-b", title: "Call" });
+  });
+
+  it("updates its own copy on the next sync", async () => {
+    db.rows.set("ws-b:mine", { workspaceId: "ws-b", title: "Old title" });
+    googleAnswers([{ id: "mine", start: "2026-12-02T10:00:00Z" }]);
+    await syncWorkspaceCalendar("ws-b");
+    expect(db.rows.get("ws-b:mine")?.title).toBe("Call");
   });
 
   it("removes upcoming events Google no longer returns", async () => {

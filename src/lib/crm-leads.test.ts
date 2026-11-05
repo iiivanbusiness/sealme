@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { lead, client } = vi.hoisted(() => ({ lead: { findFirst: vi.fn(), create: vi.fn() }, client: { findFirst: vi.fn() } }));
+const { lead, client } = vi.hoisted(() => ({ lead: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() }, client: { findFirst: vi.fn() } }));
 vi.mock("@/lib/db", () => ({ prisma: { lead, client } }));
 vi.mock("@/lib/notifications", () => ({ createNotification: async () => {} }));
 vi.mock("@/lib/tasks", () => ({ isValidTimeZone: () => true }));
@@ -51,6 +51,40 @@ describe("Leads from the CRM", () => {
     await upsertCrmLead("ws1", record({ source: "salesforce", recordType: "Lead", externalId: "00Q1" }), ctx);
     expect(client.findFirst).not.toHaveBeenCalled();
     expect(lead.create).toHaveBeenCalledOnce();
+  });
+
+  // A lead that two HubSpot contacts were merged into: it kept H1, and the
+  // other contact's id is an alias.
+  const merged = {
+    id: "lead9",
+    name: "Jordan Lee",
+    company: null,
+    title: "COO",
+    email: null,
+    phone: null,
+    domain: null,
+    externalOwnerEmail: null,
+    ownerId: "u1",
+    hubspotContactId: "H1",
+    salesforceRecordId: null,
+    mergedCrmIds: ["hubspot:884843816141"],
+  };
+
+  it("updates the lead a merged duplicate went into instead of bringing it back", async () => {
+    lead.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(merged);
+    const members = new Map([["bob@acme.com", { id: "u2", name: "Bob", timezone: null }]]);
+    const result = await upsertCrmLead("ws1", record({ name: "J. Lee", title: "CEO", ownerEmail: "bob@acme.com" }), { members, teamOwnedOnly: false });
+    expect(lead.findFirst).toHaveBeenNthCalledWith(2, { where: { workspaceId: "ws1", mergedCrmIds: { has: "hubspot:884843816141" } } });
+    expect(lead.create).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: "updated", leadId: "lead9", assignedTo: null });
+    // H1 still says who the person is and who owns them; the duplicate only fills gaps.
+    expect(lead.update).toHaveBeenCalledWith({ where: { id: "lead9" }, data: { company: "Harbor Logistics", externalOwnerEmail: "bob@acme.com" } });
+  });
+
+  it("links a merged lead that has no record of its own in that CRM", async () => {
+    lead.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ ...merged, hubspotContactId: null });
+    await upsertCrmLead("ws1", record(), ctx);
+    expect(lead.update).toHaveBeenCalledWith({ where: { id: "lead9" }, data: { company: "Harbor Logistics", hubspotContactId: "884843816141" } });
   });
 
   it("carries the lead's CRM record over to its client", () => {

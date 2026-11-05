@@ -13,13 +13,13 @@ import { reportError } from "@/lib/error-report";
 
 type HubspotObject = { id: string; properties: Record<string, string> };
 
-async function hubspotFetch(accessToken: string, path: string, init?: RequestInit): Promise<HubspotObject> {
+async function hubspotFetch<T = HubspotObject>(accessToken: string, path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`https://api.hubapi.com${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", ...init?.headers },
   });
   if (!res.ok) throw new Error(`HubSpot API ${path} failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<HubspotObject>;
+  return res.json() as Promise<T>;
 }
 
 // Called once, when a token is pasted into Settings — proves the token is
@@ -73,13 +73,84 @@ async function upsertContact(accessToken: string, client: { id: string; name: st
   return contactId;
 }
 
+// A deal pipeline and its open stages, for the picker in Settings.
+// suggestedSent and suggestedSigned are the stages that usually mean those
+// moments (the default pipeline's "Contract sent" and "Closed won"), so
+// picking the pipeline is often all there is to do.
+export type HubspotPipeline = {
+  id: string;
+  label: string;
+  stages: { id: string; label: string }[];
+  suggestedSent: string | null;
+  suggestedSigned: string | null;
+};
+
+type RawStage = { id: string; label: string; displayOrder?: number; archived?: boolean; metadata?: { isClosed?: string; probability?: string } };
+type RawPipeline = { id: string; label: string; displayOrder?: number; archived?: boolean; stages?: RawStage[] };
+
+const byOrder = (a: { displayOrder?: number }, b: { displayOrder?: number }) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0);
+
+export function readHubspotPipelines(raw: RawPipeline[]): HubspotPipeline[] {
+  return raw
+    .filter((p) => !p.archived)
+    .sort(byOrder)
+    .map((p) => {
+      const stages = (p.stages ?? []).filter((s) => !s.archived).sort(byOrder);
+      const sent = stages.find((s) => s.id === "contractsent" || /contract\s*sent/i.test(s.label));
+      const won =
+        stages.find((s) => s.id === "closedwon" || /closed\s*won/i.test(s.label)) ??
+        stages.find((s) => s.metadata?.isClosed === "true" && Number(s.metadata.probability) === 1);
+      return { id: p.id, label: p.label, stages: stages.map((s) => ({ id: s.id, label: s.label })), suggestedSent: sent?.id ?? null, suggestedSigned: won?.id ?? null };
+    });
+}
+
+// The portal's deal pipelines, read live when an admin opens the picker.
+export async function listHubspotDealPipelines(accessToken: string): Promise<HubspotPipeline[]> {
+  const data = await hubspotFetch<{ results?: RawPipeline[] }>(accessToken, "/crm/v3/pipelines/deals");
+  return readHubspotPipelines(data.results ?? []);
+}
+
+export type HubspotStageSettings = { hubspotPipelineId: string | null; hubspotSentStageId: string | null; hubspotSignedStageId: string | null };
+
+// Checks what the picker sent against the portal's pipelines before it's
+// saved. No pipeline turns stages off.
+export function checkHubspotStages(
+  pipelines: HubspotPipeline[],
+  choice: { pipelineId: string; sentStageId: string; signedStageId: string }
+): { error: string } | { data: HubspotStageSettings } {
+  if (!choice.pipelineId) return { data: { hubspotPipelineId: null, hubspotSentStageId: null, hubspotSignedStageId: null } };
+  const pipeline = pipelines.find((p) => p.id === choice.pipelineId);
+  if (!pipeline) return { error: "That pipeline isn't in HubSpot any more. Load the list again and pick another." };
+  if (!choice.sentStageId && !choice.signedStageId) return { error: "Choose a stage for when the contract is sent, when it's signed, or both" };
+  const has = (id: string) => !id || pipeline.stages.some((s) => s.id === id);
+  if (!has(choice.sentStageId) || !has(choice.signedStageId)) return { error: `Pick stages from the ${pipeline.label} pipeline` };
+  return { data: { hubspotPipelineId: pipeline.id, hubspotSentStageId: choice.sentStageId || null, hubspotSignedStageId: choice.signedStageId || null } };
+}
+
+// Where a deal goes in HubSpot for its status, when the admin picked stages
+// in Settings. Otherwise (and for every status before sent) nothing is sent,
+// so the deal stays in whatever stage HubSpot or the team gave it.
+export function hubspotStageFor(status: string, settings: HubspotStageSettings): { pipeline: string; dealstage: string } | null {
+  if (!settings.hubspotPipelineId) return null;
+  const stage = status === "signed" ? settings.hubspotSignedStageId : status === "sent" ? settings.hubspotSentStageId : null;
+  return stage ? { pipeline: settings.hubspotPipelineId, dealstage: stage } : null;
+}
+
+// HubSpot turning down the pipeline or stage itself (deleted since it was
+// picked, or saved for another portal), as opposed to the deal.
+function isStageRejection(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /failed: 400 [\s\S]*\b(dealstage|pipeline)\b/.test(message);
+}
+
 async function upsertDeal(
   accessToken: string,
   deal: { id: string; service: string; feeDisplay: string; status: string; hubspotDealId: string | null },
-  contactId: string
+  contactId: string,
+  stage: { pipeline: string; dealstage: string } | null
 ): Promise<string> {
   const amount = parseFee(deal.feeDisplay);
-  const properties: Record<string, string> = { dealname: deal.service || "SealMe deal", amount: String(amount) };
+  const properties: Record<string, string> = { dealname: deal.service || "SealMe deal", amount: String(amount), ...stage };
 
   let dealId: string;
   if (deal.hubspotDealId) {
@@ -118,7 +189,17 @@ export async function syncDealToHubspot(workspaceId: string, dealId: string): Pr
     if (!deal) return;
 
     const contactId = await upsertContact(workspace.hubspotAccessToken, deal.client);
-    await upsertDeal(workspace.hubspotAccessToken, deal, contactId);
+    const stage = hubspotStageFor(deal.status, workspace);
+    try {
+      await upsertDeal(workspace.hubspotAccessToken, deal, contactId, stage);
+    } catch (err) {
+      // A stage HubSpot no longer has shouldn't keep the deal out: it goes
+      // in without one, and the error report says the stages need picking
+      // again in Settings.
+      if (!stage || !isStageRejection(err)) throw err;
+      await reportError(err, "HubSpot deal stage", { workspaceId, dealId });
+      await upsertDeal(workspace.hubspotAccessToken, deal, contactId, null);
+    }
   } catch (err) {
     console.error(`HubSpot sync failed for deal ${dealId}`, err);
     await reportError(err, "HubSpot deal sync", { workspaceId, dealId });

@@ -167,21 +167,19 @@ export async function syncWorkspaceCalendar(workspaceId: string): Promise<number
       meetingUrl: extractMeetingUrl(event),
     };
 
-    // googleEventId is unique across every workspace, and Google gives each
-    // attendee's copy of a meeting the same id, so a row another workspace
-    // already has is left alone rather than overwritten with this one's data.
-    const existing = await prisma.calendarEvent.findUnique({ where: { googleEventId: event.id }, select: { id: true, workspaceId: true } });
-    if (existing && existing.workspaceId !== workspaceId) continue;
-    if (existing) {
-      await prisma.calendarEvent.update({ where: { id: existing.id }, data: fields });
-    } else {
-      try {
-        await prisma.calendarEvent.create({ data: { workspaceId, googleEventId: event.id, ...fields } });
-      } catch (err) {
-        // Another sync made it a moment ago.
-        if ((err as { code?: string }).code === "P2002") continue;
-        throw err;
-      }
+    // Google gives each attendee's copy of a meeting the same id, so the
+    // event is this workspace's own row for that id: two workspaces on the
+    // same meeting each keep theirs.
+    try {
+      await prisma.calendarEvent.upsert({
+        where: { workspaceId_googleEventId: { workspaceId, googleEventId: event.id } },
+        create: { workspaceId, googleEventId: event.id, ...fields },
+        update: fields,
+      });
+    } catch (err) {
+      // Another sync made it a moment ago.
+      if ((err as { code?: string }).code === "P2002") continue;
+      throw err;
     }
     synced++;
   }

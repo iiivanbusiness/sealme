@@ -4,6 +4,7 @@ import { createNotification } from "@/lib/notifications";
 import { isValidTimeZone } from "@/lib/tasks";
 import { dayInZone } from "@/lib/viewer-time";
 import { dispatchLeadsCreated } from "@/lib/webhooks";
+import type { Lead } from "@/generated/prisma/client";
 
 // Leads that come IN from a workspace's HubSpot or Salesforce. The CRM is
 // the source of truth for who the person is (name, company, title, email,
@@ -11,6 +12,24 @@ import { dispatchLeadsCreated } from "@/lib/webhooks";
 // calls, tasks) is never touched by a sync.
 
 export type CrmSource = "hubspot" | "salesforce";
+
+// How a merged duplicate's CRM id is kept on the lead it was merged into
+// (Lead.mergedCrmIds), so the next sync finds that lead instead of bringing
+// the duplicate back.
+export function crmAlias(crm: CrmSource | "ghl", id: string): string {
+  return `${crm}:${id}`;
+}
+
+const crmIdField = (source: CrmSource, id: string) => (source === "hubspot" ? { hubspotContactId: id } : { salesforceRecordId: id });
+
+// The lead a CRM record belongs to: the one carrying its id, or else the
+// lead a duplicate with that id was merged into (viaAlias).
+export async function findLeadByCrmId(workspaceId: string, source: CrmSource, id: string): Promise<{ lead: Lead; viaAlias: boolean } | null> {
+  const own = await prisma.lead.findFirst({ where: { workspaceId, ...crmIdField(source, id) } });
+  if (own) return { lead: own, viaAlias: false };
+  const merged = await prisma.lead.findFirst({ where: { workspaceId, mergedCrmIds: { has: crmAlias(source, id) } } });
+  return merged ? { lead: merged, viaAlias: true } : null;
+}
 
 export type CrmLeadRecord = {
   source: CrmSource;
@@ -67,10 +86,10 @@ export function clientCrmIds(lead: { hubspotContactId: string | null; salesforce
 }
 
 // Creates or updates one lead from a CRM record. Matches an existing lead
-// by its CRM id first, then by email or phone (so a lead imported from a
-// spreadsheet gets linked rather than duplicated). When the CRM gives the
-// lead to someone on the team, SealMe gives it to them too, with a "call"
-// task for their today.
+// by its CRM id first (its own, or one a merged duplicate had), then by
+// email or phone (so a lead imported from a spreadsheet gets linked rather
+// than duplicated). When the CRM gives the lead to someone on the team,
+// SealMe gives it to them too, with a "call" task for their today.
 export async function upsertCrmLead(workspaceId: string, rec: CrmLeadRecord, ctx: { members: Map<string, Member>; teamOwnedOnly: boolean; createdById?: string | null }): Promise<UpsertResult> {
   const email = clean(rec.email, 200)?.toLowerCase() ?? null;
   const phone = normalizePhone(rec.phone);
@@ -80,8 +99,13 @@ export async function upsertCrmLead(workspaceId: string, rec: CrmLeadRecord, ctx
   const ownerEmail = clean(rec.ownerEmail, 200)?.toLowerCase() ?? null;
   const owner = ownerEmail ? (ctx.members.get(ownerEmail) ?? null) : null;
 
-  const idField = rec.source === "hubspot" ? { hubspotContactId: rec.externalId } : { salesforceRecordId: rec.externalId };
-  let existing = await prisma.lead.findFirst({ where: { workspaceId, ...idField } });
+  const idField = crmIdField(rec.source, rec.externalId);
+  const found = await findLeadByCrmId(workspaceId, rec.source, rec.externalId);
+  let existing = found?.lead ?? null;
+  // A merged duplicate's record, on a lead that still has its own record in
+  // this CRM: that one says who the person is, so the duplicate only fills
+  // gaps and doesn't move the lead between owners.
+  const secondary = Boolean(found?.viaAlias && (rec.source === "hubspot" ? found.lead.hubspotContactId : found.lead.salesforceRecordId));
   if (!existing && (email || phone)) {
     existing = await prisma.lead.findFirst({
       where: {
@@ -140,7 +164,8 @@ export async function upsertCrmLead(workspaceId: string, rec: CrmLeadRecord, ctx
     // Only what the CRM actually has replaces what's here.
     const changes: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(contact)) {
-      if (value !== null && value !== (existing as Record<string, unknown>)[key]) changes[key] = value;
+      const current = (existing as Record<string, unknown>)[key];
+      if (value !== null && value !== current && (!secondary || current == null)) changes[key] = value;
     }
     if (rec.source === "hubspot" && !existing.hubspotContactId) changes.hubspotContactId = rec.externalId;
     if (rec.source === "salesforce" && !existing.salesforceRecordId) {
@@ -149,7 +174,7 @@ export async function upsertCrmLead(workspaceId: string, rec: CrmLeadRecord, ctx
     }
     // Reassigned in the CRM to someone on the team: follow it. An owner
     // the team doesn't have leaves SealMe's owner as it is.
-    if (owner && existing.ownerId !== owner.id) {
+    if (owner && !secondary && existing.ownerId !== owner.id) {
       changes.ownerId = owner.id;
       assignedTo = owner.id;
     }

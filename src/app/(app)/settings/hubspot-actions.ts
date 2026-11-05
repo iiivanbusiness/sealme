@@ -19,9 +19,16 @@ export async function connectHubspot(formData: FormData): Promise<{ error?: stri
     return { error: err instanceof Error ? err.message : "Couldn't validate that HubSpot token" };
   }
 
+  const workspace = await prisma.workspace.findFirstOrThrow({ where: { id: user.workspaceId }, select: { hubspotPortalId: true } });
   await prisma.workspace.update({
     where: { id: user.workspaceId },
-    data: { hubspotAccessToken: token, hubspotPortalId: portalId, hubspotEnabled: true },
+    data: {
+      hubspotAccessToken: token,
+      hubspotPortalId: portalId,
+      hubspotEnabled: true,
+      // Stage ids belong to one portal; a different portal starts with none.
+      ...(workspace.hubspotPortalId !== portalId ? { hubspotPipelineId: null, hubspotSentStageId: null, hubspotSignedStageId: null } : {}),
+    },
   });
 
   const session = await auth();
@@ -43,7 +50,7 @@ export async function disconnectHubspot(): Promise<{ error?: string }> {
   const user = await requirePermission("canManageWorkspace");
   await prisma.workspace.update({
     where: { id: user.workspaceId },
-    data: { hubspotEnabled: false, hubspotPortalId: null, hubspotAccessToken: null },
+    data: { hubspotEnabled: false, hubspotPortalId: null, hubspotAccessToken: null, hubspotPipelineId: null, hubspotSentStageId: null, hubspotSignedStageId: null },
   });
 
   const session = await auth();

@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { salesforceGet, SALESFORCE_API_VERSION } from "@/lib/salesforce";
-import { announceCreatedLeads, membersByEmail, notifyCrmAssignments, readSalesforceFilter, summarize, upsertCrmLead, type CrmLeadRecord, type SyncSummary, type UpsertResult } from "@/lib/crm-leads";
+import { announceCreatedLeads, findLeadByCrmId, membersByEmail, notifyCrmAssignments, readSalesforceFilter, summarize, upsertCrmLead, type CrmLeadRecord, type SyncSummary, type UpsertResult } from "@/lib/crm-leads";
 
 type SfLead = {
   Id: string;
@@ -131,7 +131,7 @@ export async function importSalesforceLeads(workspaceId: string, leadIds: string
     const soql = `SELECT ${fields.join(", ")} FROM Lead WHERE IsConverted = false AND Id IN (${ids.slice(i, i + 100).map(soqlString).join(", ")})`;
     const page = await salesforceGet<QueryPage<SfLead>>(workspaceId, `/services/data/${SALESFORCE_API_VERSION}/query?q=${encodeURIComponent(soql)}`);
     for (const r of page.records) {
-      const known = await prisma.lead.findFirst({ where: { workspaceId, salesforceRecordId: r.Id }, select: { id: true } });
+      const known = await findLeadByCrmId(workspaceId, "salesforce", r.Id);
       if (!known && filter.statuses.length && !(r.Status && filter.statuses.includes(r.Status))) continue;
       results.push(await upsertCrmLead(workspaceId, toRecord(r), { members, teamOwnedOnly: filter.teamOwnedOnly }));
     }

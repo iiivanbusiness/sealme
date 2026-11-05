@@ -1,11 +1,34 @@
 import { prisma } from "@/lib/db";
 import { mergeList } from "@/lib/lead-match";
 import { dispatchLeadsUpdated, leadChanges } from "@/lib/webhook-events";
+import { crmAlias } from "@/lib/crm-leads";
 import type { Lead } from "@/generated/prisma/client";
 
 // How far along a stage is, for keeping the furthest of two leads. Lost
 // counts for nothing next to a lead that's still moving.
 const STAGE_RANK: Record<string, number> = { lost: -1, new: 0, contacted: 1, interested: 2, meeting: 3, converted: 4 };
+
+// The CRM ids source has that the merged lead won't carry itself, kept as
+// aliases on it (along with the aliases either lead already had), so a CRM
+// sync of source's record updates the merged lead instead of making source
+// again.
+function mergedAliases(target: Lead, source: Lead, kept: { hubspotContactId: string | null; salesforceRecordId: string | null; ghlContactId: string | null }): string[] {
+  const own = new Set(
+    [
+      kept.hubspotContactId && crmAlias("hubspot", kept.hubspotContactId),
+      kept.salesforceRecordId && crmAlias("salesforce", kept.salesforceRecordId),
+      kept.ghlContactId && crmAlias("ghl", kept.ghlContactId),
+    ].filter(Boolean),
+  );
+  const all = [
+    ...(target.mergedCrmIds ?? []),
+    ...(source.mergedCrmIds ?? []),
+    ...(source.hubspotContactId ? [crmAlias("hubspot", source.hubspotContactId)] : []),
+    ...(source.salesforceRecordId ? [crmAlias("salesforce", source.salesforceRecordId)] : []),
+    ...(source.ghlContactId ? [crmAlias("ghl", source.ghlContactId)] : []),
+  ];
+  return [...new Set(all)].filter((alias) => !own.has(alias));
+}
 
 // The lead that comes out of merging source into target: target's details
 // win, gaps are filled from source, lists are joined, and the newest call's
@@ -15,6 +38,11 @@ export function mergedLeadData(target: Lead, source: Lead) {
   const newer = sourceNewer ? source : target;
   const older = sourceNewer ? target : source;
   const stage = (STAGE_RANK[source.stage] ?? 0) > (STAGE_RANK[target.stage] ?? 0) ? source.stage : target.stage;
+  const crmIds = {
+    hubspotContactId: target.hubspotContactId ?? source.hubspotContactId,
+    salesforceRecordId: target.salesforceRecordId ?? source.salesforceRecordId,
+    ghlContactId: target.ghlContactId ?? source.ghlContactId,
+  };
   return {
     stage,
     ownerId: target.ownerId ?? source.ownerId,
@@ -36,10 +64,9 @@ export function mergedLeadData(target: Lead, source: Lead) {
     convertedClientId: target.convertedClientId ?? source.convertedClientId,
     convertedDealId: target.convertedDealId ?? source.convertedDealId,
     convertedAt: target.convertedAt ?? source.convertedAt,
-    hubspotContactId: target.hubspotContactId ?? source.hubspotContactId,
-    salesforceRecordId: target.salesforceRecordId ?? source.salesforceRecordId,
+    ...crmIds,
     salesforceRecordType: target.salesforceRecordId ? target.salesforceRecordType : source.salesforceRecordType,
-    ghlContactId: target.ghlContactId ?? source.ghlContactId,
+    mergedCrmIds: mergedAliases(target, source, crmIds),
     ghlOpportunityId: target.ghlOpportunityId ?? source.ghlOpportunityId,
     externalOwnerEmail: target.externalOwnerEmail ?? source.externalOwnerEmail,
     externalId: target.externalId ?? source.externalId,

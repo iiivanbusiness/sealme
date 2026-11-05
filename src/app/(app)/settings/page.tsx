@@ -57,6 +57,7 @@ import { createReviewChain, deleteReviewChain, moveReviewChain, addReviewChainSt
 import { createDelegation, revokeDelegation } from "./delegation-actions";
 import { setSlackChannel, toggleSlack, disconnectSlack } from "./slack-actions";
 import { connectHubspot, toggleHubspot, disconnectHubspot } from "./hubspot-actions";
+import { loadHubspotPipelines, saveHubspotStages } from "./hubspot-stage-actions";
 import { connectGohighlevel, disconnectGohighlevel, setGohighlevelPipeline, toggleGohighlevel } from "./gohighlevel-actions";
 import { toggleDocusign, disconnectDocusign } from "./docusign-actions";
 import { toggleSalesforce, disconnectSalesforce } from "./salesforce-actions";
@@ -393,7 +394,8 @@ export default async function SettingsPage({
               id: s.id,
               order: s.order,
               assigneeId: s.assigneeId,
-              assigneeName: s.assignee.deactivatedAt ? `${s.assignee.name} (no longer on the team)` : s.assignee.name,
+              assigneeName: s.assignee.name,
+              left: Boolean(s.assignee.deactivatedAt),
             })),
           }))}
           teammates={teammateOptions}
@@ -454,7 +456,7 @@ export default async function SettingsPage({
             {workspace.ssoEnabled ? (
               <span className="chip chip-success" style={{ padding: "1px 8px" }}>Enabled</span>
             ) : (
-              "Requires an allowed email domain above, plus an OIDC app registered with your identity provider."
+              "Requires a verified email domain above, plus an OIDC app registered with your identity provider."
             )}
           </div>
         </div>
@@ -509,6 +511,9 @@ export default async function SettingsPage({
           connectAction={connectHubspot}
           toggleAction={toggleHubspot}
           disconnectAction={disconnectHubspot}
+          stagesOn={Boolean(workspace.hubspotPipelineId)}
+          loadStagesAction={loadHubspotPipelines}
+          saveStagesAction={saveHubspotStages}
         />
         {workspace.hubspotAccessToken && workspace.prospectingEnabled && (
           <CrmLeadImportPanel
