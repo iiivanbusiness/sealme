@@ -3,9 +3,9 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
+import TemplateClauseText, { templateFields } from "@/components/TemplateClauseText";
+import { clauseNumbers, type Clause } from "@/lib/contract";
 import { deleteTemplate, lockTemplate, unlockTemplate } from "../actions";
-
-type Clause = { title: string; body: string };
 
 export default async function TemplateDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -17,6 +17,8 @@ export default async function TemplateDetailPage({ params }: { params: Promise<{
   if (!template) notFound();
 
   const clauses = JSON.parse(template.clauses) as Clause[];
+  const numbers = clauseNumbers(clauses);
+  const fields = templateFields(clauses);
   const canManage = Boolean(user.role?.canManageTemplates);
   const canApprove = Boolean(user.role?.canApproveTemplates);
   const canEdit = canManage && (!template.locked || canApprove);
@@ -50,16 +52,37 @@ export default async function TemplateDetailPage({ params }: { params: Promise<{
         {clauses.map((clause, i) => (
           <div key={clause.title + i} className="mb-5 max-w-[64ch] last:mb-0">
             <h3 className="mb-1.5 flex gap-2 text-[14px] font-semibold">
-              <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{i + 1}.</span>
+              {numbers[i] && <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{numbers[i]}</span>}
               {clause.title}
             </h3>
-            <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{clause.body}</p>
+            <TemplateClauseText body={clause.body} className="whitespace-pre-line text-[14px] leading-[1.75]" style={{ color: "var(--ink-muted)" }} />
           </div>
         ))}
       </div>
 
-      <aside className="card flex flex-col gap-2.5 p-5">
-        <div className="mb-1.5 text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
+      <aside className="card flex flex-col gap-2.5 self-start p-5">
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-[14px] font-medium">Filled in from the call</span>
+            <span className="font-mono-tab text-[12.5px]" style={{ color: "var(--ink-muted)" }}>{fields.length}</span>
+          </div>
+          {fields.length > 0 ? (
+            <ul className="flex flex-col gap-1">
+              {fields.map((f) => (
+                <li key={f.key} className="flex items-baseline justify-between gap-2 text-[13px]" title={`{${f.key}}`}>
+                  <span className="min-w-0 truncate">{f.label}</span>
+                  {f.places > 1 && <span className="shrink-0 text-[12px]" style={{ color: "var(--ink-muted)" }}>{f.places} places</span>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-[12.5px] leading-[1.5]" style={{ color: "var(--ink-muted)" }}>
+              Nothing yet. In Edit template, add fields where terms should come from the call.
+            </p>
+          )}
+        </div>
+
+        <div className="mb-1.5 border-t pt-3 text-[12.5px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline)" }}>
           Used by {template.deals.length} deal{template.deals.length === 1 ? "" : "s"}
         </div>
 

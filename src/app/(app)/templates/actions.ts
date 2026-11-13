@@ -2,7 +2,6 @@
 
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { extractText, splitIntoClauses } from "@/lib/parse-document";
 import { requirePermission } from "@/lib/permissions";
 import { logAudit } from "@/lib/audit";
 
@@ -46,32 +45,6 @@ export async function createTemplate(formData: FormData) {
   });
 
   redirect(`/templates/${template.id}`);
-}
-
-export async function createTemplateFromDocument(formData: FormData) {
-  const name = String(formData.get("name") ?? "").trim();
-  const file = formData.get("file") as File | null;
-
-  if (!name) throw new Error("Template name is required");
-  if (!file || file.size === 0) throw new Error("Choose a file to upload");
-
-  const text = await extractText(file);
-  const clauses = splitIntoClauses(text);
-
-  const user = await requirePermission("canManageTemplates");
-  const workspaceId = user.workspaceId;
-
-  const template = await prisma.contractTemplate.create({
-    data: {
-      workspaceId,
-      name,
-      description: `Imported from ${file.name}. Review the clauses and add {placeholder} fields where terms should be filled in automatically.`,
-      requiredFieldCount: countPlaceholders(clauses),
-      clauses: JSON.stringify(clauses),
-    },
-  });
-
-  redirect(`/templates/${template.id}/edit`);
 }
 
 export async function updateTemplate(templateId: string, formData: FormData) {

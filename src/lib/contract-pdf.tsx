@@ -1,5 +1,5 @@
 import { Document, Page, Text, View, Image, StyleSheet } from "@react-pdf/renderer";
-import type { Clause } from "./contract";
+import { clauseNumbers, type Clause } from "./contract";
 import { PDF_FONT } from "./pdf-fonts";
 
 const styles = StyleSheet.create({
@@ -65,6 +65,7 @@ export function ContractPdfDocument({
   // absolute x/y position on the page itself.
   docusignAnchors?: { label: string; anchor: string }[];
 }) {
+  const numbers = clauseNumbers(clauses);
   const signatures = [
     ...(signedBy && signedAt ? [{ name: signedBy, signedAt, image: signatureImage }] : []),
     ...(countersigners ?? []).map((s) => ({ name: `${s.name} (${s.role})`, signedAt: s.signedAt, image: s.signatureImage })),
@@ -77,8 +78,8 @@ export function ContractPdfDocument({
         <Text style={styles.title}>{templateName}</Text>
         <Text style={styles.parties}>Between {agencyName} and {clientName}</Text>
         {clauses.map((clause, i) => (
-          <View key={clause.title} style={styles.clause}>
-            <Text style={styles.clauseTitle}>{i + 1}. {clause.title}</Text>
+          <View key={`${i}-${clause.title}`} style={styles.clause}>
+            <Text style={styles.clauseTitle}>{numbers[i] ? `${numbers[i]} ${clause.title}` : clause.title}</Text>
             <Text style={styles.clauseBody}>{clause.body}</Text>
           </View>
         ))}

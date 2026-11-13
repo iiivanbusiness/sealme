@@ -46,7 +46,12 @@ export function parseContractSnapshot(value: unknown): ContractSnapshot | null {
   if (typeof templateName !== "string" || typeof agencyName !== "string" || typeof clientName !== "string" || !Array.isArray(clauses)) return null;
   const valid = clauses.every((c) => !!c && typeof c === "object" && typeof c.title === "string" && typeof c.body === "string");
   if (!valid) return null;
-  return { templateName, agencyName, clientName, clauses: (clauses as Clause[]).map((c) => ({ title: c.title, body: c.body })) };
+  return {
+    templateName,
+    agencyName,
+    clientName,
+    clauses: (clauses as Clause[]).map((c) => ({ title: c.title, body: c.body, ...(typeof c.label === "string" ? { label: c.label } : {}) })),
+  };
 }
 
 // The team's contract page (and its PDF) previews what the next send would

@@ -46,6 +46,8 @@ describe("contract snapshot", () => {
   it("reads back only a whole snapshot", () => {
     expect(parseContractSnapshot(JSON.parse(JSON.stringify(SENT)))).toEqual(SENT);
     expect(parseContractSnapshot({ ...SENT, extra: true })).toEqual(SENT);
+    const numbered = { ...SENT, clauses: [{ title: "Intro", body: "a", label: "" }, { title: "Fees", body: "b", label: "3" }, { title: "Odd", body: "c", label: 4 }] };
+    expect(parseContractSnapshot(numbered)?.clauses).toEqual([{ title: "Intro", body: "a", label: "" }, { title: "Fees", body: "b", label: "3" }, { title: "Odd", body: "c" }]);
     for (const bad of [null, undefined, "text", [SENT], { ...SENT, clientName: undefined }, { ...SENT, clauses: "Fees" }, { ...SENT, clauses: [{ title: "Fees" }] }, { ...SENT, clauses: [null] }]) {
       expect(parseContractSnapshot(bad)).toBeNull();
     }

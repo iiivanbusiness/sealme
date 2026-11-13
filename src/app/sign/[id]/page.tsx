@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { dispatchWebhookEvent } from "@/lib/webhooks";
 import { readContractText } from "@/lib/contract-snapshot";
+import { clauseNumbers } from "@/lib/contract";
 import { signContract, requestClauseChange } from "./actions";
 import BrandLogo from "@/components/BrandLogo";
 import SignForm from "@/components/SignForm";
@@ -21,6 +22,7 @@ export default async function SignPage({ params, searchParams }: { params: Promi
   // What the client was sent, never the deal's terms or template as they are now.
   const agreement = await readContractText(contract);
   if (!agreement) notFound();
+  const numbers = clauseNumbers(agreement.clauses);
 
   if (!contract.viewedAt) {
     // updateMany so two tabs opening at once announce it only once.
@@ -99,12 +101,12 @@ export default async function SignPage({ params, searchParams }: { params: Promi
             Between {agreement.agencyName} and {agreement.clientName}
           </div>
           {agreement.clauses.map((clause, i) => (
-            <div key={clause.title} className="mb-5 max-w-[64ch]">
+            <div key={`${i}-${clause.title}`} className="mb-5 max-w-[64ch]">
               <h3 className="mb-1.5 flex gap-2 text-[14px] font-semibold">
-                <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{i + 1}.</span>
+                {numbers[i] && <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{numbers[i]}</span>}
                 {clause.title}
               </h3>
-              <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{clause.body}</p>
+              <p className="whitespace-pre-line text-[14px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{clause.body}</p>
               {canComment && (
                 <details className="mt-2">
                   <summary className="cursor-pointer text-[12px] font-medium" style={{ color: "var(--accent-blue)" }}>

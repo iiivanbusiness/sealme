@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { readContractText } from "@/lib/contract-snapshot";
+import { clauseNumbers } from "@/lib/contract";
 import { signAsCountersigner, declineToSign } from "./actions";
 import BrandLogo from "@/components/BrandLogo";
 import CountersignForm from "@/components/CountersignForm";
@@ -22,6 +23,7 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
   // What went out, the same text the client signs.
   const agreement = await readContractText(contract);
   if (!agreement) notFound();
+  const numbers = clauseNumbers(agreement.clauses);
   const decided = signer.status !== "pending";
   // Signing (or declining) only while the contract is out for signature;
   // a draft, review or change the client asked for comes back as a new send.
@@ -87,12 +89,12 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
             Between {agreement.agencyName} and {agreement.clientName}
           </div>
           {agreement.clauses.map((clause, i) => (
-            <div key={clause.title} className="mb-5 max-w-[64ch]">
+            <div key={`${i}-${clause.title}`} className="mb-5 max-w-[64ch]">
               <h3 className="mb-1.5 flex gap-2 text-[14px] font-semibold">
-                <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{i + 1}.</span>
+                {numbers[i] && <span className="font-mono-tab font-normal" style={{ color: "var(--ink-muted)" }}>{numbers[i]}</span>}
                 {clause.title}
               </h3>
-              <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{clause.body}</p>
+              <p className="whitespace-pre-line text-[14px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>{clause.body}</p>
             </div>
           ))}
         </div>

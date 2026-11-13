@@ -1,35 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { recordAiUsage } from "@/lib/ai-usage";
+import { fieldMeta } from "@/lib/field-meta";
 
 export function isExtractionConfigured(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY);
 }
 
-const FIELD_META: Record<string, { label: string; groupLabel: string }> = {
-  clientName: { label: "Client", groupLabel: "Client & engagement" },
-  // Not a contract placeholder: a deal made from a phone call needs it to
-  // send the contract, so it's asked for when the call didn't give one.
-  clientEmail: { label: "Client email", groupLabel: "Client & engagement" },
-  service: { label: "Service", groupLabel: "Client & engagement" },
-  startDate: { label: "Start date", groupLabel: "Client & engagement" },
-  duration: { label: "Duration", groupLabel: "Client & engagement" },
-  deliverables: { label: "Deliverables", groupLabel: "Scope" },
-  platforms: { label: "Platforms", groupLabel: "Scope" },
-  fee: { label: "Fee", groupLabel: "Commercial terms" },
-  paymentTerms: { label: "Payment terms", groupLabel: "Commercial terms" },
-  cancellation: { label: "Cancellation terms", groupLabel: "Commercial terms" },
-  billingAddress: { label: "Billing address", groupLabel: "Commercial terms" },
-};
-
-// A template's own placeholder ({billingCycle}) reads as "Billing cycle".
-function humanize(fieldKey: string): string {
-  const words = fieldKey.replace(/[_-]+/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim().toLowerCase();
-  return words ? words[0].toUpperCase() + words.slice(1) : fieldKey;
-}
-
-export function fieldMeta(fieldKey: string): { label: string; groupLabel: string } {
-  return FIELD_META[fieldKey] ?? { label: humanize(fieldKey), groupLabel: "Deal details" };
-}
+// Labels live in field-meta.ts so the browser can use them too.
+export { fieldMeta };
 
 export type ExtractedField = {
   fieldKey: string;
@@ -84,7 +62,8 @@ export async function extractDealFromTranscript(
 
   const response = await client.messages.create({
     model: "claude-sonnet-5",
-    max_tokens: 4096,
+    // Uploaded templates can have up to 30 fields, each with a quote.
+    max_tokens: 8192,
     system:
       "You extract structured sales-deal terms from a raw call transcript between an agency and a prospective client. " +
       "Only report a field if the transcript actually states it. Never invent numbers, dates, or names. " +
@@ -132,6 +111,9 @@ export async function extractDealFromTranscript(
     tool_choice: { type: "tool", name: "record_deal_terms" },
   });
   recordAiUsage(response);
+  // A cut-off answer would read as "nothing was said" for every field it
+  // didn't reach.
+  if (response.stop_reason === "max_tokens") throw new Error("Claude's deal terms were cut off");
 
   const toolUse = response.content.find((b) => b.type === "tool_use");
   if (!toolUse || toolUse.type !== "tool_use") {
@@ -151,7 +133,7 @@ export async function extractDealFromTranscript(
     company: input.company?.trim() || null,
     email: input.email?.trim() || null,
     summary: input.summary?.trim() || null,
-    fields: input.fields.map((f) => ({
+    fields: (Array.isArray(input.fields) ? input.fields : []).map((f) => ({
       fieldKey: f.fieldKey,
       value: f.value?.trim() || null,
       sourceQuote: f.sourceQuote?.trim() || null,

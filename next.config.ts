@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Uploaded contracts (templates/upload) arrive through a server action.
+  // 1 MB, the default, turned away many ordinary PDFs. Vercel caps a request
+  // body at 4.5 MB anyway, and the upload form stops files over 4 MB.
+  experimental: {
+    serverActions: { bodySizeLimit: "4.5mb" },
+  },
   // The PDF font (src/lib/pdf-fonts.ts) is read from disk by path, which
   // the build can't trace on its own. Every route: a contract PDF is also
   // built for DocuSign from server actions and API routes all over the app.
