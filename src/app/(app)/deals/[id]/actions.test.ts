@@ -122,15 +122,50 @@ describe("Sending from the Send page", () => {
     expect(requestOrSendReview).not.toHaveBeenCalled();
   });
 
-  it("replaces every earlier signer, including one who declined", async () => {
+  it("won't send a proposal or a contract from the trash", async () => {
+    for (const kind of ["proposal", "contract"]) {
+      prisma.deal.findFirst.mockResolvedValue({ id: "d1", kind, trashedAt: new Date(), contract: { id: "k1", status: "draft", deliveryMethod: "sealme", expiresAt: null } });
+      expect(await sendContractEmail("d1", sendForm())).toEqual({ status: "error", error: `This ${kind} is in the trash. Restore it first` });
+    }
+    expect(prisma.contract.update).not.toHaveBeenCalled();
+    expect(requestOrSendReview).not.toHaveBeenCalled();
+  });
+
+  it("hands over the whole signer list, which replaces everyone on the earlier version", async () => {
     prisma.deal.findFirst.mockResolvedValue({ id: "d1", contract: { id: "k1", status: "changes_requested", deliveryMethod: "sealme", expiresAt: null } });
     requestOrSendReview.mockResolvedValue({ status: "sent" });
 
-    const result = await sendContractEmail("d1", sendForm([["signerName", "Legal"], ["signerEmail", "legal@x.test"], ["signerRole", "Legal"]]));
+    const result = await sendContractEmail("d1", sendForm([["signerName", "Legal"], ["signerEmail", "legal@x.test"], ["signerRole", "Legal"], ["cc", "ops@x.test, cfo@x.test"], ["deliveryMethod", "docusign"]]));
 
     expect(result).toEqual({ status: "sent" });
-    expect(prisma.contractSigner.deleteMany).toHaveBeenCalledWith({ where: { contractId: "k1" } });
-    expect(prisma.contractSigner.createMany.mock.calls[0][0].data).toMatchObject([{ name: "Legal", email: "legal@x.test", order: 1 }]);
+    expect(requestOrSendReview).toHaveBeenCalledWith("d1", { to: "client@x.test", subject: "Agreement", message: "Hi" }, "ana@agency.test", {
+      deliveryMethod: "docusign",
+      ccEmails: ["ops@x.test", "cfo@x.test"],
+      countersigners: [{ name: "Legal", email: "legal@x.test", role: "Legal" }],
+    });
+  });
+
+  it("saves nothing itself, so a send that's refused leaves the contract as it went out", async () => {
+    // requestOrSendReview stores the setup only with the send itself (review.test.ts).
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", contract: { id: "k1", status: "not_signed", deliveryMethod: "docusign", expiresAt: null } });
+    requestOrSendReview.mockRejectedValueOnce(new Error("Couldn't cancel the DocuSign envelope sent before, so nothing went out. Try again in a minute"));
+
+    expect(await sendContractEmail("d1", sendForm([["signerName", "Legal"], ["signerEmail", "legal@x.test"], ["signerRole", "Legal"]]))).toEqual({
+      status: "error",
+      error: "Couldn't cancel the DocuSign envelope sent before, so nothing went out. Try again in a minute",
+    });
+    expect(prisma.contract.update).not.toHaveBeenCalled();
+    expect(prisma.contractSigner.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.contractSigner.createMany).not.toHaveBeenCalled();
+  });
+
+  it("sends again by DocuSign once the SealMe link ran out, before the daily sweep marks it expired", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", contract: { id: "k1", status: "sent", deliveryMethod: "sealme", expiresAt: new Date(Date.now() - 3_600_000) } });
+    requestOrSendReview.mockResolvedValue({ status: "sent" });
+
+    expect(await sendContractEmail("d1", sendForm([["deliveryMethod", "docusign"]]))).toEqual({ status: "sent" });
+    expect(requestOrSendReview.mock.calls[0][3]).toEqual({ deliveryMethod: "docusign", ccEmails: [], countersigners: [] });
+    expect(prisma.contract.update).not.toHaveBeenCalled();
   });
 
   it("takes every signer off when the rep removed them all", async () => {
@@ -138,8 +173,7 @@ describe("Sending from the Send page", () => {
     requestOrSendReview.mockResolvedValue({ status: "sent" });
 
     expect(await sendContractEmail("d1", sendForm())).toEqual({ status: "sent" });
-    expect(prisma.contractSigner.deleteMany).toHaveBeenCalledWith({ where: { contractId: "k1" } });
-    expect(prisma.contractSigner.createMany).not.toHaveBeenCalled();
+    expect(requestOrSendReview.mock.calls[0][3]).toEqual({ deliveryMethod: "sealme", ccEmails: [], countersigners: [] });
   });
 
   it("won't drop a signer whose row is half filled in", async () => {
@@ -149,6 +183,53 @@ describe("Sending from the Send page", () => {
 
     expect(result).toEqual({ status: "error", error: expect.stringContaining("name and an email") });
     expect(prisma.contractSigner.deleteMany).not.toHaveBeenCalled();
+    expect(requestOrSendReview).not.toHaveBeenCalled();
+  });
+});
+
+describe("Sending a proposal from the Send page", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("ignores signer rows and DocuSign, and still sends", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", kind: "proposal", contract: { id: "k1", status: "draft", deliveryMethod: "sealme", expiresAt: null } });
+    requestOrSendReview.mockResolvedValue({ status: "sent" });
+
+    const fd = form([
+      ["to", "client@x.test"],
+      ["subject", "Proposal"],
+      ["message", "Hi"],
+      ["cc", "ops@x.test"],
+      ["deliveryMethod", "docusign"],
+      // Half filled in: refused for a contract, ignored for a proposal.
+      ["signerName", "Legal"],
+      ["signerEmail", ""],
+      ["signerRole", "Legal"],
+    ]);
+    expect(await sendContractEmail("d1", fd)).toEqual({ status: "sent" });
+
+    // By SealMe, with the copy, and its signers left alone.
+    expect(requestOrSendReview).toHaveBeenCalledWith("d1", { to: "client@x.test", subject: "Proposal", message: "Hi" }, "ana@agency.test", {
+      deliveryMethod: "sealme",
+      ccEmails: ["ops@x.test"],
+      countersigners: undefined,
+    });
+    expect(prisma.contract.update).not.toHaveBeenCalled();
+    expect(prisma.contractSigner.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("sends one that already went out again (Send again)", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", kind: "proposal", contract: { id: "k1", status: "sent", deliveryMethod: "sealme", expiresAt: null } });
+    requestOrSendReview.mockResolvedValue({ status: "sent" });
+    expect(await sendContractEmail("d1", form([["to", "client@x.test"], ["subject", "Proposal"], ["message", "Hi"]]))).toEqual({ status: "sent" });
+    expect(requestOrSendReview).toHaveBeenCalledWith("d1", { to: "client@x.test", subject: "Proposal", message: "Hi" }, "ana@agency.test", expect.objectContaining({ deliveryMethod: "sealme" }));
+  });
+
+  it("says a proposal is waiting on review", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", kind: "proposal", contract: { id: "k1", status: "pending_approval", deliveryMethod: "sealme", expiresAt: null } });
+    expect(await sendContractEmail("d1", form([["to", "client@x.test"], ["subject", "Proposal"], ["message", "Hi"]]))).toEqual({
+      status: "error",
+      error: "This proposal is already waiting on review",
+    });
     expect(requestOrSendReview).not.toHaveBeenCalled();
   });
 });
@@ -166,5 +247,26 @@ describe("Send via DocuSign now", () => {
     });
     requestOrSendReview.mockResolvedValue({ status: "pending_approval", assigneeName: "Maria" });
     expect(await sendViaDocusignNow("d1")).toEqual({ heldForReviewBy: "Maria" });
+    // DocuSign is this send's delivery, stored by requestOrSendReview with the send or as the review starts.
+    expect(requestOrSendReview.mock.calls[0][3]).toEqual({ deliveryMethod: "docusign" });
+    expect(prisma.contract.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("Send via DocuSign now, on a proposal", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("refuses before changing anything", async () => {
+    prisma.deal.findFirst.mockResolvedValue({
+      id: "d1",
+      kind: "proposal",
+      client: { name: "Priya Shah", email: "priya@x.test" },
+      template: { name: "Proposal" },
+      contract: { id: "k1", status: "draft" },
+      workspace: { name: "Agency", docusignEnabled: true },
+    });
+    expect(await sendViaDocusignNow("d1")).toEqual({ error: "Proposals go out by email or link, not DocuSign" });
+    expect(prisma.contract.update).not.toHaveBeenCalled();
+    expect(requestOrSendReview).not.toHaveBeenCalled();
   });
 });

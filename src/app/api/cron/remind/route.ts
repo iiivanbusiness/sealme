@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { refreshLeadPipeline } from "@/lib/lead-pipeline";
 import { prisma } from "@/lib/db";
 import { dispatchWebhookEvent } from "@/lib/webhooks";
 import { sendAdminAlertEmail, sendReminderEmail } from "@/lib/email";
@@ -30,7 +31,8 @@ export async function GET(req: Request) {
         reminderSentAt: null,
         // The expiry sweep below runs after this one; a lapsed link isn't worth a nudge.
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-        deal: { trashedAt: null, workspace: { autoRemind: true } },
+        // A proposal is only read, so there's nothing to nudge the client about.
+        deal: { trashedAt: null, kind: { not: "proposal" }, workspace: { autoRemind: true } },
       },
       include: { deal: { include: { client: true, workspace: true } } },
     });
@@ -67,16 +69,24 @@ export async function GET(req: Request) {
   try {
     // DocuSign envelopes expire on DocuSign's own schedule; expiring one
     // here would offer "Send again" while the envelope is still signable.
+    // A proposal never expires.
     const expiredResult = await prisma.contract.findMany({
-      where: { status: "sent", deliveryMethod: "sealme", expiresAt: { lte: new Date() } },
-      include: { deal: { select: { id: true, workspaceId: true } } },
+      where: { status: "sent", deliveryMethod: "sealme", expiresAt: { lte: new Date() }, deal: { kind: { not: "proposal" } } },
+      include: { deal: { select: { id: true, workspaceId: true, leadId: true } } },
     });
     for (const contract of expiredResult) {
       // Guarded so a client signing in the same second keeps their signature.
       const moved = await prisma.contract.updateMany({ where: { id: contract.id, status: "sent" }, data: { status: "expired" } });
       if (moved.count === 0) continue;
       await logAudit({ workspaceId: contract.deal.workspaceId, action: "contract.expired", targetType: "Contract", targetId: contract.id });
-      await dispatchWebhookEvent(contract.deal.workspaceId, "contract.expired", { dealId: contract.deal.id, contractId: contract.id, sentAt: contract.sentAt?.toISOString() ?? null, expiredAt: new Date().toISOString() });
+      await dispatchWebhookEvent(contract.deal.workspaceId, "contract.expired", {
+        dealId: contract.deal.id,
+        contractId: contract.id,
+        leadId: contract.deal.leadId,
+        sentAt: contract.sentAt?.toISOString() ?? null,
+        expiredAt: new Date().toISOString(),
+      });
+      await refreshLeadPipeline(contract.deal.leadId);
       expired++;
     }
   } catch (err) {

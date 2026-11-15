@@ -17,7 +17,7 @@ export default function EmptyTrashButton({ action, count }: { action: () => Prom
   return (
     <div className="flex items-center gap-2">
       <span className="text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
-        Permanently delete {count} {count === 1 ? "deal" : "deals"}? This can&apos;t be undone.
+        Permanently delete {count} {count === 1 ? "proposal or contract" : "proposals and contracts"}? This can&apos;t be undone.
       </span>
       <button
         type="button"

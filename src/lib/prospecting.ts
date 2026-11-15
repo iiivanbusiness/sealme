@@ -1,11 +1,9 @@
-import { redirect } from "next/navigation";
 import { requireWorkspace } from "@/lib/workspace";
 
 // Every page and server action behind Leads, tasks, and phone calls calls
-// this first. Hiding the nav item alone isn't enough: a direct link would
-// still open the page for a workspace that doesn't have the feature yet.
+// this first. Leads used to be a feature a workspace had to have turned on
+// (Workspace.prospectingEnabled); every call is on a lead now, so every
+// workspace has them and the column is no longer read.
 export async function requireProspecting() {
-  const workspace = await requireWorkspace();
-  if (!workspace.prospectingEnabled) redirect("/dashboard");
-  return workspace;
+  return requireWorkspace();
 }

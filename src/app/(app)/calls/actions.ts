@@ -59,19 +59,18 @@ export async function processCall(callId: string, input: { leadId: string; mode?
   if (!isExtractionConfigured()) throw new Error("Call processing isn't set up");
   const mode = input.mode === "cold" || input.mode === "sales" || input.mode === "notes" ? input.mode : "auto";
 
-  let lead: { id: string; stage: string } | null;
-  if (input.leadId === "new") {
-    if (mode === "sales") throw new Error("Pick the lead to make a contract for, or choose Notes only");
-    lead = await prisma.lead.create({ data: { workspaceId: workspace.id, ownerId: access.userId, name: NEW_LEAD_NAME, source: "call" }, select: { id: true, stage: true } });
-  } else {
-    lead = await prisma.lead.findFirst({ where: { id: input.leadId, workspaceId: workspace.id, AND: [access.where] }, select: { id: true, stage: true } });
-  }
+  // A lead can have any number of calls, proposals and contracts: a new
+  // one is named by the call, and a client's call stacks under the client.
+  const lead =
+    input.leadId === "new"
+      ? await prisma.lead.create({ data: { workspaceId: workspace.id, ownerId: access.userId, name: NEW_LEAD_NAME, source: "call" }, select: { id: true } })
+      : await prisma.lead.findFirst({ where: { id: input.leadId, workspaceId: workspace.id, AND: [access.where] }, select: { id: true } });
   if (!lead) throw new Error("Pick a lead for this call");
-  if (mode === "sales" && lead.stage === "converted") throw new Error("That lead is already a deal");
 
   let templateId: string | null = null;
   if (mode === "sales" && input.templateId) {
-    const template = await prisma.contractTemplate.findFirst({ where: { id: input.templateId, workspaceId: workspace.id }, select: { id: true } });
+    // A sales call's template is the contract it makes.
+    const template = await prisma.contractTemplate.findFirst({ where: { id: input.templateId, workspaceId: workspace.id, kind: { not: "proposal" } }, select: { id: true } });
     if (!template) throw new Error("That template isn't in this workspace");
     templateId = template.id;
   }
@@ -85,9 +84,17 @@ export async function processCall(callId: string, input: { leadId: string; mode?
   const force = input.force || (mode === "notes" && before?.mode === "notes" && before.status === "failed" && NOTES_SOURCES.has(before.source));
 
   const allowed = input.force ? ["pending", "failed", "skipped"] : ["pending", "failed"];
+  // What gets made is what the inbox says now: notes only, or notes and a
+  // contract. The call keeps what Start a call asked for only when SealMe
+  // sorts it out again.
   const { count } = await prisma.phoneCall.updateMany({
     where: { ...callWhere, id: callId, status: { in: allowed } },
-    data: { status: "processing", leadId: lead.id, mode, templateId },
+    data: {
+      status: "processing",
+      leadId: lead.id,
+      mode,
+      ...(mode === "auto" ? {} : { templateId, wantsProposal: false, wantsContract: mode === "sales" }),
+    },
   });
   if (count === 0) throw new Error("That call was already handled");
 

@@ -6,7 +6,7 @@ import Google from "next-auth/providers/google";
 import { authConfig } from "@/lib/auth.config";
 import { prisma } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
-import { buildDefaultTemplates } from "@/lib/default-templates";
+import { buildDefaultTemplates, buildSampleProposalTemplate } from "@/lib/default-templates";
 import { attachOnboardingProfile } from "@/lib/onboarding";
 import { createOwnerRole } from "@/lib/permissions";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -167,7 +167,7 @@ const nextAuth = NextAuth({
           user = await prisma.user.create({
             data: { workspaceId: workspace.id, name, email, passwordHash: null, emailVerifiedAt: new Date(), roleId: ownerRole.id },
           });
-          const templates = buildDefaultTemplates(workspace.name);
+          const templates = [...buildDefaultTemplates(workspace.name), buildSampleProposalTemplate(workspace.name)];
           await prisma.contractTemplate.createMany({
             data: templates.map((t) => ({ ...t, workspaceId: workspace.id })),
           });

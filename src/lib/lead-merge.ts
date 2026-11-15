@@ -2,11 +2,17 @@ import { prisma } from "@/lib/db";
 import { mergeList } from "@/lib/lead-match";
 import { dispatchLeadsUpdated, leadChanges } from "@/lib/webhook-events";
 import { crmAlias } from "@/lib/crm-leads";
+import { refreshLeadPipeline } from "@/lib/lead-pipeline";
 import type { Lead } from "@/generated/prisma/client";
 
 // How far along a stage is, for keeping the furthest of two leads. Lost
 // counts for nothing next to a lead that's still moving.
 const STAGE_RANK: Record<string, number> = { lost: -1, new: 0, contacted: 1, interested: 2, meeting: 3, converted: 4 };
+// The same for where a lead is on the Leads list (refreshed from the merged
+// lead's documents right after).
+const PIPELINE_RANK: Record<string, number> = { lost: -2, not_now: -1, new: 0, not_signed: 1, proposal_sent: 2, contract_sent: 3, client: 4 };
+const earliest = (a: Date | null, b: Date | null) => (a && b ? (a < b ? a : b) : (a ?? b));
+const latest = (a: Date | null, b: Date | null) => (a && b ? (a > b ? a : b) : (a ?? b));
 
 // The CRM ids source has that the merged lead won't carry itself, kept as
 // aliases on it (along with the aliases either lead already had), so a CRM
@@ -43,8 +49,14 @@ export function mergedLeadData(target: Lead, source: Lead) {
     salesforceRecordId: target.salesforceRecordId ?? source.salesforceRecordId,
     ghlContactId: target.ghlContactId ?? source.ghlContactId,
   };
+  const isClient = target.isClient || source.isClient;
+  const pipelineStage = isClient ? "client" : (PIPELINE_RANK[source.pipelineStage] ?? 0) > (PIPELINE_RANK[target.pipelineStage] ?? 0) ? source.pipelineStage : target.pipelineStage;
   return {
     stage,
+    pipelineStage,
+    isClient,
+    clientAt: earliest(target.clientAt, source.clientAt),
+    lastActivityAt: latest(target.lastActivityAt, source.lastActivityAt),
     ownerId: target.ownerId ?? source.ownerId,
     company: target.company ?? source.company,
     title: target.title ?? source.title,
@@ -73,8 +85,8 @@ export function mergedLeadData(target: Lead, source: Lead) {
   };
 }
 
-// Two leads for the same client become one: every call, task and planned
-// call moves to target, and source is deleted. Both must already be checked
+// Two leads for the same client become one: every call, proposal, contract,
+// task and planned call moves to target, and source is deleted. Both must already be checked
 // to be in the workspace and visible to whoever asked.
 export async function mergeLeads(workspaceId: string, sourceId: string, targetId: string): Promise<void> {
   if (sourceId === targetId) throw new Error("That's the same lead");
@@ -84,15 +96,34 @@ export async function mergeLeads(workspaceId: string, sourceId: string, targetId
   ]);
   if (!source || !target) throw new Error("That lead isn't available");
   const data = mergedLeadData(target, source);
+  // A merge only ever makes the lead a client, never takes it back: a
+  // contract signed on target while this ran keeps it a client (the stage
+  // refresh below then puts the stage right).
+  const write: Partial<typeof data> = { ...data };
+  // Where the lead stands in its conversion goes in only if target is still
+  // not a client when the merge lands; a signature that arrived meanwhile
+  // already set all of it.
+  const conversion: Partial<typeof data> = {};
+  if (!data.isClient) {
+    delete write.isClient;
+    delete write.clientAt;
+    for (const key of ["stage", "pipelineStage", "convertedAt", "convertedDealId", "convertedClientId"] as const) {
+      Object.assign(conversion, { [key]: data[key] });
+      delete write[key];
+    }
+  }
 
   await prisma.$transaction([
     prisma.phoneCall.updateMany({ where: { leadId: sourceId }, data: { leadId: targetId } }),
+    prisma.deal.updateMany({ where: { leadId: sourceId }, data: { leadId: targetId } }),
     prisma.task.updateMany({ where: { leadId: sourceId }, data: { leadId: targetId } }),
     prisma.callIntent.updateMany({ where: { leadId: sourceId }, data: { leadId: targetId } }),
     // The CRM and API ids are unique per workspace: off source before target takes them.
     prisma.lead.update({ where: { id: sourceId }, data: { hubspotContactId: null, salesforceRecordId: null, externalId: null } }),
-    prisma.lead.update({ where: { id: targetId }, data }),
+    prisma.lead.update({ where: { id: targetId }, data: write }),
+    ...(Object.keys(conversion).length ? [prisma.lead.updateMany({ where: { id: targetId, isClient: false }, data: conversion })] : []),
     prisma.lead.delete({ where: { id: sourceId } }),
   ]);
   await dispatchLeadsUpdated(workspaceId, [leadChanges(targetId, target, data)]);
+  await refreshLeadPipeline(targetId);
 }

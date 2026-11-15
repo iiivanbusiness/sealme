@@ -8,8 +8,8 @@ describe("phone app", () => {
     expect(isPhoneAppUserAgent(null)).toBe(false);
   });
 
-  it("sends contract pages to the Dashboard and Start a call to Notes", () => {
-    expect(phoneAppRedirect("/deals/new")).toBe("/notes");
+  it("sends contract pages to the Dashboard and keeps Start a call", () => {
+    expect(phoneAppRedirect("/deals/new")).toBeNull();
     expect(phoneAppRedirect("/deals")).toBe("/dashboard");
     expect(phoneAppRedirect("/deals/abc123/contract")).toBe("/dashboard");
     expect(phoneAppRedirect("/clients")).toBe("/dashboard");

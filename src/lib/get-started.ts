@@ -22,7 +22,6 @@ export type GetStartedInput = {
   hasDeal: boolean;
   hasSentContract: boolean;
   readyDealId: string | null; // a deal whose contract can go out now
-  prospecting: boolean;
   hasCall: boolean; // this person has a written-up call
   callLeadId: string | null; // the lead their latest call is on
   phoneCalls: boolean; // the SealMe number is set up, so a rep's phone matters
@@ -38,24 +37,14 @@ export function getStartedSteps(i: GetStartedInput): GetStartedStep[] {
     id: "contract",
     title: "Send your first contract",
     hint: "Check the contract SealMe drafted and send it for signature.",
-    cta: i.readyDealId ? "Open the contract" : "Go to deals",
-    href: i.readyDealId ? `/deals/${i.readyDealId}/contract` : "/deals",
+    cta: i.readyDealId ? "Open the contract" : "Go to Leads",
+    href: i.readyDealId ? `/deals/${i.readyDealId}/contract` : "/leads",
     done: i.hasSentContract,
   };
   const admin: (GetStartedStep | false)[] = [
-    i.canManageWorkspace && { id: "crm", title: "Connect your CRM", hint: "Call notes, clients and deals go to HubSpot or Salesforce on their own.", cta: "Connect", href: "/settings#crm", done: i.crmConnected },
+    i.canManageWorkspace && { id: "crm", title: "Connect your CRM", hint: "Call notes, clients and deals go to HubSpot, Salesforce or GoHighLevel on their own.", cta: "Connect", href: "/settings#crm", done: i.crmConnected },
     i.canManageTeam && { id: "team", title: "Invite your team", hint: "They get an email to set a password and join.", cta: "Invite", href: "/settings#team", done: i.hasTeammate },
   ];
-
-  // Without prospecting SealMe is deals and contracts only.
-  if (!i.prospecting) {
-    const steps: (GetStartedStep | false)[] = [
-      { id: "deal", title: "Start your first deal", hint: "Paste a call transcript or record a call. SealMe pulls out what was agreed.", cta: "Start a deal", href: "/deals/new", done: i.hasDeal },
-      contract,
-      ...admin,
-    ];
-    return steps.filter((s): s is GetStartedStep => Boolean(s));
-  }
 
   // Calls first: every team starts from a call, and contracts only matter
   // to the teams that send them.
@@ -63,15 +52,15 @@ export function getStartedSteps(i: GetStartedInput): GetStartedStep[] {
     {
       id: "call",
       title: "Add your first call",
-      hint: "In Notes, drop a recording or video of a call, or paste its transcript, and press Write up the call.",
-      cta: "Go to Notes",
-      href: "/notes?guide=notes",
+      hint: "On Start a call, drop a recording or video of a call, or paste its transcript, and press Write up the call.",
+      cta: "Start a call",
+      href: "/deals/new?guide=notes",
       done: i.hasCall || i.hasDeal,
     },
     {
       id: "lead",
       title: "Open the client's file",
-      hint: "Every call with a client is on one lead: where things stand, each call's notes, and Copy all notes.",
+      hint: "Every call with a client is on one lead: where things stand, and each call's notes, proposal and contract.",
       cta: "Open it",
       href: i.callLeadId ? `/leads/${i.callLeadId}?guide=lead` : "/leads?guide=lead",
       done: false,
@@ -79,7 +68,7 @@ export function getStartedSteps(i: GetStartedInput): GetStartedStep[] {
     },
     {
       id: "todo",
-      title: "Check your to-do list",
+      title: "Check your reminders",
       hint: "Next steps agreed on a call land here on their day, in the order your day happens.",
       cta: "Show me",
       href: "/dashboard?guide=todo#todo",
@@ -103,7 +92,7 @@ export function getStartedSteps(i: GetStartedInput): GetStartedStep[] {
       : {
           id: "contracts",
           title: "Need contracts too?",
-          hint: "On Start a call, pick Notes and contract and SealMe drafts it from what was agreed.",
+          hint: "On Start a call, tick Proposal or Contract and SealMe drafts it from what was agreed.",
           cta: "See how",
           href: "/deals/new?guide=contracts",
           done: false,
@@ -113,5 +102,13 @@ export function getStartedSteps(i: GetStartedInput): GetStartedStep[] {
   return steps.filter((s): s is GetStartedStep => Boolean(s));
 }
 
-// Where "seen" steps are kept: in the browser, per person, as a list of ids.
+// Any CRM the workspace pushes to, the same ones Settings shows as
+// connected: HubSpot, Salesforce or GoHighLevel.
+export function hasCrm(w: { hubspotAccessToken?: string | null; salesforceRefreshToken?: string | null; ghlAccessToken?: string | null } | null): boolean {
+  return Boolean(w && (w.hubspotAccessToken || w.salesforceRefreshToken || w.ghlAccessToken));
+}
+
+// Where "seen" steps are kept: in the browser, as a list of ids, under this
+// key and the person's user id (see guide-seen.ts). The key on its own is
+// where the whole browser kept them before that.
 export const GUIDE_SEEN_KEY = "sealme.guide.seen";

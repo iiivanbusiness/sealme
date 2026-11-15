@@ -5,6 +5,7 @@ import { normalizePhone } from "@/lib/phone";
 import { isValidDay, isValidTime, isValidTimeZone, TASK_PRIORITIES } from "@/lib/tasks";
 import { notifyTasksAssigned } from "@/lib/task-notify";
 import { dispatchCallCompleted, dispatchLeadsUpdated, dispatchMeetingsBooked, dispatchTasksCompleted, leadChanges } from "@/lib/webhook-events";
+import { INACTIVE_STAGES, refreshLeadPipeline } from "@/lib/lead-pipeline";
 import type { Lead } from "@/generated/prisma/client";
 
 // Calls and meetings another system sends in through the API (an agency's
@@ -113,6 +114,20 @@ export function parseCallInput(body: Record<string, unknown>): { data: CallInput
   };
 }
 
+// A call or meeting logged here is activity, the same as a SealMe call: the
+// lead isn't idle, and one set aside (lost, not now, unsigned) is active
+// again. Only when it's the lead's newest activity: an older call sent in
+// late is history, and a lead marked lost since then stays lost. "new" is
+// just a starting point: the caller works the real stage out after
+// (refreshLeadPipeline), since a proposal or contract may still be out.
+export function revived(lead: Pick<Lead, "lastActivityAt" | "pipelineStage">, at: Date): { lastActivityAt?: Date; pipelineStage?: string } {
+  const newest = !lead.lastActivityAt || lead.lastActivityAt < at;
+  return {
+    ...(newest ? { lastActivityAt: at } : {}),
+    ...(newest && INACTIVE_STAGES.includes(lead.pipelineStage) ? { pipelineStage: "new" } : {}),
+  };
+}
+
 // A call another dialer made, with just its outcome: saved to the lead's
 // history, the lead moves on as it would after a SealMe call, and the
 // rep's open call task on the lead is done.
@@ -121,10 +136,19 @@ export async function logCallOutcome(o: { workspaceId: string; lead: Lead; repId
   const now = new Date();
   const reached = !UNREACHED_OUTCOMES.has(input.outcome);
   const stage = stageAfterOutcome(lead.stage, input.outcome);
+  // Not interested takes the lead off Active, the same as stage lost through
+  // PATCH (and the call doesn't bring it back). A client stays a client, and
+  // an older call sent in late doesn't outweigh what happened since.
+  const lost = input.outcome === "not_interested" && (stage ?? lead.stage) === "lost" && !lead.isClient && (!lead.lastActivityAt || lead.lastActivityAt <= input.startedAt);
+  const wake = revived(lead, input.startedAt);
   const leadData = {
     ...(stage ? { stage } : {}),
     ...(reached && (!lead.lastContactedAt || lead.lastContactedAt < input.startedAt) ? { lastContactedAt: input.startedAt } : {}),
     ...(input.summary ? { summary: input.summary } : {}),
+    ...wake,
+    // A lost lead the call brings back is contacted for the API, as after
+    // Reactivate, unless the outcome moved it further.
+    ...(lost ? { pipelineStage: "lost" } : !stage && wake.pipelineStage && lead.stage === "lost" ? { stage: "contacted" } : {}),
   };
   const closable = repId
     ? await prisma.task.findFirst({
@@ -159,6 +183,10 @@ export async function logCallOutcome(o: { workspaceId: string; lead: Lead; repId
     ...(closable ? [prisma.task.update({ where: { id: closable.id }, data: { status: "done", completedAt: now } })] : []),
   ]);
 
+  // Active again: the stage its documents put it at (a proposal still out
+  // shows Proposal sent, not New), as after a SealMe call. Lost stays lost,
+  // unless a contract was signed meanwhile: then it's back on Clients.
+  if (leadData.pipelineStage) await refreshLeadPipeline(lead.id);
   await dispatchLeadsUpdated(workspaceId, [leadChanges(lead.id, lead, leadData)]);
   await dispatchCallCompleted(workspaceId, call.id);
   if (closable) await dispatchTasksCompleted(workspaceId, [closable.id], { callId: call.id });
@@ -196,6 +224,7 @@ export async function bookMeeting(o: {
     ...(lead.ownerId || !rep ? {} : { ownerId: rep.id }),
     nextStep: input.note ?? "Meeting",
     nextStepAt: dueDate,
+    ...revived(lead, new Date()),
   };
 
   const [task] = await prisma.$transaction([
@@ -205,6 +234,7 @@ export async function bookMeeting(o: {
     }),
     prisma.lead.update({ where: { id: lead.id }, data: leadData }),
   ]);
+  if (leadData.pipelineStage) await refreshLeadPipeline(lead.id);
 
   if (rep) await notifyTasksAssigned({ workspaceId, assigneeId: rep.id, actorName: o.actorName, count: 1, type: "sales_call", dueDate, dueTime: input.time, lead: { id: lead.id, name: lead.name } });
   await dispatchLeadsUpdated(workspaceId, [leadChanges(lead.id, lead, leadData)]);

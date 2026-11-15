@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useLayoutEffect, useRef, useState } from "react";
+import { activeNavHref } from "@/lib/nav-config";
 
 export type SidebarNavItem = {
   href: string;
@@ -20,7 +21,7 @@ export default function SidebarNav({ groups, expandAll = false }: { groups: Side
   const itemRefs = useRef(new Map<string, HTMLAnchorElement>());
   const [pill, setPill] = useState<{ top: number; height: number } | null>(null);
 
-  const activeHref = items.find((item) => pathname === item.href || pathname.startsWith(item.href + "/"))?.href;
+  const activeHref = activeNavHref(pathname, items.map((item) => item.href));
   // A folded group opens by itself when the page you're on is in it.
   const [opened, setOpened] = useState<Set<string>>(new Set());
   const isOpen = (group: SidebarNavGroup) => expandAll || !group.collapsible || opened.has(group.label) || group.items.some((i) => i.href === activeHref);

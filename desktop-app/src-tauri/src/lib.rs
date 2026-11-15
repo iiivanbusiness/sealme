@@ -172,10 +172,11 @@ async fn start_local_capture() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-// Called once the caller has a token (i.e. once startLocalCapture's deal
-// actually exists). Starts a background loop that periodically uploads
-// whatever's been captured since the last chunk, so deal terms fill in
-// while the call is still happening instead of only at the very end.
+// Called once the caller has a token (from startLiveCall for a new call, or
+// continueLocalCapture for a follow-up on a deal). Starts a background loop
+// that periodically uploads whatever's been captured since the last chunk,
+// so deal terms fill in while the call is still happening instead of only
+// at the very end.
 #[tauri::command]
 fn begin_live_updates(app: tauri::AppHandle, token: String) {
     let (wake, stop) = mpsc::channel();

@@ -49,6 +49,10 @@ vi.mock("@/lib/db", () => {
     prisma: {
       deal: {
         findMany: async ({ where }: { where: { id: { in: string[] } } }) => [{ id: "deal_1", feeDisplay: "$8.5k a month" }].filter((d) => where.id.in.includes(d.id)),
+        findUnique: async ({ where }: { where: { id: string } }) =>
+          where.id === "deal_1"
+            ? { id: "deal_1", kind: "contract", leadId: "lead_1", status: "ready", source: "api", service: "Brand refresh", feeDisplay: "$8.5k a month", createdAt: new Date("2026-11-01T12:00:00Z"), client: { id: "cli_1", name: "Avery Chen", company: "Northwind" }, owner: null }
+            : null,
       },
       webhookEndpoint: {
         findMany: async ({ where }: { where: { workspaceId: string; enabled: boolean } }) => db.endpoints.filter((e) => e.workspaceId === where.workspaceId && e.enabled === where.enabled),
@@ -94,7 +98,7 @@ vi.mock("@/lib/outbound-url", () => ({ checkPublicHttpsUrl: async (url: string) 
 // Outside a request after() throws; the code then runs the work inline.
 vi.mock("next/server", () => ({ after: () => { throw new Error("outside request"); } }));
 
-import { attemptDelivery, dispatchWebhookEvent, dispatchWebhookEvents, MAX_WEBHOOK_ATTEMPTS, resendWebhookDelivery, retryDueWebhookDeliveries, sendTestWebhook } from "./webhooks";
+import { attemptDelivery, dispatchDealCreated, dispatchWebhookEvent, dispatchWebhookEvents, MAX_WEBHOOK_ATTEMPTS, resendWebhookDelivery, retryDueWebhookDeliveries, sendTestWebhook } from "./webhooks";
 
 const fetchMock = vi.fn();
 vi.stubGlobal("fetch", fetchMock);
@@ -139,6 +143,15 @@ describe("dispatchWebhookEvent", () => {
       dealValue: 8500,
       currency: "USD",
     });
+    vi.unstubAllEnvs();
+  });
+
+  it("says on deal.created whether it's a proposal or a contract, and which lead it's on", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.example.com");
+    fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+    await dispatchDealCreated("w1", "deal_1");
+    const { data } = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(data).toMatchObject({ dealId: "deal_1", kind: "contract", leadId: "lead_1", leadUrl: "https://app.example.com/leads/lead_1", clientId: "cli_1", dealValue: 8500 });
     vi.unstubAllEnvs();
   });
 

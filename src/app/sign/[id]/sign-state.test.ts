@@ -31,6 +31,14 @@ describe("sign page state", () => {
     expect(signPageState(contract("sent", { deliveryMethod: "docusign" }), now)).toBe("docusign");
   });
 
+  it("closes a contract the rep marked not signed, on either delivery", () => {
+    expect(signPageState(contract("not_signed"), now)).toBe("closed");
+    expect(signPageState(contract("not_signed", { deliveryMethod: "docusign" }), now)).toBe("closed");
+    expect(signPageState(contract("not_signed", { expiresAt: new Date("2026-11-01T00:00:00Z") }), now)).toBe("closed");
+    expect(canCommentOnClauses(contract("not_signed"), now)).toBe(false);
+    expect(signPageMessage("closed", "Acme")).toBe("This agreement is no longer open for signing. Contact Acme.");
+  });
+
   it("lets a client keep commenting after their first comment, but not during review", () => {
     expect(canCommentOnClauses(contract("sent"), now)).toBe(true);
     expect(canCommentOnClauses(contract("changes_requested"), now)).toBe(true);
@@ -48,6 +56,19 @@ describe("sign page state", () => {
   });
 });
 
+describe("a proposal on the sign page", () => {
+  it("never takes clause comments, whatever its status", () => {
+    for (const status of ["sent", "changes_requested", "draft"]) {
+      expect(canCommentOnClauses({ ...contract(status), kind: "proposal" }, now)).toBe(false);
+    }
+  });
+
+  it("leaves contracts as they were, with or without a kind", () => {
+    expect(canCommentOnClauses({ ...contract("sent"), kind: "contract" }, now)).toBe(true);
+    expect(canCommentOnClauses({ ...contract("changes_requested"), kind: null }, now)).toBe(true);
+  });
+});
+
 describe("counter-sign page state", () => {
   it("takes a counter-signature only while the contract is out for signature", () => {
     expect(countersignPageState(contract("sent"), now)).toBe("open");
@@ -62,6 +83,11 @@ describe("counter-sign page state", () => {
     expect(countersignPageState(contract("partially_signed", { expiresAt }), now)).toBe("open");
     expect(countersignPageState(contract("sent", { expiresAt }), now)).toBe("expired");
     expect(countersignPageState(contract("expired"), now)).toBe("expired");
+  });
+
+  it("turns a counter-signer away once the rep marked the contract not signed", () => {
+    expect(countersignPageState(contract("not_signed"), now)).toBe("closed");
+    expect(countersignPageState(contract("not_signed", { deliveryMethod: "docusign" }), now)).toBe("closed");
   });
 
   it("explains a finished or DocuSign contract instead of offering the form", () => {

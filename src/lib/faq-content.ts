@@ -30,27 +30,22 @@ export function faqCategoriesFor(prospecting: boolean): FaqCategory[] {
 // navigation questions ("where do I connect Salesforce", "where are my
 // deals") without needing any account data. This is app structure, not
 // account content, so it stays fine under the no-account-access rule.
-export function appNavigationText(prospecting = false): string {
-  const sidebar = navGroupsFor({ prospecting, admin: false })
+export function appNavigationText(): string {
+  const sidebar = navGroupsFor({ admin: false })
     .map((g) => `${g.label ? `${g.label}: ` : ""}${g.items.map((item) => `${item.label} (${item.href})`).join(", ")}`)
     .join("; ");
   return (
-    `Left sidebar, top to bottom, in sections: ${sidebar}. On a phone, the bottom bar has the main four and the menu button opens the rest.\n\n` +
-    (prospecting
-      ? "Dashboard: a Today card at the top with one folder per thing (Team today for managers, Next up, Your day, Waiting on you, " +
-        "Notifications, Deals, Hand out work for managers, Calendar), each with a colored dot for how urgent it is. Tap a folder to open it; " +
-        "Customize in that card hides or reorders folders. The deal widgets sit below it, with their own Customize.\n\n" +
-        "Leads: the lead list with search and filters, Import (paste, CSV or Excel) and + Add lead at the top. Select leads and click Assign to give them to a rep. " +
-        "Open a lead to call it, add a cold call transcript, or Convert to deal.\n\n" +
-        "Calls: calls that need a look (Pending) and every call SealMe handled (History).\n\n" +
-        "Notes (under Closing): add a recording, video or transcript of a call and get only the notes and next step, no contract. Below it, every client that has notes, newest call first; each one opens that client's lead with all their calls.\n\n" +
-        "Team (under Workspace, managers only): each rep's tasks, calls and results, and moving tasks between reps.\n\n" +
-        "Your phone number: on the Settings page, its own section, where you add and verify the number SealMe rings when you tap Call.\n\n"
-      : "") +
-    "Deals: click Deals in the sidebar, or go to /deals. Table and Board views, filterable by status and owner. " +
-    "Click + Start a call to begin a new deal, either recording locally, pasting a transcript, or entering details by hand.\n\n" +
-    "Clients: Clients in the sidebar lists every client across all deals.\n\n" +
-    "Contract templates: Templates in the sidebar, where you create and edit the templates deals are built from.\n\n" +
+    `Left sidebar, top to bottom, in sections: ${sidebar}. Workspace is folded until you open it. On a phone, the bottom bar has the main screens and the menu button opens the rest.\n\n` +
+    "Dashboard: + Start a call at the top, then what's coming up, what needs you and what's waiting on an answer.\n\n" +
+    "Calendar (/calendar): your Google Calendar meetings and ones you add by hand, each with Start call, which opens with the person filled in. Nothing records a meeting on its own: you start the recording in the desktop app, or upload or paste the call afterwards.\n\n" +
+    "Start a call (/deals/new): who the call is with, what SealMe makes (notes always; tick Proposal or Contract for those too), then upload the recording or paste the transcript. " +
+    "Recording on this computer? Record it in the desktop app from the same page. Every call lands on the client's lead.\n\n" +
+    "Leads: every person or company you talk to, with Active, Clients, Inactive and All tabs, search and filters. Import a list (paste, CSV or Excel), + Add lead and Trash are in the ... menu at the top. " +
+    "Open a lead to see each call with its notes, proposal and contract, or to call the lead. A new call goes on a lead from Start a call. A lead becomes a client when a contract is signed.\n\n" +
+    "Team (under Workspace, managers only, once the workspace has two or more people): each rep's tasks, calls and results, and moving tasks between reps.\n\n" +
+    "Analytics (under Workspace, on the computer): calls, proposals sent and viewed, contracts sent and signed, the value signed and the days from the first call to the signature, for the last 30 days, 90 days or 12 months, as your own numbers, or the whole team's with each person's for anyone who can see every deal.\n\n" +
+    "Your phone number: on the Settings page, its own section, where you add and verify the number SealMe rings when you tap Call.\n\n" +
+    "Templates: Templates in the sidebar, where you create, upload and edit the templates proposals and contracts are made from.\n\n" +
     "Everything below lives on the Settings page (Settings in the sidebar), as separate sections you scroll through:\n" +
     "- Workspace name and logo\n" +
     "- Team: invite teammates, assign roles, set up teams and approval chains, assign approval backups\n" +
@@ -60,7 +55,7 @@ export function appNavigationText(prospecting = false): string {
     "- API & webhooks: generate API keys, set up webhook endpoints\n" +
     "- Two-factor authentication\n" +
     "- Sending domain: verify your own domain so contracts go out as you\n" +
-    "- Notification toggles: require manual approval before sending, email me when signed, auto-remind clients, signing/reminder timing\n" +
+    "- Notification toggles: email me when signed, auto-remind clients, signing/reminder timing\n" +
     "- Delete account\n\n" +
     "To connect or check a CRM/integration (Salesforce, HubSpot, Slack, DocuSign): go to Settings and find that " +
     "integration's row, it shows Connect if not linked yet, or who it's connected as if it already is."
@@ -84,31 +79,31 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
       {
         question: "Where do I see what I have to do today?",
         answer:
-          "On the Dashboard. The Today folders show your next call, the rest of your day, what's waiting on you and new notifications. A red dot means late, orange needs you today, blue is new and green is all good. Tap a folder to open it, and use Customize in that card to hide or reorder folders.",
+          "On the Dashboard. Coming up has today's meetings, each with Start call. Needs you has what's waiting on you: proposals with no answer for 5 days, contracts to finish and send, calls that need a name, approvals, and your Reminders (the to-do list, with your next call, the rest of your day and what's late). Waiting on an answer lists every proposal and contract out with a client, with how many days it's been.",
       },
       {
         question: "How do I get leads into SealMe?",
         answer:
-          "Go to Leads and click Import. Paste rows from Excel or Google Sheets, or upload a CSV or Excel file; Apollo and Clay columns are recognized on their own. A lead with the same email, phone or CRM ID is updated instead of added twice. You can also click + Add lead, or bring leads in from HubSpot or Salesforce under Lead import in that CRM's card in Settings.",
+          "Go to Leads, open the ... menu at the top and click Import a list. Paste rows from Excel or Google Sheets, or upload a CSV or Excel file; Apollo and Clay columns are recognized on their own. A lead with the same email, phone or CRM ID is updated instead of added twice. You can also pick + Add lead from the same menu, or bring leads in from HubSpot or Salesforce under Lead import in that CRM's card in Settings.",
       },
       {
         question: "How do I give leads to my reps?",
         answer:
-          "On Leads, select the leads and click Assign, then pick who, the day, an optional time, priority and a note. Or open Hand out work on the Dashboard to give a rep the next free leads as cold calls for today or tomorrow in one step. The Owner and roles with Manage team & roles can hand out work.",
+          "On Leads, select the leads and click Assign, then pick who, the day, an optional time, priority and a note. Or use Hand out leads in Reminders on the Dashboard to give a rep the next free leads as cold calls for today or tomorrow in one step. The Owner and roles with Manage team & roles can hand out work.",
       },
       {
         question: "Can I get my tasks by email?",
-        answer: "Yes. SealMe can email you the day's list every morning. Turn it on or off under Customize in the Today card on the Dashboard.",
+        answer: "Yes. SealMe can email you the day's list every morning. Tick Email me this list every morning at the bottom of Reminders on the Dashboard.",
       },
       {
         question: "How do I see how my team is doing?",
         answer:
-          "Managers have a Team today folder on the Dashboard with each rep's calls, meetings and tasks done, and who's behind. The Team page, under Workspace in the sidebar, has more detail and lets you move tasks from one rep to another.",
+          "Managers can switch Reminders on the Dashboard to Team: one line per rep with their to-dos done today and who's behind. The Team page, under Workspace in the sidebar, has more detail and lets you move tasks from one rep to another.",
       },
       {
-        question: "How do I turn a lead into a deal?",
+        question: "When does a lead become a client?",
         answer:
-          "Open the lead and click Convert to deal. SealMe creates the client and the deal and carries over the lead's call history. A sales call made through SealMe does this on its own.",
+          "When a contract made for that lead is signed. The lead moves to the Clients tab on Leads, and every later call, proposal and contract stays on the same lead.",
       },
     ],
   },
@@ -174,7 +169,7 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
       {
         question: "Do I need to tell the other person I'm recording?",
         answer:
-          "In most places, yes, the other party needs to know a call is being recorded. Since SealMe no longer joins as a visible bot, that notice is on you to give at the start of the call.",
+          "In most places, yes, the other party needs to know a call is being recorded. SealMe doesn't join the call, so that notice is on you to give at the start of the call.",
       },
     ],
   },
@@ -258,7 +253,13 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
       },
       {
         question: "What is auto-remind?",
-        answer: "If a client hasn't signed after a few days, SealMe sends them one automatic reminder.",
+        answer:
+          "A setting in Settings, off until someone turns it on. When it's on, a client who hasn't signed a contract sent with SealMe's sign link gets one reminder after the number of days set there. DocuSign sends its own reminders, and a proposal never gets one by itself.",
+      },
+      {
+        question: "Does SealMe remind a client about a proposal?",
+        answer:
+          "Only when you click. A proposal with no answer for 5 days (no call with them and nothing newer sent) shows under Needs you on the Dashboard with Send reminder. One click emails the client a short note with the link to the proposal, from the same address the proposal came from. It works once every 5 days at most, and nothing goes out on its own. If the client has no email on file, you get Copy link instead to send it yourself.",
       },
     ],
   },

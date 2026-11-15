@@ -1,16 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { deal, dealField, dealFieldChange, client, extract } = vi.hoisted(() => ({
+const { deal, dealField, dealFieldChange, client, extract, executeRaw, rows } = vi.hoisted(() => ({
   deal: { findUnique: vi.fn(), update: vi.fn() },
-  dealField: { findMany: vi.fn(), upsert: vi.fn() },
+  dealField: { findMany: vi.fn(), upsert: vi.fn(), count: vi.fn() },
   dealFieldChange: { create: vi.fn() },
   client: { update: vi.fn() },
   extract: vi.fn(),
+  // The compare-and-set on the deal: 1 when this pass may write.
+  executeRaw: vi.fn<(...args: unknown[]) => Promise<number>>(async () => 1),
+  rows: { current: [] as object[] },
 }));
-vi.mock("@/lib/db", () => ({ prisma: { deal, dealField, dealFieldChange, client } }));
+vi.mock("@/lib/db", () => ({ prisma: { deal, dealField, dealFieldChange, client, $executeRaw: executeRaw } }));
 vi.mock("@/lib/extract-deal", () => ({
   extractDealFromTranscript: extract,
-  buildDealFieldRows: () => ({ fieldRows: [], hasMissing: false, service: "", fee: "" }),
+  buildDealFieldRows: () => ({ fieldRows: rows.current, hasMissing: false, service: "", fee: "" }),
 }));
 
 import { applyExtractionToDeal, contractLocksTerms } from "./deal-live";
@@ -42,6 +45,45 @@ describe("Client email from a call", () => {
     extract.mockResolvedValue({ summary: null, company: null, email: "jane at acne dot com" });
     await applyExtractionToDeal("d1", "transcript", []);
     expect(client.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("Overlapping readings of the same call", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rows.current = [{ fieldKey: "fee", label: "Fee", groupLabel: "Terms", value: "$4,000", status: "extracted", confidence: 0.9, sourceQuote: "four thousand", orderIndex: 0 }];
+    dealField.findMany.mockResolvedValue([{ fieldKey: "fee", value: "$5,000", status: "extracted" }]);
+    deal.findUnique.mockResolvedValue({ ...dealWithClientEmail("dana@northwind.test"), lastExtractedTranscript: "Client: Four thousand." });
+    extract.mockResolvedValue({ summary: "Older summary", company: null, email: null });
+  });
+
+  it("leaves the deal alone when a newer reading of a longer transcript got there first", async () => {
+    executeRaw.mockResolvedValueOnce(0);
+    dealField.count.mockResolvedValue(2);
+
+    expect(await applyExtractionToDeal("d1", "Client: Four thousand.", ["fee"])).toEqual({ hasMissing: true });
+
+    // Checked and claimed in one statement, after the slow model call.
+    const [sql, stored, , readAtStart, compared] = executeRaw.mock.calls[0] as [string[], string, string, string | null, string];
+    expect(sql.join("?")).toContain('"lastExtractedTranscript" IS NOT DISTINCT FROM ?');
+    expect(sql.join("?")).toContain('starts_with(?, COALESCE("lastExtractedTranscript", \'\'))');
+    expect(sql.join("?")).not.toContain("length(");
+    expect(stored).toBe("Client: Four thousand.");
+    expect(readAtStart).toBe("Client: Four thousand.");
+    expect(compared).toBe("Client: Four thousand.");
+    expect(extract.mock.invocationCallOrder[0]).toBeLessThan(executeRaw.mock.invocationCallOrder[0]);
+    expect(dealField.upsert).not.toHaveBeenCalled();
+    expect(dealFieldChange.create).not.toHaveBeenCalled();
+    expect(deal.update).not.toHaveBeenCalled();
+    expect(client.update).not.toHaveBeenCalled();
+  });
+
+  it("writes when it read as much as, or more than, the last reading (a retry, a later chunk)", async () => {
+    await applyExtractionToDeal("d1", "Client: Four thousand.", ["fee"]);
+
+    expect(dealFieldChange.create).toHaveBeenCalledWith({ data: expect.objectContaining({ fieldKey: "fee", oldValue: "$5,000", newValue: "$4,000" }) });
+    expect(dealField.upsert).toHaveBeenCalledTimes(1);
+    expect(deal.update.mock.calls[0][0].data).toMatchObject({ summary: "Older summary", lastExtractedTranscript: "Client: Four thousand." });
   });
 });
 

@@ -97,7 +97,7 @@ export async function exchangeDocusignCode(code: string): Promise<{
 async function getValidAccessToken(workspaceId: string): Promise<{ accessToken: string; baseUri: string; accountId: string }> {
   const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId } });
   if (!workspace.docusignRefreshToken || !workspace.docusignBaseUri || !workspace.docusignAccountId) {
-    throw new Error("DocuSign isn't connected for this workspace");
+    throw new Error(DOCUSIGN_NOT_CONNECTED);
   }
 
   const expired = !workspace.docusignTokenExpiresAt || workspace.docusignTokenExpiresAt < new Date();
@@ -134,6 +134,7 @@ async function getValidAccessToken(workspaceId: string): Promise<{ accessToken: 
 }
 
 export const DOCUSIGN_EXPIRED = "Your DocuSign connection expired. Reconnect DocuSign in Settings, then send again";
+export const DOCUSIGN_NOT_CONNECTED = "DocuSign isn't connected for this workspace";
 
 // DocuSign refresh tokens last 30 days, and each refresh hands out a new
 // one. The daily cron refreshes connections that haven't been used in 20
@@ -215,7 +216,12 @@ export async function sendDocusignEnvelope(
 export type DocusignEnvelopeStatus = {
   status: string;
   voidedReason?: string;
-  signers: { name: string; email: string; routingOrder: string; status: string; signedDateTime?: string; declinedReason?: string }[];
+  // When it was declined or voided, and when its status last changed, on
+  // DocuSign's clock. Tells a decline in the round out now from one before.
+  declinedDateTime?: string;
+  voidedDateTime?: string;
+  statusChangedDateTime?: string;
+  signers: { name: string; email: string; routingOrder: string; status: string; signedDateTime?: string; declinedDateTime?: string; declinedReason?: string }[];
 };
 
 // Where an envelope stands, straight from DocuSign. This is what decides a
@@ -226,6 +232,28 @@ export async function docusignEnvelopeStatus(workspaceId: string, envelopeId: st
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) throw new Error(`DocuSign envelope lookup failed: ${res.status} ${await res.text()}`);
-  const data = (await res.json()) as { status?: string; voidedReason?: string; recipients?: { signers?: DocusignEnvelopeStatus["signers"] } };
-  return { status: data.status ?? "unknown", voidedReason: data.voidedReason, signers: data.recipients?.signers ?? [] };
+  const data = (await res.json()) as Partial<Omit<DocusignEnvelopeStatus, "signers">> & { recipients?: { signers?: DocusignEnvelopeStatus["signers"] } };
+  return {
+    status: data.status ?? "unknown",
+    voidedReason: data.voidedReason,
+    declinedDateTime: data.declinedDateTime,
+    voidedDateTime: data.voidedDateTime,
+    statusChangedDateTime: data.statusChangedDateTime,
+    signers: data.recipients?.signers ?? [],
+  };
+}
+
+// Closes an envelope that's still out, so nobody can sign it on DocuSign
+// anymore (the rep marked the contract not signed in SealMe, or a new version
+// replaces it, see retireEarlierEnvelope). DocuSign tells the signers it was
+// voided, with this reason, and sends SealMe its envelope-voided event back,
+// which finds the contract no longer pointing at it, or already moved on.
+export async function voidDocusignEnvelope(workspaceId: string, envelopeId: string, reason: string): Promise<void> {
+  const { accessToken, baseUri, accountId } = await getValidAccessToken(workspaceId);
+  const res = await fetch(`${baseUri}/v2.1/accounts/${accountId}/envelopes/${encodeURIComponent(envelopeId)}`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "voided", voidedReason: reason }),
+  });
+  if (!res.ok) throw new Error(`DocuSign envelope void failed: ${res.status} ${await res.text()}`);
 }

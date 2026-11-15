@@ -14,10 +14,12 @@ import { countersignPageState, signPageMessage } from "../../sign-state";
 // The contract filter matching countersignPageState's "open": out for
 // signature on SealMe's own pages, and a "sent" one not past its expiry.
 // Part of the same write as the signer's own update, so a contract that
-// moved on since the page loaded isn't signed or declined anyway.
+// moved on since the page loaded isn't signed or declined anyway. A
+// proposal has nobody to sign it.
 function openForCountersigning(now: Date): Prisma.ContractWhereInput {
   return {
     deliveryMethod: "sealme",
+    deal: { kind: { not: "proposal" } },
     OR: [{ status: "partially_signed" }, { status: "sent", OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
   };
 }

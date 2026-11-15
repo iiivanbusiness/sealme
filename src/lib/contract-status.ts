@@ -18,12 +18,28 @@ export function contractExpired(contract: ContractTiming | null | undefined, now
   return new Date(contract.expiresAt).getTime() <= now.getTime();
 }
 
+// A contract that went out and won't be signed in its current round: the
+// link ran out, or the rep marked it not signed. Either way nobody can sign
+// it, and the rep can rework the terms and send it again.
+export function contractClosed(contract: ContractTiming | null | undefined, now = new Date()): boolean {
+  return contractExpired(contract, now) || contract?.status === "not_signed";
+}
+
 // Once a contract is with an approver or out for signature, nobody edits its
-// terms by hand. An expired one can't be signed anymore, so the rep can change
-// the terms and send it again. A bare status can't tell a lapsed "sent" link
-// apart, so pass the contract where it's loaded.
+// terms by hand. An expired one, or one marked not signed, can't be signed
+// anymore, so the rep can change the terms and send it again. A bare status
+// can't tell a lapsed "sent" link apart, so pass the contract where it's
+// loaded.
 export function contractLocksTerms(contract: ContractTiming | string | null | undefined, now = new Date()): boolean {
   if (!contract) return false;
   if (typeof contract === "string") return TERMS_LOCKED_STATUSES.has(contract);
   return TERMS_LOCKED_STATUSES.has(contract.status) && !contractExpired(contract, now);
+}
+
+// The same rule for any document. A proposal is never signed, so its terms
+// stay editable after it went out: the client keeps seeing the version they
+// were sent until the rep sends it again or copies the link again.
+export function documentLocksTerms(contract: ContractTiming | string | null | undefined, kind: string | null | undefined, now = new Date()): boolean {
+  if (kind === "proposal") return false;
+  return contractLocksTerms(contract, now);
 }

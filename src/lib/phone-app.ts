@@ -7,13 +7,13 @@ export function isPhoneAppUserAgent(userAgent: string | null | undefined): boole
   return Boolean(userAgent?.includes(PHONE_APP_MARKER));
 }
 
-// The phone is for calls, notes, leads and how it's all going. Contracts
-// (deals, clients, templates), the calendar and the deal analytics stay on
-// the computer, so on the phone their pages send you to the Dashboard, and
-// Start a call to Notes.
+// The phone is for calls, notes, leads and how it's all going. Proposals and
+// contracts (and the templates and clients behind them), the calendar and
+// the analytics stay on the computer, so on the phone their pages send you to
+// the Dashboard. Start a call (an upload, notes only on the phone) stays.
 const COMPUTER_ONLY = ["/deals", "/clients", "/templates", "/calendar", "/analytics"];
 
 export function phoneAppRedirect(pathname: string): string | null {
-  if (pathname === "/deals/new") return "/notes";
+  if (pathname === "/deals/new") return null;
   return COMPUTER_ONLY.some((p) => pathname === p || pathname.startsWith(`${p}/`)) ? "/dashboard" : null;
 }

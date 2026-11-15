@@ -4,7 +4,7 @@ export const metadata = {
   title: "Privacy Policy - SealMe",
 };
 
-const LAST_UPDATED = "October 7, 2026";
+const LAST_UPDATED = "November 14, 2026";
 
 export default function PrivacyPage() {
   return (
@@ -82,10 +82,12 @@ export default function PrivacyPage() {
             </p>
             <ul className="ml-5 mt-2 flex list-disc flex-col gap-1.5">
               <li><strong style={{ color: "var(--ink)" }}>What we access</strong>. Upcoming events on your primary calendar: title, start time, length, meeting
-                link, and attendee names. We store the event title, time, length, meeting link, and the name of one outside attendee, plus the email of the
-                connected account.</li>
-              <li><strong style={{ color: "var(--ink)" }}>How we use it</strong>. Only to show your upcoming sales calls inside SealMe and link them to deals.
-                We do not use Google user data for advertising, we do not sell it, and we do not use it to train AI models.</li>
+                link, and attendee names and email addresses. We store the event title, time, length, meeting link, and the name and email address of one
+                outside attendee, plus the email of the connected account. All-day events and meetings you declined are not stored.</li>
+              <li><strong style={{ color: "var(--ink)" }}>How we use it</strong>. Only to show your upcoming meetings inside SealMe and, when you click Start
+                call on one, to fill in who the call is with and find or add them as a lead. Nothing is recorded automatically and SealMe never joins a meeting:
+                a call is only recorded when you start it yourself. We do not use Google user data for advertising, we do not sell it, and we do not use it
+                to train AI models.</li>
               <li><strong style={{ color: "var(--ink)" }}>Sharing</strong>. We do not share Google user data with third parties, except the hosting and
                 database providers that run the Service, or where required by law. Calendar data is not sent to AI providers.</li>
               <li><strong style={{ color: "var(--ink)" }}>Deletion</strong>. Click Disconnect on the Calendar page and we revoke SealMe&apos;s access with

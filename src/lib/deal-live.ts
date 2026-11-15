@@ -33,6 +33,23 @@ export async function applyExtractionToDeal(
   const extracted = await extractDealFromTranscript(transcript, placeholderKeys, deal.lastExtractedTranscript);
   const { fieldRows, service, fee } = buildDealFieldRows(extracted, placeholderKeys);
 
+  // Compare-and-set, after the slow part: two passes over the same call can
+  // overlap (a mid-call one still reading when the end-of-call one starts on
+  // the whole transcript), and the one that finishes last must not write
+  // older terms over newer ones. This pass writes when nothing was read
+  // since it started, or when what was read since is the start of its own
+  // transcript (a transcript only grows, so that pass was older; the same
+  // words again, a retry, also write). A newer pass's longer transcript
+  // wins. Never by length alone: "Record another call" reads a new
+  // transcript that starts short, after a long one from the call.
+  // One statement, so no other pass can slip in between the check and the
+  // claim; everything after it is quick writes.
+  const claimed = await prisma.$executeRaw`UPDATE "Deal" SET "lastExtractedTranscript" = ${transcript} WHERE id = ${dealId} AND ("lastExtractedTranscript" IS NOT DISTINCT FROM ${deal.lastExtractedTranscript} OR starts_with(${transcript}, COALESCE("lastExtractedTranscript", '')))`;
+  if (claimed === 0) {
+    const missing = await prisma.dealField.count({ where: { dealId, status: "missing" } });
+    return { hasMissing: missing > 0 };
+  }
+
   const existing = await prisma.dealField.findMany({ where: { dealId } });
   const existingByKey = new Map(existing.map((f) => [f.fieldKey, f]));
   const locked = (key: string) => {

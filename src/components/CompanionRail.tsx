@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureForm";
+import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT, readCaptureSession } from "./LocalCaptureForm";
 import { useInDesktopApp } from "@/lib/native-shell";
 
 type View = "live" | "calendar" | "notes";
-type Session = { dealId: string; token: string; startedAt: number };
 
 // Same fixed dark-glass tokens as CompanionPanel.tsx — kept local rather
 // than shared, since this is a tiny, separate window/page and the palette
@@ -15,15 +14,6 @@ const glass = {
   textFaint: "rgba(255,255,255,0.38)",
   divider: "rgba(255,255,255,0.12)",
 };
-
-function readSession(): Session | null {
-  try {
-    const raw = localStorage.getItem(LOCAL_CAPTURE_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Session) : null;
-  } catch {
-    return null;
-  }
-}
 
 function Icon({ view }: { view: View | "back" }) {
   const common = { viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, width: 15, height: 15 };
@@ -68,14 +58,14 @@ export default function CompanionRail() {
   const hadSessionRef = useRef(false);
 
   useEffect(() => {
-    hadSessionRef.current = Boolean(readSession());
+    hadSessionRef.current = Boolean(readCaptureSession());
 
     // Same "notice a call just started" auto-open as before, just relocated
     // here — the rail is the one window guaranteed to be mounted the whole
     // time companion mode is on, so it's the right place to listen for a
     // new local-capture session and open Live on its own.
     const onChange = async () => {
-      const next = readSession();
+      const next = readCaptureSession();
       const isNew = Boolean(next) && !hadSessionRef.current;
       hadSessionRef.current = Boolean(next);
       if (!isNew) return;
@@ -86,8 +76,19 @@ export default function CompanionRail() {
         console.error("[companion] auto-open live failed:", err);
       }
     };
+    // A call is started (and stopped) in the main window, another webview on
+    // the same origin: that only arrives here as a "storage" event, and
+    // without it the rail also missed the end of a call, so it never opened
+    // Live for the next one.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === LOCAL_CAPTURE_STORAGE_KEY) void onChange();
+    };
     window.addEventListener(LOCAL_CAPTURE_EVENT, onChange);
-    return () => window.removeEventListener(LOCAL_CAPTURE_EVENT, onChange);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(LOCAL_CAPTURE_EVENT, onChange);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   async function pick(view: View) {

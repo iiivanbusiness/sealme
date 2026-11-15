@@ -27,7 +27,6 @@ export async function runTaskDigest(options: { workspaceId?: string } = {}): Pro
     where: {
       deactivatedAt: null,
       taskDigestEmail: true,
-      workspace: { prospectingEnabled: true },
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
       assignedTasks: { some: { status: "open", dueDate: { lte: new Date(now.getTime() + 2 * DAY_MS) } } },
     },

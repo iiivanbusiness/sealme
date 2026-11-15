@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import ClientText from "@/components/ClientText";
 
 type FieldChange = {
   oldValue: string | null;
@@ -102,7 +103,7 @@ export default function DealTermsCard({
                             <span style={{ color: "var(--ink)" }}>{change.newValue}</span>
                           </span>
                           <span className="flex-none text-[11px]">
-                            {change.changedBy === "manual" ? "edited" : "on call"} · {formatChangeDate(change.changedAt)}
+                            {change.changedBy === "manual" ? "edited" : "on call"} · <ClientText text={() => formatChangeDate(change.changedAt)} />
                           </span>
                         </div>
                       ))}

@@ -56,7 +56,7 @@ function ChainCard({
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[13.5px] font-medium">{chain.name}</span>
           {chain.teamName && <span className="chip chip-neutral" style={{ fontSize: 11 }}>{chain.teamName}</span>}
-          {chain.minDealValue != null && <span className="chip chip-neutral" style={{ fontSize: 11 }}>≥ €{chain.minDealValue.toLocaleString()}</span>}
+          {chain.minDealValue != null && <span className="chip chip-neutral" style={{ fontSize: 11 }}>≥ €{chain.minDealValue.toLocaleString("en-US")}</span>}
           {!chain.teamName && chain.minDealValue == null && <span className="text-[11.5px]" style={{ color: "var(--ink-muted)" }}>Matches any deal</span>}
         </div>
         <div className="flex items-center gap-3">

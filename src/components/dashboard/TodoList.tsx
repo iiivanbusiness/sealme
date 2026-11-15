@@ -50,11 +50,13 @@ type CallAction = (leadId: string, input?: { mode?: string }) => Promise<CallPla
 const SCHEDULED_SHOWN = 5;
 const OTHER_SHOWN = 3;
 
-// The to-do list at the top of the Dashboard. However many to-dos there
-// are, it stays a screen long: the next thing, what's set for a time, the
-// cold calls as one queue, a few other to-dos, and chips that open late,
-// done and the coming days on demand. The team view is one line a person.
+// The to-do list on the Dashboard (Reminders, under Needs you). However
+// many to-dos there are, it stays a screen long: the next thing, what's set
+// for a time, the cold calls as one queue, a few other to-dos, and chips
+// that open late, done and the coming days on demand. The team view is one
+// line a person.
 export default function TodoList({
+  title = "To-do",
   view,
   canAssign,
   members,
@@ -68,6 +70,7 @@ export default function TodoList({
   assignAction,
   digestAction,
 }: {
+  title?: string;
   view: TodoView;
   canAssign: boolean;
   members: Member[];
@@ -99,7 +102,7 @@ export default function TodoList({
               <h2 className="truncate text-[15px] font-medium">{other.name}</h2>
             </>
           ) : (
-            <h2 className="text-[15px] font-medium">To-do</h2>
+            <h2 className="text-[15px] font-medium">{title}</h2>
           )}
           {canAssign && !other && (
             <div className="flex rounded-full p-[3px] text-[12.5px]" style={{ background: "var(--surface-2)" }} role="tablist" aria-label="Whose to-dos">

@@ -7,7 +7,7 @@ import { prisma } from "@/lib/db";
 import { signIn } from "@/lib/auth";
 import { hashPassword } from "@/lib/password";
 import { createOwnerRole } from "@/lib/permissions";
-import { buildDefaultTemplates } from "@/lib/default-templates";
+import { buildDefaultTemplates, buildSampleProposalTemplate } from "@/lib/default-templates";
 import { attachOnboardingProfile } from "@/lib/onboarding";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { sendVerificationEmail } from "@/lib/email";
@@ -49,7 +49,7 @@ export async function signup(formData: FormData) {
     data: { workspaceId: workspace.id, name, email, passwordHash: hashPassword(password), roleId: ownerRole.id },
   });
 
-  const templates = buildDefaultTemplates(companyName);
+  const templates = [...buildDefaultTemplates(companyName), buildSampleProposalTemplate(companyName)];
   await prisma.contractTemplate.createMany({
     data: templates.map((t) => ({ ...t, workspaceId: workspace.id })),
   });

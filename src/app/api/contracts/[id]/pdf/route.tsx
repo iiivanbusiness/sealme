@@ -2,9 +2,10 @@ import { renderToBuffer } from "@react-pdf/renderer";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { auth } from "@/lib/auth";
-import { readContractText } from "@/lib/contract-snapshot";
+import { liveContractText, readContractText, showsSignatures } from "@/lib/contract-snapshot";
 import { ContractPdfDocument, attachmentDisposition } from "@/lib/contract-pdf";
 import { embedTamperEvidentSignature, isPdfSigningConfigured } from "@/lib/pdf-sign";
+import { wentOut } from "@/lib/lead-pipeline";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -22,14 +23,31 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   // The client (and anyone else with the link) gets the contract as it was
   // sent. The workspace's own team gets what its contract page shows, which
-  // previews the live terms while the contract is being reworked.
+  // previews the live terms while the contract is being reworked. A
+  // proposal stays editable after it went out and its page always shows the
+  // terms as they are now, so the team's PDF of it does too.
   const session = await auth();
-  const agreement = await readContractText(contract, { asTeam: session?.user?.workspaceId === contract.deal.workspaceId });
+  const asTeam = session?.user?.workspaceId === contract.deal.workspaceId;
+  // Anyone else only gets a document that went out to the client, and not
+  // once it's in the trash (its proposal page is gone then too). A draft
+  // that never went out isn't theirs to read.
+  if (!asTeam && (contract.deal.trashedAt || !wentOut(contract))) {
+    return new NextResponse("Not found", { status: 404 });
+  }
+  const now = new Date();
+  const liveProposal = asTeam && contract.deal.kind === "proposal" ? liveContractText(contract) : null;
+  const agreement = liveProposal ?? (await readContractText(contract, { asTeam, now }));
   if (!agreement) {
     return new NextResponse("Not found", { status: 404 });
   }
 
-  const countersigners = contract.signers.flatMap((s) => (s.signedAt ? [{ name: s.name, role: s.role, signedAt: s.signedAt, signatureImage: s.signatureImage }] : []));
+  // Signatures only go under the text that was signed. A contract marked not
+  // signed after the client signed keeps their signature on record, but the
+  // team's PDF of it carries the reworked terms, so it leaves them all off.
+  const withSignatures = !liveProposal && showsSignatures(contract, { asTeam }, now);
+  const countersigners = withSignatures
+    ? contract.signers.flatMap((s) => (s.signedAt ? [{ name: s.name, role: s.role, signedAt: s.signedAt, signatureImage: s.signatureImage }] : []))
+    : [];
   let buffer = await renderToBuffer(
     <ContractPdfDocument
       templateName={agreement.templateName}
@@ -37,10 +55,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       agencyLogo={contract.deal.workspace.logoImage}
       clientName={agreement.clientName}
       clauses={agreement.clauses}
-      signedBy={contract.signerName}
-      signedAt={contract.signedAt}
-      signatureImage={contract.signatureImage}
+      signedBy={withSignatures ? contract.signerName : null}
+      signedAt={withSignatures ? contract.signedAt : null}
+      signatureImage={withSignatures ? contract.signatureImage : null}
       countersigners={countersigners}
+      kind={contract.deal.kind}
     />
   );
 
@@ -49,7 +68,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // A contract still waiting on a counter-signer isn't the final document
   // yet, so it isn't sealed as one. The seal names every signer and is
   // dated when the last of them signed.
-  if (contract.status === "signed" && contract.signerName && contract.signedAt && isPdfSigningConfigured()) {
+  if (withSignatures && contract.status === "signed" && contract.signerName && contract.signedAt && isPdfSigningConfigured()) {
     const signerName = [contract.signerName, ...countersigners.map((s) => s.name)].join(", ");
     const signedAt = new Date(Math.max(contract.signedAt.getTime(), ...countersigners.map((s) => s.signedAt.getTime())));
     try {

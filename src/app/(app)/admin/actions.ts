@@ -32,15 +32,3 @@ export async function dismissUpgradeRequest(requestId: string) {
   await prisma.upgradeRequest.update({ where: { id: requestId }, data: { status: "resolved", resolvedAt: new Date() } });
   revalidatePath("/admin");
 }
-
-export async function setProspectingEnabled(workspaceId: string, enabled: boolean) {
-  const session = await requireAdmin();
-  await prisma.workspace.update({ where: { id: workspaceId }, data: { prospectingEnabled: enabled } });
-  await logAudit({
-    workspaceId,
-    actorEmail: session.user?.email,
-    action: enabled ? "admin.prospecting_enabled" : "admin.prospecting_disabled",
-    metadata: {},
-  });
-  revalidatePath("/admin");
-}

@@ -3,7 +3,9 @@
 import { useState } from "react";
 import { filenameFromDisposition } from "@/lib/download-filename";
 
-export default function DownloadContractButton({ contractId, className }: { contractId: string; className?: string }) {
+// `kind` only names the file when the server doesn't say: a proposal
+// downloads as proposal.pdf, everything else as contract.pdf.
+export default function DownloadContractButton({ contractId, className, kind }: { contractId: string; className?: string; kind?: string | null }) {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -13,8 +15,8 @@ export default function DownloadContractButton({ contractId, className }: { cont
     setError(null);
     try {
       const res = await fetch(`/api/contracts/${contractId}/pdf`);
-      if (!res.ok) throw new Error("Failed to download contract");
-      const filename = filenameFromDisposition(res.headers.get("content-disposition") ?? "", "contract.pdf");
+      if (!res.ok) throw new Error("Failed to download the PDF");
+      const filename = filenameFromDisposition(res.headers.get("content-disposition") ?? "", kind === "proposal" ? "proposal.pdf" : "contract.pdf");
 
       // Trigger the save via a blob URL instead of navigating to the PDF
       // route directly — some webviews (notably the desktop app) open PDFs

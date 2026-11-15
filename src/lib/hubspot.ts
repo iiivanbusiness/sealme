@@ -189,6 +189,16 @@ export async function syncDealToHubspot(workspaceId: string, dealId: string): Pr
     if (!deal) return;
 
     const contactId = await upsertContact(workspace.hubspotAccessToken, deal.client);
+    if (deal.status === "signed") {
+      // They signed, so they're a customer in HubSpot too. HubSpot won't
+      // move a contact back to an earlier stage (one already past customer),
+      // so a refusal is reported and the deal still goes in.
+      try {
+        await hubspotFetch(workspace.hubspotAccessToken, `/crm/v3/objects/contacts/${contactId}`, { method: "PATCH", body: JSON.stringify({ properties: { lifecyclestage: "customer" } }) });
+      } catch (err) {
+        await reportError(err, "HubSpot lifecycle stage", { workspaceId, dealId });
+      }
+    }
     const stage = hubspotStageFor(deal.status, workspace);
     try {
       await upsertDeal(workspace.hubspotAccessToken, deal, contactId, stage);

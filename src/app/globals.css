@@ -84,28 +84,6 @@
   --glass-card-highlight: rgba(255, 255, 255, 0.5);
   --glass-card-blur: blur(20px) saturate(170%);
 
-  /* Deliberately NOT redefined in the dark-theme block below — the "hero"
-     glass cards (DealValueHeroCard, GlowRingStat) stay a consistently dark
-     glossy surface in both themes, matching the reference images, rather
-     than flipping light in dark mode the way --surface-inverted does
-     (that token stays untouched here — UpgradeCard.tsx and others still
-     rely on its flip, out of scope to change). */
-  --glow-dark-surface: rgba(20, 20, 24, 0.92);
-  --glow-dark-surface-2: rgba(255, 255, 255, 0.14);
-  --on-glow-dark: #ffffff;
-  --on-glow-dark-muted: rgba(255, 255, 255, 0.62);
-
-  /* Folder-icon chrome — one glossy neutral folder, not colored per
-     status (matches the reference exactly: every folder in the grid is
-     the same material, only the label under it differs). Light theme:
-     bright white/silver glass. */
-  --folder-back: #b9b9c1;
-  --folder-front-top: #ffffff;
-  --folder-front-mid: #eeeef1;
-  --folder-front-bottom: #d3d3d9;
-  --folder-paper: #ffffff;
-  --folder-shadow: rgba(20, 20, 30, 0.25);
-
   /* Dashboard line dots: how urgent a line is. */
   --tone-urgent: #d70015;
   --tone-due: #e8890c;
@@ -147,16 +125,6 @@
   --glass-card-border: rgba(255, 255, 255, 0.12);
   --glass-card-highlight: rgba(255, 255, 255, 0.5);
   --glass-card-blur: blur(20px) saturate(180%);
-
-  /* Dark chrome folder — matches the reference literally (a dark glossy
-     folder with a light diagonal sheen and a white paper corner), not a
-     re-themed version of the light folder. */
-  --folder-back: #19191b;
-  --folder-front-top: #7d7d82;
-  --folder-front-mid: #525256;
-  --folder-front-bottom: #333335;
-  --folder-paper: #f5f5f7;
-  --folder-shadow: rgba(0, 0, 0, 0.6);
 
   --tone-urgent: #ff453a;
   --tone-due: #ff9f0a;
@@ -575,6 +543,13 @@ a {
 /* What can't work on a phone: recording the computer's audio, and links
    that only make sense on a computer. */
 [data-mobile-app] .not-on-phone-app { display: none !important; }
+/* The Dashboard's Start a call: one version for the desktop app, one for a
+   browser (or the iPhone app). Picked before the first paint, since the
+   theme script in layout.tsx sets data-desktop and data-mobile-app first, so
+   neither flashes while the page hydrates. */
+:root:not([data-desktop]) .desktop-app-only,
+[data-mobile-app] .desktop-app-only { display: none !important; }
+[data-desktop]:not([data-mobile-app]) .browser-only { display: none !important; }
 /* The iPhone app draws edge to edge (it sets viewport-fit=cover): pages start
    below the clock, a bar in the page's own color sits behind the status bar
    so nothing scrolls under it, and full-height screens leave room for it. */
@@ -598,48 +573,3 @@ a {
   height: env(safe-area-inset-top);
 }
 
-/* ---------- customizable dashboard (DashboardGrid) ----------
-   react-grid-layout positions widgets with transforms; these make every
-   move, resize and reflow glide instead of jump, and only after the first
-   paint (.dash-ready) so the page doesn't slide into place on load. */
-.dash-item { position: relative; height: 100%; }
-.dash-item > :first-child { height: 100%; }
-.dash-grid { transition: opacity .2s ease; }
-.dash-grid .react-grid-item { transition: none; }
-.dash-grid.dash-ready .react-grid-item {
-  transition: transform .32s cubic-bezier(.2,.8,.2,1), width .32s cubic-bezier(.2,.8,.2,1), height .32s cubic-bezier(.2,.8,.2,1);
-}
-.dash-grid .react-grid-item.react-draggable-dragging,
-.dash-grid .react-grid-item.resizing { transition: none; z-index: 30; }
-.dash-grid .react-grid-item.react-draggable-dragging .dash-item > :first-child {
-  transform: scale(1.015);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
-}
-.dash-grid .dash-item > :first-child { transition: transform .2s ease, box-shadow .2s ease; }
-.dash-grid .react-grid-item.react-grid-placeholder {
-  background: var(--accent-blue);
-  opacity: .12;
-  border-radius: var(--r-xl);
-  transition: transform .18s ease, width .18s ease, height .18s ease;
-}
-.dash-editing > :first-child { outline: 1.5px dashed var(--hairline); outline-offset: 3px; border-radius: var(--r-xl); }
-.dash-drag { position: absolute; inset: 0; z-index: 20; cursor: grab; border-radius: var(--r-xl); }
-.react-draggable-dragging .dash-drag { cursor: grabbing; }
-.dash-remove {
-  position: absolute; top: 8px; right: 8px; z-index: 25;
-  width: 26px; height: 26px; border-radius: 999px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px; line-height: 1;
-  background: var(--surface-1); color: var(--ink); border: 1px solid var(--hairline);
-  box-shadow: var(--shadow-pop);
-  opacity: 0; transform: scale(.85);
-  transition: opacity .18s ease, transform .18s ease;
-}
-.dash-item:hover .dash-remove, .dash-remove:focus-visible { opacity: 1; transform: scale(1); }
-.dash-grid .react-resizable-handle { z-index: 25; opacity: .55; transition: opacity .15s ease; }
-.dash-grid .react-grid-item:hover .react-resizable-handle { opacity: 1; }
-.dash-tray { animation: dash-tray-in .22s ease; }
-@keyframes dash-tray-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) {
-  .dash-grid.dash-ready .react-grid-item, .dash-grid .dash-item > :first-child, .dash-remove, .dash-tray { transition: none; animation: none; }
-}

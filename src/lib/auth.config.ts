@@ -20,6 +20,8 @@ export const authConfig = {
         request.nextUrl.pathname === "/" ||
         request.nextUrl.pathname.startsWith("/login") ||
         request.nextUrl.pathname.startsWith("/sign") ||
+        // A proposal's page, opened by the client from the rep's link or email.
+        request.nextUrl.pathname.startsWith("/proposal/") ||
         request.nextUrl.pathname.startsWith("/portal") ||
         request.nextUrl.pathname.startsWith("/onboarding") ||
         request.nextUrl.pathname.startsWith("/verify-email") ||

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import BrandLogo from "@/components/BrandLogo";
 import DownloadContractButton from "@/components/DownloadContractButton";
 import { parseContractSnapshot } from "@/lib/contract-snapshot";
+import { proposalPath, signPath } from "@/lib/document-links";
 
 // partially_signed: the client has signed and someone after them (a
 // counter-signer) still has to.
@@ -32,9 +33,12 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
   });
   if (!client) notFound();
 
-  // Drafts and internal-approval states aren't this client's business yet —
-  // only show agreements that have actually reached them.
-  const visibleDeals = client.deals.filter((d) => d.contract && ["sent", "partially_signed", "signed"].includes(d.contract.status));
+  // Drafts and internal-approval states aren't this client's business yet:
+  // only show agreements that have actually reached them. Anything in Trash
+  // is gone for the client too (its page and PDF no longer open).
+  const visibleDeals = client.deals.filter(
+    (d) => d.contract && ["sent", "partially_signed", "signed"].includes(d.contract.status) && !d.trashedAt,
+  );
 
   return (
     <div className="sm-theme min-h-screen" style={{ background: "var(--canvas)" }}>
@@ -62,18 +66,20 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
 
       <main className="mx-auto max-w-[720px] px-6 py-10">
         <div className="mb-6">
-          <h1 className="text-[22px] font-medium" style={{ letterSpacing: "-0.6px" }}>Your agreements with {client.workspace.name}</h1>
+          <h1 className="text-[22px] font-medium" style={{ letterSpacing: "-0.6px" }}>Your documents from {client.workspace.name}</h1>
           <div className="mt-1 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>{client.name}{client.company && client.company !== client.name ? ` · ${client.company}` : ""}</div>
         </div>
 
         {visibleDeals.length === 0 ? (
           <div className="card px-5 py-10 text-center text-[13.5px]" style={{ color: "var(--ink-muted)" }}>
-            Nothing here yet. Agreements will appear once they&apos;re sent to you.
+            Nothing here yet. Documents will appear once they&apos;re sent to you.
           </div>
         ) : (
           <div className="flex flex-col gap-3.5">
             {visibleDeals.map((deal) => {
               const contract = deal.contract!;
+              // A proposal is only read: no signature to wait on.
+              const isProposal = deal.kind === "proposal";
               return (
                 <div key={deal.id} className="card p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -81,9 +87,9 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
                       <div className="text-[15px] font-medium">{parseContractSnapshot(contract.snapshot)?.templateName ?? deal.template?.name ?? deal.service}</div>
                       <div className="mt-0.5 text-[12.5px]" style={{ color: "var(--ink-muted)" }}>{deal.service} · {deal.feeDisplay}</div>
                     </div>
-                    <span className={`chip ${STATUS_CHIP[contract.status] ?? "chip-neutral"}`}>
+                    <span className={`chip ${isProposal ? "chip-neutral" : (STATUS_CHIP[contract.status] ?? "chip-neutral")}`}>
                       <span className="chip-dot" />
-                      {STATUS_LABEL[contract.status] ?? contract.status}
+                      {isProposal ? "Proposal" : (STATUS_LABEL[contract.status] ?? contract.status)}
                     </span>
                   </div>
 
@@ -96,12 +102,19 @@ export default async function ClientPortalPage({ params }: { params: Promise<{ t
 
                   <div className="mt-3.5 flex flex-wrap gap-2.5">
                     {/* A DocuSign contract is signed from DocuSign's own email. */}
-                    {contract.status === "sent" && contract.deliveryMethod === "sealme" && (
-                      <a href={`/sign/${contract.id}`} className="btn btn-primary btn-sm">
-                        Review &amp; sign
+                    {isProposal ? (
+                      <a href={proposalPath(contract.id)} className="btn btn-primary btn-sm">
+                        View proposal
                       </a>
+                    ) : (
+                      contract.status === "sent" &&
+                      contract.deliveryMethod === "sealme" && (
+                        <a href={signPath(contract.id)} className="btn btn-primary btn-sm">
+                          Review &amp; sign
+                        </a>
+                      )
                     )}
-                    <DownloadContractButton contractId={contract.id} className="btn btn-secondary btn-sm" />
+                    <DownloadContractButton contractId={contract.id} kind={deal.kind} className="btn btn-secondary btn-sm" />
                   </div>
                 </div>
               );

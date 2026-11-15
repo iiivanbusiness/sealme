@@ -4,7 +4,7 @@ const { contract } = vi.hoisted(() => ({ contract: { updateMany: vi.fn(), findUn
 vi.mock("@/lib/db", () => ({ prisma: { contract } }));
 
 import { Prisma } from "@/generated/prisma/client";
-import { buildContractSnapshot, parseContractSnapshot, pickContractText, readContractText, showsLiveTerms, type ContractSnapshot } from "./contract-snapshot";
+import { buildContractSnapshot, parseContractSnapshot, pickContractText, readContractText, showsLiveTerms, showsSignatures, type ContractSnapshot } from "./contract-snapshot";
 
 const now = new Date("2026-11-05T12:00:00Z");
 const TEMPLATE = { name: "Retainer", clauses: JSON.stringify([{ title: "Parties", body: "Between Agency and {clientName}" }, { title: "Fees", body: "The fee is {fee}." }]) };
@@ -64,7 +64,7 @@ describe("which text a contract shows", () => {
   });
 
   it("freezes a contract that went out before snapshots existed", () => {
-    for (const status of ["sent", "partially_signed", "signed", "expired"]) {
+    for (const status of ["sent", "partially_signed", "signed", "expired", "not_signed"]) {
       const picked = pickContractText(source(status));
       expect(picked?.freeze).toBe(true);
       expect(picked?.text.clauses[1].body).toBe("The fee is $8,000 / month.");
@@ -81,12 +81,37 @@ describe("which text a contract shows", () => {
   });
 
   it("previews the live terms for the team only while the contract is being worked on", () => {
-    for (const status of ["draft", "pending_approval", "changes_requested", "expired"]) expect(showsLiveTerms(source(status), now)).toBe(true);
+    // Marked not signed: the rep can rework it before sending it again.
+    for (const status of ["draft", "pending_approval", "changes_requested", "expired", "not_signed"]) expect(showsLiveTerms(source(status), now)).toBe(true);
     for (const status of ["sent", "partially_signed", "signed"]) expect(showsLiveTerms(source(status), now)).toBe(false);
     const lapsed = new Date("2026-11-05T11:00:00Z");
     expect(showsLiveTerms(source("sent", { expiresAt: lapsed }), now)).toBe(true);
     // DocuSign runs its own expiry.
     expect(showsLiveTerms(source("sent", { expiresAt: lapsed, deliveryMethod: "docusign" }), now)).toBe(false);
+  });
+});
+
+describe("where signatures show", () => {
+  it("never under the live terms the team previews", () => {
+    // Marked not signed after the client signed, or a counter-signer turned
+    // it down: the signature stays on record, the terms may have changed.
+    for (const status of ["not_signed", "changes_requested", "expired", "pending_approval", "draft"]) {
+      expect(showsSignatures(source(status, { snapshot: SENT }), { asTeam: true }, now)).toBe(false);
+    }
+    const lapsed = new Date("2026-11-05T11:00:00Z");
+    expect(showsSignatures(source("sent", { snapshot: SENT, expiresAt: lapsed }), { asTeam: true }, now)).toBe(false);
+  });
+
+  it("under the text that went out", () => {
+    for (const status of ["sent", "partially_signed", "signed"]) {
+      expect(showsSignatures(source(status, { snapshot: SENT }), { asTeam: true }, now)).toBe(true);
+    }
+    // The client only ever sees what they were sent.
+    for (const status of ["not_signed", "changes_requested", "signed"]) {
+      expect(showsSignatures(source(status, { snapshot: SENT }), {}, now)).toBe(true);
+    }
+    // No template left to preview: the team sees the sent text too.
+    expect(showsSignatures(source("not_signed", { snapshot: SENT, template: null }), { asTeam: true }, now)).toBe(true);
   });
 });
 
@@ -121,5 +146,13 @@ describe("reading a contract's text", () => {
     // No template left to preview: what was sent is all there is.
     expect(await readContractText(source("expired", { snapshot: SENT, template: null }), { asTeam: true })).toEqual(SENT);
     expect(contract.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("decides on the moment it's given, the same one showsSignatures gets", async () => {
+    const lapsed = new Date("2026-11-05T11:00:00Z");
+    const before = new Date("2026-11-05T10:00:00Z");
+    const sent = source("sent", { snapshot: SENT, expiresAt: lapsed });
+    expect((await readContractText(sent, { asTeam: true, now }))?.clauses[1].body).toBe("The fee is $8,000 / month.");
+    expect(await readContractText(sent, { asTeam: true, now: before })).toEqual(SENT);
   });
 });

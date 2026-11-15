@@ -22,6 +22,8 @@ model Workspace {
   // rather than to meter a customer-facing quota like callsLimit.
   aiChatMessagesUsedThisMonth Int @default(0)
   aiChatMessagesLimit         Int @default(50)
+  // No longer read or written: nothing goes to a client without a rep's
+  // click, so the old "send without approval" switch is gone.
   requireApproval    Boolean  @default(true)
   notifyOnSigned     Boolean  @default(true)
   autoRemind         Boolean  @default(false)
@@ -288,11 +290,10 @@ model User {
   taskDigestEmail  Boolean   @default(true)
   taskDigestSentOn String?
 
-  // Their own dashboard: which widgets show and where, per screen width
-  // (see src/lib/dashboard-widgets.ts). Null means the default layout.
+  // Unused: the old customizable Dashboard (widget layout per screen width,
+  // and its lines) is gone, so nothing reads or writes these. Kept until a
+  // migration drops them.
   dashboardLayout Json?
-  // Their Dashboard lines: which show, in what order, which start open
-  // (see src/lib/dashboard-lines.ts). Null means their role's default.
   dashboardLines  Json?
   // When they closed "Get started" at the top of the Dashboard.
   getStartedHiddenAt DateTime?
@@ -449,6 +450,11 @@ model ContractTemplate {
   lockedByUser   User?     @relation(fields: [lockedByUserId], references: [id], onDelete: SetNull)
   lockedAt       DateTime?
 
+  // proposal | contract. Templates is two lists: what a proposal is made
+  // from and what a contract is made from. Every older template is a
+  // contract template.
+  kind String @default("contract")
+
   deals     Deal[]
   contracts Contract[]
 }
@@ -478,27 +484,27 @@ model Deal {
   teamId String?
   team   Team?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
-  service    String
-  feeDisplay String
-  status     String   @default("processing") // processing | missing_info | ready | pending_approval | changes_requested | sent | signed
-  source     String   @default("manual") // zoom | meet | manual | upload | renewal | local | api
-  callLength String?
-  summary    String? // 2-3 sentence "what happened on this call", from the same extraction pass as the fields
-  recallBotId String? @unique // set when a Recall.ai bot is capturing this call
-  liveTranscript  String?   // accumulated utterances while a live call is in progress
-  lastExtractedAt DateTime? // throttles re-extraction during a live call
+  service                 String
+  feeDisplay              String
+  status                  String    @default("processing") // processing | missing_info | ready | pending_approval | changes_requested | sent | signed
+  source                  String    @default("manual") // zoom | meet | manual | upload | renewal | local | api
+  callLength              String?
+  summary                 String? // 2-3 sentence "what happened on this call", from the same extraction pass as the fields
+  recallBotId             String?   @unique // set when a Recall.ai bot is capturing this call
+  liveTranscript          String? // accumulated utterances while a live call is in progress
+  lastExtractedAt         DateTime? // throttles re-extraction during a live call
   // Exactly what liveTranscript was the last time extraction ran — kept as
   // its own field (not derived) so the extraction prompt can send it as a
   // byte-identical, separately-cached block; only the text added since then
   // needs to be paid for at full price on the next pass.
   lastExtractedTranscript String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
   // Set when a "this deal has been sitting untouched" nudge goes out —
   // cleared (via being older than updatedAt) the moment the deal is
   // actually touched again, so a resolved-then-stale-again deal can nudge
   // a second time instead of going quiet forever after one email.
-  staleReminderSentAt DateTime?
+  staleReminderSentAt     DateTime?
 
   // Soft-delete: set when a deal is moved to trash from the deals table.
   // Trashed deals are filtered out of the normal deals list/board but stay
@@ -513,6 +519,21 @@ model Deal {
   // Same idea, for Salesforce — set once pushed as an Opportunity there.
   salesforceOpportunityId String?
 
+  // The person this proposal or contract is for, and the call it was made
+  // from. A lead has one profile with Call 1..N, and each call can carry a
+  // proposal and a contract. SetNull, never Cascade: deleting a lead or a
+  // call must not delete a signed contract.
+  leadId       String?
+  lead         Lead?      @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  phoneCallId  String?
+  phoneCall    PhoneCall? @relation("DealFromCall", fields: [phoneCallId], references: [id], onDelete: SetNull)
+  // proposal | contract. Every deal made before proposals existed is a contract.
+  kind         String     @default("contract")
+  // The proposal a contract was made from ("Create contract from proposal").
+  sourceDealId String?
+  sourceDeal   Deal?      @relation("DealFromProposal", fields: [sourceDealId], references: [id], onDelete: SetNull)
+  derivedDeals Deal[]     @relation("DealFromProposal")
+
   fields         DealField[]
   contract       Contract?
   calls          Call[]
@@ -521,7 +542,10 @@ model Deal {
   callHighlights CallHighlight[]
   notes          DealNote[]
   tasks          Task[]
-  phoneCalls     PhoneCall[]
+  phoneCalls     PhoneCall[]       @relation("PhoneCallDeal")
+
+  @@index([leadId])
+  @@index([phoneCallId])
 }
 
 // A free-form internal note on a deal — the "leave a comment for a
@@ -546,8 +570,8 @@ model DealNote {
 
 // One row per recording session attached to a deal — a deal that started
 // as a single call can pick up follow-up calls later (see
-// startLocalCapture / continueLocalCapture) instead of always spawning a
-// new deal. Deal.liveTranscript / lastExtractedTranscript are untouched by
+// continueLocalCapture) instead of always spawning a new deal.
+// Deal.liveTranscript / lastExtractedTranscript are untouched by
 // this — they stay the running input to extraction exactly as before; Call
 // exists purely to let the UI show "here's what was said, call by call"
 // (the negotiation timeline) without re-deriving it from one giant string.
@@ -659,7 +683,7 @@ model Contract {
   deal       Deal              @relation(fields: [dealId], references: [id])
   templateId String?
   template   ContractTemplate? @relation(fields: [templateId], references: [id])
-  status     String            @default("draft") // draft | pending_approval | changes_requested | sent | partially_signed | signed | expired
+  status     String            @default("draft") // draft | pending_approval | changes_requested | sent | partially_signed | signed | expired | not_signed (the rep marked it: the client won't sign)
   sentAt     DateTime?
   signedAt   DateTime?
   // signerName/signerIp/signatureImage are always the CLIENT's own
@@ -673,6 +697,7 @@ model Contract {
   signerIp   String?
   signatureImage String? // base64 PNG data URL, drawn on the sign page
   reminderSentAt DateTime? // set once the "still unsigned" nudge has gone out — cadence is workspace.reminderIntervalDays
+  // On a proposal it's the last Send reminder a rep clicked on the Dashboard (deals/[id]/reminder-actions.ts), one per 5 days of silence
   viewedAt   DateTime? // first time the client actually opened the sign page
   // Computed at send time from workspace.signingExpiryDays (sentAt + that
   // many days) — null when the workspace has no expiry configured, same
@@ -974,12 +999,18 @@ model CalendarEvent {
   startTime       DateTime
   durationMinutes Int       @default(30)
   platform        String    @default("zoom") // zoom | meet
-  meetingUrl      String? // Zoom/Meet link — lets a bot be scheduled to auto-join at startTime
+  meetingUrl      String? // the meeting's Zoom or Meet link, for Join (nothing joins on its own)
   linkedDealId    String?
   googleEventId   String? // set when synced from Google Calendar; null for manually-added events
+  // The outside attendee's email (the first guest who isn't the connected
+  // account, a teammate or a room), so Start call on the meeting knows who
+  // the call is with. clientName is their name, or this email when Google
+  // didn't send one.
+  attendeeEmail   String?
 
   // Two workspaces can both sync the same meeting.
   @@unique([workspaceId, googleEventId])
+  @@index([workspaceId, startTime])
 }
 
 // A simple hit-counter for rate limiting public, unauthenticated endpoints
@@ -1007,20 +1038,25 @@ model RateLimitHit {
 // ever holding a session cookie or an API key of its own — same hashed-token
 // pattern as password reset / email verification.
 model LocalCaptureToken {
-  id          String    @id @default(cuid())
+  id          String     @id @default(cuid())
   workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   // dealId is denormalized (also reachable via call.dealId) purely so the
   // transcribe endpoint's hot path doesn't need an extra join — a deal can
   // now have more than one call, so this is no longer unique on its own;
   // callId is the actual one-token-per-recording-session key.
-  dealId      String
-  callId      String    @unique
-  call        Call      @relation(fields: [callId], references: [id], onDelete: Cascade)
-  tokenHash   String    @unique
+  // A recording started from "Start a call" points at its PhoneCall and has
+  // no deal until a proposal or contract is made during the call; the
+  // deal and its Call row are filled in then. Older tokens point at a deal.
+  dealId      String?
+  callId      String?    @unique
+  call        Call?      @relation(fields: [callId], references: [id], onDelete: Cascade)
+  phoneCallId String?    @unique
+  phoneCall   PhoneCall? @relation(fields: [phoneCallId], references: [id], onDelete: Cascade)
+  tokenHash   String     @unique
   expiresAt   DateTime
   usedAt      DateTime?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime   @default(now())
 
   @@index([workspaceId])
   @@index([dealId])
@@ -1177,7 +1213,7 @@ model Lead {
   notes           String? // free text: research notes, or extra columns from an import
   lastContactedAt DateTime?
 
-  source   String  @default("manual") // manual | paste | csv | xlsx | hubspot | salesforce | call | api
+  source   String      @default("manual") // manual | paste | csv | xlsx | hubspot | salesforce | call | api
   importId String?
   import   LeadImport? @relation(fields: [importId], references: [id], onDelete: SetNull)
 
@@ -1186,6 +1222,18 @@ model Lead {
   convertedDealId   String?
   // When the lead was marked converted, for "converted this week" on /team.
   convertedAt       DateTime?
+
+  // Where the person stands, as the Leads list shows it. It moves by itself:
+  // new -> proposal_sent -> contract_sent -> client; lost, not_now and
+  // not_signed are Inactive. stage above keeps the older words the API and
+  // webhooks speak (contacted, interested, meeting, converted).
+  pipelineStage  String    @default("new") // new | proposal_sent | contract_sent | client | lost | not_now | not_signed
+  // Signed a contract at least once: the Clients tab.
+  isClient       Boolean   @default(false)
+  clientAt       DateTime?
+  // Last call, send or signature (when it was added, until then). A lead
+  // quiet for 30 days counts as Inactive.
+  lastActivityAt DateTime? @default(now())
 
   // Ids in the customer's own CRM, for de-duplicating imports and writing call notes back.
   hubspotContactId     String?
@@ -1214,6 +1262,7 @@ model Lead {
   tasks       Task[]
   phoneCalls  PhoneCall[]
   callIntents CallIntent[]
+  deals       Deal[]
 
   @@unique([workspaceId, hubspotContactId])
   @@unique([workspaceId, salesforceRecordId])
@@ -1223,6 +1272,8 @@ model Lead {
   @@index([workspaceId, stage])
   @@index([workspaceId, email])
   @@index([workspaceId, phone])
+  @@index([workspaceId, pipelineStage])
+  @@index([workspaceId, isClient])
 }
 
 // A to-do a manager hands a rep, ClickUp style: call these leads on
@@ -1302,11 +1353,16 @@ model PhoneCall {
   leadId String?
   lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: SetNull)
   dealId String?
-  deal   Deal?   @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  deal   Deal?   @relation("PhoneCallDeal", fields: [dealId], references: [id], onDelete: SetNull)
 
-  mode   String @default("unknown") // cold | sales | unknown | auto (sorted from the transcript when processed)
-  status String @default("recording") // dialing (SealMe ringing the rep or client) | recording | pending | processing | processed | discarded | failed | skipped
-  source String @default("phone") // phone | paste (a transcript pasted on the lead page) | desktop | api (logged by another dialer)
+  // What the rep asked SealMe to make from this call besides Notes, which
+  // are always made. Off unless ticked on "Start a call".
+  wantsProposal Boolean @default(false)
+  wantsContract Boolean @default(false)
+
+  mode      String  @default("unknown") // cold | sales | unknown | auto (sorted from the transcript when processed)
+  status    String  @default("recording") // dialing (SealMe ringing the rep or client) | recording | pending | processing | processed | discarded | failed | skipped
+  source    String  @default("phone") // phone | paste (a transcript pasted on the lead page) | desktop | api (logged by another dialer)
   // What happened, from the transcript: meeting_booked | interested | follow_up
   // | not_interested | voicemail | no_answer | wrong_person. connected is
   // true when they actually talked (what /team counts as connected).
@@ -1335,7 +1391,7 @@ model PhoneCall {
   hubspotCallId    String?
   salesforceTaskId String?
   ghlNoteId        String?
-  templateId          String? // sales calls: which contract template to draft with
+  templateId       String? // sales calls: which contract template to draft with
 
   durationSec Int?
   transcript  String?
@@ -1364,6 +1420,10 @@ model PhoneCall {
   // doesn't know it yet) fill it in on their own.
   updatedAt   DateTime  @default(now()) @updatedAt
 
+  // Proposals and contracts made from this call (Deal.phoneCallId).
+  builtDeals         Deal[]              @relation("DealFromCall")
+  localCaptureTokens LocalCaptureToken[]
+
   @@unique([workspaceId, externalId])
   @@index([workspaceId, updatedAt])
   @@index([workspaceId, status])
@@ -1383,11 +1443,14 @@ model CallIntent {
   leadId      String?
   lead        Lead?     @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
-  mode       String // auto (SealMe decides from the call) | cold | sales
-  templateId String?
-  expiresAt  DateTime
-  usedAt     DateTime?
-  createdAt  DateTime  @default(now())
+  mode          String // auto (SealMe decides from the call) | cold | sales
+  templateId    String?
+  // Carried over to the PhoneCall the intent turns into.
+  wantsProposal Boolean   @default(false)
+  wantsContract Boolean   @default(false)
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
 
   @@index([userId, expiresAt])
 }

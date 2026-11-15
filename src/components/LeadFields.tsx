@@ -46,7 +46,7 @@ export default function LeadFields({
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <Field label="Name">
-        <input name="name" required defaultValue={values.name ?? ""} placeholder="Lisa Smith" className="input" autoComplete="off" />
+        <input name="name" required pattern=".*\S.*" title="Add the lead's name" defaultValue={values.name ?? ""} placeholder="Lisa Smith" className="input" autoComplete="off" />
       </Field>
       <Field label="Company">
         <input name="company" defaultValue={values.company ?? ""} placeholder="RxBenefits" className="input" autoComplete="off" />
@@ -63,7 +63,7 @@ export default function LeadFields({
         </select>
       </Field>
       <Field label="Email">
-        <input name="email" type="email" defaultValue={values.email ?? ""} placeholder="lisa@company.com" className="input" autoComplete="off" />
+        <input name="email" type="email" pattern="[^@\s]+@[^@\s]+\.[^@\s]+" title="Like lisa@company.com" defaultValue={values.email ?? ""} placeholder="lisa@company.com" className="input" autoComplete="off" />
       </Field>
       <Field label="Phone">
         <input name="phone" type="tel" defaultValue={values.phone ?? ""} placeholder="+1 512 555 0100" className="input" autoComplete="off" />

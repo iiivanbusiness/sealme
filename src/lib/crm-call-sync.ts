@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { CALL_OUTCOME_LABEL, UNREACHED_OUTCOMES } from "@/lib/call-outcomes";
-import { salesforceGet, salesforceRequest, SALESFORCE_API_VERSION } from "@/lib/salesforce";
+import { salesforceConvertedLeadStatuses, salesforceGet, salesforceRequest, SALESFORCE_API_VERSION } from "@/lib/salesforce";
 import { reportError } from "@/lib/error-report";
 import { NEW_LEAD_NAME } from "@/lib/cold-call";
 import { isValidTimeZone } from "@/lib/tasks";
@@ -35,7 +35,8 @@ export function salesforceLeadStatusFor(outcome: string, available: string[]): s
   return find(/working/i) ?? available.find((v) => /contacted|attempt/i.test(v) && !/not\s+contacted/i.test(v)) ?? null;
 }
 
-// Statuses a call shouldn't overwrite: converted or closed leads.
+// Statuses a call shouldn't overwrite, by name: converted or closed leads.
+// The org's own converted statuses are checked too (see logToSalesforce).
 const SALESFORCE_SETTLED = /converted|closed|qualified/i;
 
 // The day the call happened on the rep's own clock, as YYYY-MM-DD: an
@@ -98,6 +99,20 @@ async function logToHubspot(token: string, contactId: string, call: CallForCrm):
   return created.id;
 }
 
+// A signed client's Lead gets the status its org marks converted, whatever
+// it's called ("Customer"), and a later call mustn't move it back to
+// "Working". Asked only when a call would change the status. When the org
+// can't say, the status is left alone and that's reported; the call itself
+// is still logged, so a retry doesn't log it twice.
+async function isConvertedStatus(workspaceId: string, status: string, callId: string): Promise<boolean> {
+  try {
+    return (await salesforceConvertedLeadStatuses(workspaceId)).some((s) => s.ApiName === status || s.MasterLabel === status);
+  } catch (err) {
+    await reportError(err, "Salesforce lead status after a call", { workspaceId, callId });
+    return true;
+  }
+}
+
 async function logToSalesforce(workspaceId: string, recordId: string, recordType: string | null, call: CallForCrm): Promise<string> {
   const base = `/services/data/${SALESFORCE_API_VERSION}/sobjects`;
   const core = {
@@ -125,7 +140,7 @@ async function logToSalesforce(workspaceId: string, recordId: string, recordType
     if (target) {
       const lead = await salesforceGet<{ Status?: string | null; IsConverted?: boolean }>(workspaceId, `${base}/Lead/${encodeURIComponent(recordId)}?fields=Status,IsConverted`);
       const current = lead.Status ?? "";
-      if (!lead.IsConverted && current !== target && !SALESFORCE_SETTLED.test(current)) {
+      if (!lead.IsConverted && current !== target && !SALESFORCE_SETTLED.test(current) && !(await isConvertedStatus(workspaceId, current, call.id))) {
         const patch = await salesforceRequest(workspaceId, `${base}/Lead/${encodeURIComponent(recordId)}`, { method: "PATCH", body: JSON.stringify({ Status: target }) });
         if (!patch.ok && patch.status !== 204) throw new Error(`Salesforce Lead status update failed: ${patch.status} ${await patch.text()}`);
       }

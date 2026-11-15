@@ -62,7 +62,7 @@ import { connectGohighlevel, disconnectGohighlevel, setGohighlevelPipeline, togg
 import { toggleDocusign, disconnectDocusign } from "./docusign-actions";
 import { toggleSalesforce, disconnectSalesforce } from "./salesforce-actions";
 
-function Toggle({ on, field }: { on: boolean; field: "requireApproval" | "notifyOnSigned" | "autoRemind" }) {
+function Toggle({ on, field }: { on: boolean; field: "notifyOnSigned" | "autoRemind" }) {
   return (
     <form action={toggleWorkspaceFlag.bind(null, field)}>
       <button
@@ -179,7 +179,7 @@ export default async function SettingsPage({
             Your account. The workspace, the team and connected apps are set up on a computer.
           </div>
         </div>
-        {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} onlyTeamManager={onlyTeamManager} />}
+        {currentUser && <PersonalSettings user={currentUser} prospecting onlyTeamManager={onlyTeamManager} />}
       </>
     );
   }
@@ -515,7 +515,7 @@ export default async function SettingsPage({
           loadStagesAction={loadHubspotPipelines}
           saveStagesAction={saveHubspotStages}
         />
-        {workspace.hubspotAccessToken && workspace.prospectingEnabled && (
+        {workspace.hubspotAccessToken && (
           <CrmLeadImportPanel
             crm="hubspot"
             enabled={workspace.hubspotLeadImport}
@@ -532,7 +532,7 @@ export default async function SettingsPage({
       </div>
     )}
 
-    {canManageWorkspacePerm && workspace.prospectingEnabled && (
+    {canManageWorkspacePerm && (
       <div id="gohighlevel" className="glass-card glass-card-solid card-hover mb-4 max-w-[600px] scroll-mt-24">
         <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
           <h2 className="text-[15px] font-medium">GoHighLevel</h2>
@@ -592,7 +592,7 @@ export default async function SettingsPage({
           toggleAction={toggleSalesforce}
           disconnectAction={disconnectSalesforce}
         />
-        {workspace.salesforceRefreshToken && workspace.prospectingEnabled && (
+        {workspace.salesforceRefreshToken && (
           <CrmLeadImportPanel
             crm="salesforce"
             enabled={workspace.salesforceLeadImport}
@@ -625,7 +625,7 @@ export default async function SettingsPage({
 
     {canManageWorkspacePerm && <DeveloperSettingsLink />}
 
-    {currentUser && <PersonalSettings user={currentUser} prospecting={workspace.prospectingEnabled} onlyTeamManager={onlyTeamManager} />}
+    {currentUser && <PersonalSettings user={currentUser} prospecting onlyTeamManager={onlyTeamManager} />}
 
     <div className="glass-card glass-card-solid card-hover mb-4 max-w-[600px]">
       <div className="border-b px-[22px] py-4" style={{ borderColor: "var(--hairline)" }}>
@@ -720,13 +720,6 @@ export default async function SettingsPage({
     </div>
 
     <div className="glass-card glass-card-solid card-hover max-w-[600px] px-[22px] py-2">
-      <div className="flex items-center justify-between gap-4 border-b py-[15px]" style={{ borderColor: "var(--hairline-soft)" }}>
-        <div>
-          <div className="text-[13.5px] font-medium">Require manual approval before sending</div>
-          <div className="text-[12px]" style={{ color: "var(--ink-muted)" }}>Nothing reaches a client without your review</div>
-        </div>
-        <Toggle on={workspace.requireApproval} field="requireApproval" />
-      </div>
       <div className="flex items-center justify-between gap-4 border-b py-[15px]" style={{ borderColor: "var(--hairline-soft)" }}>
         <div>
           <div className="text-[13.5px] font-medium">Email me when a contract is signed</div>

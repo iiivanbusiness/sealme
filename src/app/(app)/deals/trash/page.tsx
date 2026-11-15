@@ -30,22 +30,23 @@ export default async function DealsTrashPage() {
     <>
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-4">
         <div>
-          <Link href="/deals" className="text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
-            ← Deals
+          <Link href="/leads" className="text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
+            ← Leads
           </Link>
           <h1 className="mt-1 text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Trash</h1>
           <div className="mt-1 text-[14px]" style={{ color: "var(--ink-muted)" }}>
-            {deals.length} {deals.length === 1 ? "deal" : "deals"}. Restore anytime, or empty the trash to delete them for good
+            {deals.length === 0 ? "Deleted proposals and contracts wait here." : `${deals.length} deleted ${deals.length === 1 ? "proposal or contract" : "proposals and contracts"}. Restore one to put it back on its lead, or empty the trash to delete them for good.`}
           </div>
         </div>
         {deals.length > 0 && <EmptyTrashButton action={emptyTrash} count={deals.length} />}
       </div>
 
       <div className="glass-card glass-card-solid card-hover overflow-hidden">
-        <table className="w-full border-collapse">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[520px] border-collapse">
           <thead>
             <tr>
-              <th className="border-b px-5 py-3 text-left text-[11.5px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline)" }}>Client</th>
+              <th className="border-b px-5 py-3 text-left text-[11.5px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline)" }}>Document</th>
               <th className="border-b px-5 py-3 text-left text-[11.5px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline)" }}>Value</th>
               <th className="border-b px-5 py-3 text-left text-[11.5px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline)" }}>Trashed</th>
               <th className="border-b px-5 py-3" style={{ borderColor: "var(--hairline)" }} />
@@ -56,7 +57,7 @@ export default async function DealsTrashPage() {
               <tr key={deal.id} className="row-hover transition-colors">
                 <td className="border-b px-5 py-3" style={{ borderColor: "var(--hairline-soft)" }}>
                   <span className="flex flex-col gap-0.5">
-                    <span className="font-medium" style={{ color: "var(--ink)" }}>{deal.client.name}</span>
+                    <span className="font-medium" style={{ color: "var(--ink)" }}>{deal.kind === "proposal" ? "Proposal" : "Contract"} · {deal.client.name}</span>
                     <span className="text-[12.5px]" style={{ color: "var(--ink-muted)" }}>{deal.service}</span>
                   </span>
                 </td>
@@ -64,7 +65,7 @@ export default async function DealsTrashPage() {
                   {deal.feeDisplay}
                 </td>
                 <td className="border-b px-5 py-3 text-[12.5px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline-soft)" }}>
-                  {deal.trashedAt ? timeAgo(deal.trashedAt) : "—"}
+                  {deal.trashedAt ? timeAgo(deal.trashedAt) : "-"}
                 </td>
                 <td className="border-b px-5 py-3 text-right" style={{ borderColor: "var(--hairline-soft)" }}>
                   <form action={restoreDeal.bind(null, deal.id)}>
@@ -82,6 +83,7 @@ export default async function DealsTrashPage() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </>
   );

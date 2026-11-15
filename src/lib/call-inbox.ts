@@ -2,10 +2,10 @@ import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/db";
 import { applyColdCall } from "@/lib/cold-call";
 import { INPUT_USD_PER_MTOK, OUTPUT_USD_PER_MTOK } from "@/lib/extract-cold-call";
-import { meterAiUsage } from "@/lib/ai-usage";
+import { meterAiUsage, type AiUsage } from "@/lib/ai-usage";
 import { reportError } from "@/lib/error-report";
 import { pushCallToCrm } from "@/lib/crm-call-sync";
-import { applySalesCall } from "@/lib/sales-call";
+import { buildDealFromCall, tellRepDealFailed, type DealKind } from "@/lib/call-deal";
 import { deleteRecording, isTelnyxConfigured, recordingDownload, telnyxCallCost } from "@/lib/telnyx";
 import { DUAL_CHANNEL_LISTEN_PARAMS, RECORDING_LISTEN_PARAMS, transcriptFromChannels, transcriptFromListenResponse } from "@/lib/recording-transcript";
 import { classifyCallKind } from "@/lib/call-kind";
@@ -88,8 +88,14 @@ export function callCostUsd(call: {
 // processing with its lead. Short calls and one-voice calls are set aside
 // without a model call; anything that throws is marked failed so it can be
 // retried from the inbox. force runs the model even on a call that would be
-// set aside ("Process anyway", when the speaker split was wrong). A call
-// whose kind nobody picked is sorted into cold or sales from what was said.
+// set aside ("Process anyway", when the speaker split was wrong).
+//
+// Every call that's written up gets notes on its lead. Then come the
+// proposal and the contract it asked for, from the same transcript, on the
+// lead the call ended up on. A call nobody said anything about is sorted
+// into cold or sales from what was said, and a sales call gets a contract
+// drafted for the rep (never sent: nobody asked for it). Mode "sales" (the
+// API's kind, an inbox pick) asks for a contract like the checkbox does.
 export async function runCallProcessing(callId: string, timeZone: string, options: { force?: boolean; auto?: boolean } = {}): Promise<void> {
   let call = await prisma.phoneCall.findUnique({ where: { id: callId }, include: { lead: true } });
   if (!call || call.status !== "processing") return;
@@ -116,48 +122,102 @@ export async function runCallProcessing(callId: string, timeZone: string, option
     }
     const { lead, userId, transcript } = call;
     if (!lead || !transcript) throw new Error("This call has no lead or transcript");
-    const { workspaceId, mode: picked } = call;
-    // Every model call below counts toward this call's cost: sorting it,
-    // the notes, and for a sales call the template pick, the deal and the
-    // highlights.
-    const { usage } = await meterAiUsage(async () => {
-      let mode = picked;
-      // "notes" is notes only, never a contract: no sorting needed.
-      const sorted = mode !== "cold" && mode !== "sales" && mode !== "notes";
+    const { workspaceId, mode: picked, wantsProposal, wantsContract: ticked } = call;
+    // Every model call counts toward this call's cost: sorting it and the
+    // notes first, then the proposal and contract it asked for.
+    let mode = picked;
+    // "notes" is notes plus whatever was ticked: no sorting needed.
+    const sorted = mode !== "cold" && mode !== "sales" && mode !== "notes";
+    const notes = await meterAiUsage(async () => {
       if (sorted) {
         const { kind } = await classifyCallKind(transcript);
         await prisma.phoneCall.update({ where: { id: callId }, data: { mode: kind } });
         mode = kind;
       }
-      if (mode === "sales") {
-        // SealMe decided this was a sales call: the contract waits for the rep.
-        await applySalesCall(callId, { draftOnly: sorted });
-      } else {
-        // The call can land on a lead already on file instead of the one it came with.
-        const saved = await applyColdCall({ workspaceId, userId, lead, transcript, timeZone, phoneCallId: callId });
-        if (options.auto && userId) {
-          await createNotification({
-            workspaceId,
-            userId,
-            type: "call.saved",
-            title: `Notes from your call with ${saved.leadName} are saved`,
-            body: "Check them, and fix anything SealMe heard wrong.",
-            linkUrl: `/leads/${saved.leadId}`,
-          }).catch((err) => reportError(err, "Call saved notification", { callId }));
+      const wantsContract = ticked || mode === "sales";
+      const kinds: DealKind[] = [...(wantsProposal ? (["proposal"] as const) : []), ...(wantsContract ? (["contract"] as const) : [])];
+      // The call can land on a lead already on file instead of the one it
+      // came with. call.completed waits for the proposal and contract, so it
+      // carries the deal.
+      const saved = await applyColdCall({
+        workspaceId,
+        userId,
+        lead,
+        transcript,
+        timeZone,
+        phoneCallId: callId,
+        mode: wantsContract ? "sales" : "cold",
+        closesMeeting: kinds.length > 0,
+        deferCompleted: kinds.length > 0,
+      });
+      return { done: saved, kinds };
+    });
+    const { done, kinds } = notes.result;
+    // Added to, not set: a live call's passes while it recorded (see
+    // refreshLiveDeals) are already on it, and so is an earlier try.
+    await addCallAiUsage(callId, notes.usage);
+    if (options.auto && userId) {
+      await createNotification({
+        workspaceId,
+        userId,
+        type: "call.saved",
+        title: `Notes from your call with ${done.leadName} are saved`,
+        body: "Check them, and fix anything SealMe heard wrong.",
+        linkUrl: `/leads/${done.leadId}`,
+      }).catch((err) => reportError(err, "Call saved notification", { callId }));
+    }
+    // The notes are in: they go to the CRM now, whatever the proposal and
+    // contract below take. A CRM hiccup never marks the call failed.
+    await pushCallToCrm(callId).catch((err) => reportError(err, "CRM call sync", { callId }));
+    if (kinds.length === 0) return;
+
+    const docs = await meterAiUsage(async () => {
+      for (const kind of kinds) {
+        // Made already: during the call (the desktop app's Create contract),
+        // or by an earlier pass over this call.
+        if (await prisma.deal.findFirst({ where: { phoneCallId: callId, kind, trashedAt: null }, select: { id: true } })) continue;
+        // The notes are saved whatever happens here, so a proposal or a
+        // contract that can't be made never marks the call failed.
+        try {
+          // Always a draft for the rep: nothing from a call goes to the
+          // client on its own.
+          await buildDealFromCall(callId, kind);
+        } catch (err) {
+          await reportError(err, `Making a ${kind} from a call`, { callId, workspaceId });
+          await markDocFailed(callId, kind).catch((markErr) => reportError(markErr, "Marking a document that couldn't be made", { callId, kind }));
+          await tellRepDealFailed({ workspaceId, userId, leadId: done.leadId, kind, reason: err instanceof Error && /templates yet/.test(err.message) ? err.message : "Something went wrong reading the terms" });
         }
       }
+    }).catch(async (err) => {
+      await reportError(err, "Making documents from a call", { callId, workspaceId });
+      return null;
     });
-    await prisma.phoneCall.update({
-      where: { id: callId },
-      data: { aiInputTokens: usage.inputTokens, aiOutputTokens: usage.outputTokens, aiCostUsd: usage.costUsd },
-    });
+    if (docs) await addCallAiUsage(callId, docs.usage);
+    await dispatchCallCompleted(workspaceId, callId);
   } catch (err) {
     await prisma.phoneCall.update({ where: { id: callId }, data: { status: "failed" } }).catch(() => {});
     await reportError(err, "Call processing", { callId, workspaceId: call.workspaceId });
-    return;
   }
-  // Outside the try: a CRM hiccup must never mark a processed call failed.
-  await pushCallToCrm(callId);
+}
+
+// Adds what a pass over a call cost to what it cost before: the readings
+// while a live call recorded, its notes, its documents, a try again. In SQL
+// because Prisma's increment leaves a column that's still null at null.
+export async function addCallAiUsage(callId: string, usage: AiUsage): Promise<void> {
+  if (!usage.inputTokens && !usage.outputTokens && !usage.costUsd) return;
+  await prisma.$executeRaw`UPDATE "PhoneCall" SET "aiInputTokens" = COALESCE("aiInputTokens", 0) + ${usage.inputTokens}::int, "aiOutputTokens" = COALESCE("aiOutputTokens", 0) + ${usage.outputTokens}::int, "aiCostUsd" = COALESCE("aiCostUsd", 0) + ${usage.costUsd}::double precision WHERE id = ${callId}`;
+}
+
+// A proposal or contract the call asked for that couldn't be made, kept on
+// the call next to what the notes found (extracted.docFailed), so the lead
+// page stops showing it as being written and lets the rep make it by hand.
+// A try again writes the notes' findings fresh, which clears it.
+async function markDocFailed(callId: string, kind: DealKind): Promise<void> {
+  const call = await prisma.phoneCall.findUnique({ where: { id: callId }, select: { extracted: true } });
+  const isObject = (v: unknown): v is Prisma.JsonObject => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+  const extracted = isObject(call?.extracted) ? call.extracted : {};
+  const docFailed = isObject(extracted.docFailed) ? extracted.docFailed : {};
+  await prisma.phoneCall.update({ where: { id: callId }, data: { extracted: { ...extracted, docFailed: { ...docFailed, [kind]: true } } } });
 }
 
 // A phone call's notes are written as soon as its recording is in: no
@@ -237,11 +297,20 @@ export async function failStuckCalls(where: Prisma.PhoneCallWhereInput = {}, now
 
 // For the daily cron: calls left unprocessed for a day are dropped, with
 // their transcripts and any recording still at Telnyx. So is a call whose
-// recording never arrived, and one whose processing was cut off a day ago.
+// recording never arrived, and one that failed a day ago and nobody tried
+// again.
 export async function discardStaleCalls(now = new Date()): Promise<number> {
   await failStuckCalls({}, now);
   const before = new Date(now.getTime() - PENDING_TTL_MS);
-  const where = { status: { in: ["pending", "failed", "recording", "dialing"] }, startedAt: { lt: before } };
+  // A failed call's day starts when it failed (its updatedAt), not when it
+  // was made: a call that fails in this same cron run (an abandoned live
+  // call finished a day late, one cut off just now) still gets a full day
+  // of Try again. A call the desktop app recorded live is finished from what
+  // it heard instead (see finishAbandonedLiveCalls), never thrown away here.
+  const where = {
+    OR: [{ status: { in: ["pending", "recording", "dialing"] }, startedAt: { lt: before } }, { status: "failed", updatedAt: { lt: before } }],
+    NOT: { source: "desktop", status: "recording" },
+  };
   const stale = await prisma.phoneCall.findMany({ where, select: { id: true, telnyxRecordingId: true } });
   let count = 0;
   if (stale.length) {

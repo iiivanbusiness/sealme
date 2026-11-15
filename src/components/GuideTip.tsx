@@ -15,10 +15,10 @@ function tipFor(guide: string, pathname: string): Tip | null {
   const onLead = /^\/leads\/(?!new$|import$)[^/]+$/.test(pathname);
   switch (guide) {
     case "notes":
-      return pathname === "/notes"
+      return pathname === "/deals/new"
         ? {
-            title: "Notes: the write-up of any call",
-            body: "Drop a recording or video of a call, or paste its transcript, and press Write up the call. You get the notes and the next step, no contract. Every client you have notes on is listed here, newest first, and each call with them lands on the same file.",
+            title: "Start a call: the write-up of any call",
+            body: "Say who the call was with, drop a recording or video of it, or paste its transcript, and press Write up the call. You get the notes and the next step on the client's lead, the same lead every time you talk to that client.",
           }
         : null;
     case "calls":
@@ -31,18 +31,18 @@ function tipFor(guide: string, pathname: string): Tip | null {
     case "lead":
       if (onLead) {
         return {
-          title: "The client's file",
-          body: "Every call with this client lands here, each with its notes. From the second call on, Where things stand sums them all up at the top. Copy all notes gives you the whole file for an email or a report. A call on the wrong client? Use Move to another lead.",
+          title: "Everything with this person",
+          body: "Every call lands here, newest on top. Open one for its notes, and its proposal or contract: open the one SealMe made, or create one from the call. From the second call on, Where things stand sums them all up. A call on the wrong lead? Use ... on the call to move it.",
           seen: "lead",
         };
       }
       return pathname === "/leads"
-        ? { title: "Open a lead to see the client's file", body: "Each lead is one client, with every call you've had with them. Add a call first and its client shows up here." }
+        ? { title: "Open a lead to see everything with them", body: "Each lead is one person, with every call you've had and every proposal and contract. Start a call and its lead shows up here." }
         : null;
     case "todo":
       return pathname === "/dashboard"
         ? {
-            title: "Your to-do list",
+            title: "Your reminders",
             body: "Next steps agreed on a call show up here on their day, in the order your day happens. Tick them off as you go. A manager can switch to the team's list.",
             seen: "todo",
             inline: true,
@@ -51,16 +51,16 @@ function tipFor(guide: string, pathname: string): Tip | null {
     case "leads":
       return pathname === "/leads"
         ? {
-            title: "Leads: all your clients",
-            body: "Search by name or company, pick Last call first to see who you talked to most recently, and filter by campaign when you call for several clients. The Calls column shows how many calls each client has had.",
+            title: "Leads: everyone you talk to",
+            body: "Active is who you're working on. A lead moves on its own as you send a proposal and a contract, and gets a green check when they sign. Lost leads, unsigned contracts and leads with nothing new for 30 days go to Inactive; a new call brings them back.",
             seen: "leads",
           }
         : null;
     case "contracts":
       return pathname === "/deals/new"
         ? {
-            title: "Notes and a contract",
-            body: "Pick Notes and contract, add the recording or transcript, and choose a template. SealMe drafts the contract from what was agreed, for you to check before it goes out.",
+            title: "Notes and a proposal or contract",
+            body: "Tick Proposal or Contract, add the recording or transcript, and press the button. SealMe drafts it from what was agreed, on the template that fits, for you to check before it goes out.",
           }
         : null;
     default:
@@ -69,7 +69,7 @@ function tipFor(guide: string, pathname: string): Tip | null {
 }
 
 // At the top of every page (no `at`), or placed next to what it's about
-// (`at` = the guide step, e.g. the to-do list on the Dashboard).
+// (`at` = the guide step, e.g. the reminders on the Dashboard).
 export default function GuideTip({ at }: { at?: string }) {
   const pathname = usePathname();
   const params = useSearchParams();

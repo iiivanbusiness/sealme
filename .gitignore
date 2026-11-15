@@ -49,3 +49,15 @@ next-env.d.ts
 
 /dev.db
 /dev.db-journal
+
+# Personal notes, docs, lead lists and scratch files in the project root (not code)
+/*.md
+!/README.md
+!/AGENTS.md
+!/CLAUDE.md
+/*.csv
+/*.xlsx
+/*.pdf
+/*.txt
+/scratch-*.html
+/demo-data-ids.json

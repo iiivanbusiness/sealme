@@ -7,18 +7,17 @@ import TaskFields, { todayLocal, viewerTimeZone, type TaskDraft } from "@/compon
 export type LeadRow = {
   id: string;
   name: string;
-  subtitle: string;
-  secondary: string;
   company: string | null;
   campaign: string | null;
+  // One line from the last call, or how to reach them when there's no call yet.
+  line: string;
   stageLabel: string;
   stageChip: string;
-  interest: string;
+  isClient: boolean;
   owner: string;
-  next: string;
-  updated: string;
   calls: number; // written-up calls with this lead
-  lastCall: string | null; // day of the last call that reached them
+  recording: boolean; // the desktop app is recording a call with them right now
+  lastContact: string | null; // day of the last call or anything else that happened
 };
 
 type AssignInput = TaskDraft & { timezone: string; leadIds: string[]; makeOwner: boolean };
@@ -26,11 +25,30 @@ type AssignInput = TaskDraft & { timezone: string; leadIds: string[]; makeOwner:
 // Columns drop out as the window narrows so the table never runs past the
 // card; below md the list switches to stacked rows instead.
 const SHOW = {
-  company: "hidden lg:table-cell",
-  owner: "hidden min-[1400px]:table-cell",
-  next: "hidden xl:table-cell",
-  updated: "hidden 2xl:table-cell",
+  line: "hidden lg:table-cell",
+  owner: "hidden xl:table-cell",
 };
+
+// The green check SealMe puts on a lead once a contract is signed.
+export function ClientCheck({ size = 15 }: { size?: number }) {
+  return (
+    <span role="img" aria-label="Client" title="Client: signed a contract" className="inline-flex flex-none items-center justify-center rounded-full" style={{ width: size, height: size, background: "var(--success, #1f9d55)", color: "#fff" }}>
+      <svg viewBox="0 0 12 12" width={size * 0.62} height={size * 0.62} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M2.5 6.2 5 8.5 9.5 3.5" />
+      </svg>
+    </span>
+  );
+}
+
+// The same mark the lead's page puts on a call that's being recorded.
+function RecordingNow() {
+  return (
+    <span className="chip chip-success inline-flex flex-none items-center gap-1.5 whitespace-nowrap">
+      <span className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "currentColor" }} aria-hidden />
+      Recording now
+    </span>
+  );
+}
 
 export default function LeadsTable({
   rows,
@@ -45,7 +63,7 @@ export default function LeadsTable({
   canAssign: boolean;
   assignees: { id: string; name: string }[];
   assignAction: (input: AssignInput) => Promise<{ created: number }>;
-  deleteAction?: (leadIds: string[]) => Promise<{ deleted: number }>;
+  deleteAction?: (leadIds: string[]) => Promise<{ deleted: number; kept: number }>;
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState(false);
@@ -87,19 +105,24 @@ export default function LeadsTable({
         {rows.map((lead) => (
           <div key={lead.id} className="flex items-start gap-3 px-4 py-3.5" style={{ borderColor: "var(--hairline-soft)" }}>
             {canAssign && <div className="pt-[3px]">{check(lead.id, lead.name)}</div>}
-            <Link href={`/leads/${lead.id}`} className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <Link href={`/leads/${lead.id}`} className="flex min-w-0 flex-1 flex-col gap-1">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-[14px] font-medium" style={{ color: "var(--ink)" }}>{lead.name}</div>
-                  <div className="truncate text-[12.5px]" style={{ color: "var(--ink-muted)" }}>{lead.subtitle || "No details yet"}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[14px] font-medium" style={{ color: "var(--ink)" }}>{lead.name}</span>
+                    {lead.isClient && <ClientCheck size={14} />}
+                  </div>
+                  {lead.company && <div className="truncate text-[12.5px]" style={{ color: "var(--ink-muted)" }}>{lead.company}</div>}
                 </div>
                 <span className={`chip flex-none ${lead.stageChip}`}>{lead.stageLabel}</span>
               </div>
-              {(lead.calls > 0 || lead.next) && (
-                <div className="truncate text-[12px]" style={{ color: "var(--ink-muted)" }}>
-                  {[lead.calls > 0 ? `${lead.calls} ${lead.calls === 1 ? "call" : "calls"}${lead.lastCall ? `, last ${lead.lastCall}` : ""}` : null, lead.next ? `Next: ${lead.next}` : null].filter(Boolean).join(" · ")}
-                </div>
-              )}
+              {lead.line && <div className="line-clamp-2 break-words text-[12.5px]" style={{ color: "var(--ink)" }}>{lead.line}</div>}
+              <div className="flex min-w-0 items-center gap-2 text-[12px]" style={{ color: "var(--ink-muted)" }}>
+                {lead.recording && <RecordingNow />}
+                <span className="truncate">
+                  {[lead.calls > 0 ? `${lead.calls} ${lead.calls === 1 ? "call" : "calls"}` : lead.recording ? null : "No calls yet", lead.lastContact ? `last ${lead.lastContact}` : null].filter(Boolean).join(" · ")}
+                </span>
+              </div>
             </Link>
           </div>
         ))}
@@ -118,13 +141,10 @@ export default function LeadsTable({
                 )}
                 {[
                   { label: "Lead", show: "" },
-                  { label: "Company", show: SHOW.company },
+                  { label: "Last call", show: SHOW.line },
                   { label: "Stage", show: "" },
                   { label: "Calls", show: "" },
-                  { label: "Interest", show: "" },
                   ...(showOwner ? [{ label: "Owner", show: SHOW.owner }] : []),
-                  { label: "Next step", show: SHOW.next },
-                  { label: "Updated", show: SHOW.updated },
                 ].map((col) => (
                   <th
                     key={col.label}
@@ -149,38 +169,38 @@ export default function LeadsTable({
                       </td>
                     )}
                     <td className={cell} style={border}>
-                      <Link href={`/leads/${lead.id}`} className="block max-w-[200px]">
-                        <div className="truncate font-medium" style={{ color: "var(--ink)" }} title={lead.name}>{lead.name}</div>
-                        <div className="truncate text-[12px]" style={{ color: "var(--ink-muted)" }}>{lead.secondary || " "}</div>
+                      <Link href={`/leads/${lead.id}`} className="block max-w-[240px]">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate font-medium" style={{ color: "var(--ink)" }} title={lead.name}>{lead.name}</span>
+                          {lead.isClient && <ClientCheck size={14} />}
+                        </div>
+                        <div className="truncate text-[12px]" style={{ color: "var(--ink-muted)" }} title={[lead.company, lead.campaign].filter(Boolean).join(" · ")}>
+                          {[lead.company, lead.campaign].filter(Boolean).join(" · ") || " "}
+                        </div>
                       </Link>
                     </td>
-                    <td className={`${cell} ${SHOW.company}`} style={muted}>
-                      <div className="max-w-[160px] truncate" title={lead.company ?? undefined}>{lead.company ?? "-"}</div>
-                      {lead.campaign && <div className="max-w-[160px] truncate text-[12px]" title={`Campaign: ${lead.campaign}`}>{lead.campaign}</div>}
+                    <td className={`${cell} ${SHOW.line}`} style={muted}>
+                      <div className="line-clamp-2 max-w-[420px] break-words" title={lead.line}>{lead.line || "-"}</div>
                     </td>
                     <td className={cell} style={border}>
                       <span className={`chip whitespace-nowrap ${lead.stageChip}`}>{lead.stageLabel}</span>
                     </td>
                     <td className={`whitespace-nowrap ${cell}`} style={muted}>
-                      {lead.calls > 0 ? (
-                        <>
-                          <div className="tabular-nums" style={{ color: "var(--ink)" }}>{lead.calls}</div>
-                          {lead.lastCall && <div className="text-[12px]">Last {lead.lastCall}</div>}
-                        </>
+                      {lead.recording ? (
+                        <div className="flex items-center gap-2">
+                          {lead.calls > 0 && <span className="tabular-nums" style={{ color: "var(--ink)" }}>{lead.calls}</span>}
+                          <RecordingNow />
+                        </div>
                       ) : (
-                        "-"
+                        <div className="tabular-nums" style={{ color: "var(--ink)" }}>{lead.calls > 0 ? lead.calls : "-"}</div>
                       )}
+                      {lead.lastContact && <div className="text-[12px]">Last {lead.lastContact}</div>}
                     </td>
-                    <td className={`whitespace-nowrap ${cell}`} style={muted}>{lead.interest}</td>
                     {showOwner && (
                       <td className={`${cell} ${SHOW.owner}`} style={muted}>
-                        <div className="max-w-[120px] truncate">{lead.owner}</div>
+                        <div className="max-w-[140px] truncate">{lead.owner}</div>
                       </td>
                     )}
-                    <td className={`${cell} ${SHOW.next}`} style={muted}>
-                      <div className="max-w-[180px] truncate" title={lead.next}>{lead.next || "-"}</div>
-                    </td>
-                    <td className={`whitespace-nowrap ${cell} ${SHOW.updated}`} style={muted}>{lead.updated}</td>
                   </tr>
                 );
               })}
@@ -191,21 +211,26 @@ export default function LeadsTable({
 
       {/* Floats at the bottom so ticking the first box doesn't push the
           list down under the cursor. On phones it sits above the tab bar,
-          level with the help button and left of it. */}
+          level with the help button and left of it: the right padding
+          keeps it clear of that button (48px, 20px in from the edge). Where
+          one line doesn't fit (a 375px phone), the buttons go on a second
+          line under the count instead of running off the screen. */}
       {canAssign && selected.size > 0 && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-24 z-30 flex justify-start px-4 md:bottom-6 md:justify-center">
+        <div className="pointer-events-none fixed inset-x-0 bottom-24 z-30 flex justify-start pl-4 pr-[84px] md:bottom-6 md:justify-center md:px-4">
           <div
-            className="pointer-events-auto flex items-center gap-3 rounded-full border py-1.5 pl-5 pr-1.5"
+            className="pointer-events-auto flex max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 rounded-[26px] border py-1.5 pl-5 pr-1.5"
             style={{ background: "var(--surface-1)", borderColor: "var(--hairline)", boxShadow: "0 10px 34px rgba(0, 0, 0, 0.18)" }}
             role="region"
             aria-label="Selected leads"
           >
-            <span className="whitespace-nowrap text-[13px] font-medium">{selected.size.toLocaleString("en-US")} selected</span>
-            <button type="button" onClick={() => setSelected(new Set())} className="btn btn-ghost btn-sm">Clear</button>
-            {deleteAction && (
-              <button type="button" onClick={() => setConfirmDelete(true)} className="btn btn-ghost btn-sm" style={{ color: "#c0392b" }}>Delete</button>
-            )}
-            <button type="button" onClick={() => setDialog(true)} className="btn btn-primary btn-sm">Assign</button>
+            <span className="whitespace-nowrap py-1 text-[13px] font-medium">{selected.size.toLocaleString("en-US")} selected</span>
+            <div className="flex flex-wrap items-center gap-1">
+              <button type="button" onClick={() => setSelected(new Set())} className="btn btn-ghost btn-sm">Clear</button>
+              {deleteAction && (
+                <button type="button" onClick={() => setConfirmDelete(true)} className="btn btn-ghost btn-sm" style={{ color: "#c0392b" }}>Delete</button>
+              )}
+              <button type="button" onClick={() => setDialog(true)} className="btn btn-primary btn-sm">Assign</button>
+            </div>
           </div>
         </div>
       )}
@@ -215,9 +240,12 @@ export default function LeadsTable({
           count={selected.size}
           onClose={() => setConfirmDelete(false)}
           onConfirm={async () => {
-            const { deleted } = await deleteAction([...selected]);
+            const { deleted, kept } = await deleteAction([...selected]);
             return () => {
-              setNotice(`Deleted ${deleted.toLocaleString("en-US")} ${deleted === 1 ? "lead" : "leads"}.`);
+              setNotice(
+                `Deleted ${deleted.toLocaleString("en-US")} ${deleted === 1 ? "lead" : "leads"}.` +
+                  (kept ? ` Kept ${kept.toLocaleString("en-US")}: clients, leads whose proposal or contract went out, and leads with a call still going can't be deleted.` : ""),
+              );
               setSelected(new Set());
               setConfirmDelete(false);
             };
@@ -316,7 +344,7 @@ function DeleteDialog({ count, onClose, onConfirm }: { count: number; onClose: (
         <div>
           <h2 className="text-[16px] font-medium">Delete {what}?</h2>
           <div className="mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-            Their tasks and call notes are deleted too. Leads that became deals keep their deal and client. This can&apos;t be undone.
+            Their calls and tasks are deleted too, and their proposal and contract drafts go to the trash. Clients, and leads whose proposal or contract went out to the client, are kept. This can&apos;t be undone.
           </div>
         </div>
         {error && <div className="chip chip-warn w-full justify-start px-4 py-2.5 text-[12.5px]">{error}</div>}

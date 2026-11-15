@@ -89,11 +89,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
           .join(", "),
       });
     }
+    // A proposal is read on its own page, never signed.
+    const isProposal = deal.kind === "proposal";
     if (deal.contract.sentAt) {
-      events.push({ when: deal.contract.sentAt, label: "Contract sent to client" });
+      events.push({ when: deal.contract.sentAt, label: isProposal ? "Proposal sent to client" : "Contract sent to client" });
     }
     if (deal.contract.viewedAt) {
-      events.push({ when: deal.contract.viewedAt, label: "Client viewed the sign page" });
+      events.push({ when: deal.contract.viewedAt, label: isProposal ? "Client viewed the proposal" : "Client viewed the sign page" });
     }
     if (deal.contract.signedAt) {
       events.push({

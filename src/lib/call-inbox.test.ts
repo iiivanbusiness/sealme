@@ -1,23 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { phoneCall, cold, sales, classify, notify, telnyx } = vi.hoisted(() => ({
+const { phoneCall, executeRaw, deal, cold, build, buildFailed, classify, notify, telnyx } = vi.hoisted(() => ({
   phoneCall: { findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+  executeRaw: vi.fn<(...args: unknown[]) => Promise<number>>(async () => 1),
+  // No proposal or contract was made on these calls while they recorded,
+  // unless a test says so.
+  deal: { findFirst: vi.fn<(args?: unknown) => Promise<{ id: string } | null>>(async () => null) },
   cold: vi.fn(),
-  sales: vi.fn(),
+  build: vi.fn(),
+  buildFailed: vi.fn(),
   classify: vi.fn(),
   notify: vi.fn(),
   telnyx: { recordingDownload: vi.fn(), deleteRecording: vi.fn() },
 }));
-vi.mock("@/lib/db", () => ({ prisma: { phoneCall } }));
+vi.mock("@/lib/db", () => ({ prisma: { phoneCall, deal, $executeRaw: executeRaw } }));
 vi.mock("@/lib/error-report", () => ({ reportError: async () => {} }));
 vi.mock("@/lib/crm-call-sync", () => ({ pushCallToCrm: async () => {} }));
-vi.mock("@/lib/sales-call", () => ({ applySalesCall: sales }));
+vi.mock("@/lib/call-deal", () => ({ buildDealFromCall: build, tellRepDealFailed: buildFailed }));
 vi.mock("@/lib/cold-call", () => ({ applyColdCall: cold }));
 vi.mock("@/lib/call-kind", () => ({ classifyCallKind: classify }));
 vi.mock("@/lib/notifications", () => ({ createNotification: notify }));
 vi.mock("@/lib/telnyx", () => telnyx);
 
-import { callCostUsd, discardStaleCalls, failStuckCalls, runCallProcessing, skipReason, speakerCount } from "./call-inbox";
+import { addCallAiUsage, callCostUsd, discardStaleCalls, failStuckCalls, runCallProcessing, skipReason, speakerCount } from "./call-inbox";
+
+// What each model-use write added to a call: tokens in, tokens out, cost.
+function usageAdded() {
+  return executeRaw.mock.calls
+    .filter(([sql]) => (sql as string[]).join("?").includes('"aiInputTokens" = COALESCE("aiInputTokens", 0) +'))
+    .map(([, inputTokens, outputTokens, costUsd, callId]) => ({ inputTokens, outputTokens, costUsd: costUsd as number, callId }));
+}
 
 const twoVoices = "Speaker 1: Hi, is this Dana?\nSpeaker 2: Speaking, who's this?\nSpeaker 1: It's Sam from SealMe.";
 
@@ -59,18 +71,38 @@ describe("Calls inbox", () => {
       recordAiUsage({ model: "claude-haiku-4-5", usage: { input_tokens: 1000, output_tokens: 2 } });
       return { kind: "sales" };
     });
-    sales.mockImplementation(async () => {
+    build.mockImplementation(async () => {
       recordAiUsage({ model: "claude-sonnet-5", usage: { input_tokens: 4000, output_tokens: 1000 } });
+      return { dealId: "d1" };
     });
     phoneCall.update.mockClear();
+    executeRaw.mockClear();
 
     await runCallProcessing("call3", "America/Chicago", { force: true });
 
     expect(phoneCall.update.mock.calls.find((c) => "sttSeconds" in c[0].data)?.[0].data.sttSeconds).toBe(88);
-    const last = phoneCall.update.mock.calls.at(-1)?.[0].data;
-    expect(last).toMatchObject({ aiInputTokens: 5000, aiOutputTokens: 1002 });
-    expect(last.aiCostUsd).toBeCloseTo((1000 * 1 + 2 * 5) / 1e6 + (4000 * 2 + 1000 * 10) / 1e6, 9);
+    // The notes (sorting included) are added when they're saved, and the
+    // contract adds its own on top once it's made. Added, never set: a live
+    // call's readings while it recorded are already on it.
+    const costs = usageAdded();
+    expect(costs).toHaveLength(2);
+    expect(costs[0]).toMatchObject({ inputTokens: 1000, outputTokens: 2, callId: "call3" });
+    expect(costs[0].costUsd).toBeCloseTo((1000 * 1 + 2 * 5) / 1e6, 9);
+    expect(costs[1]).toMatchObject({ inputTokens: 4000, outputTokens: 1000, callId: "call3" });
+    expect(costs[1].costUsd).toBeCloseTo((4000 * 2 + 1000 * 10) / 1e6, 9);
+    expect(phoneCall.update.mock.calls.some((c) => "aiInputTokens" in c[0].data)).toBe(false);
     vi.unstubAllGlobals();
+  });
+
+  it("adds a pass's model use to the call's, even while it's still empty, and skips a pass that used none", async () => {
+    executeRaw.mockClear();
+    await addCallAiUsage("pc1", { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    expect(executeRaw).not.toHaveBeenCalled();
+    await addCallAiUsage("pc1", { inputTokens: 1200, outputTokens: 300, costUsd: 0.0054 });
+    const [sql] = executeRaw.mock.calls[0] as [string[]];
+    // COALESCE: Prisma's increment leaves a null column null.
+    expect(sql.join("?")).toContain('"aiCostUsd" = COALESCE("aiCostUsd", 0) +');
+    expect(usageAdded()).toEqual([{ inputTokens: 1200, outputTokens: 300, costUsd: 0.0054, callId: "pc1" }]);
   });
 
   it("writes out a phone recording only when it's processed, then drops the audio", async () => {
@@ -90,7 +122,7 @@ describe("Calls inbox", () => {
       data: { transcript: "Speaker 1: Hi, is this Dana?\nSpeaker 2: Speaking.", sttSeconds: 95, durationSec: 95, telnyxRecordingId: null },
     });
     expect(telnyx.deleteRecording).toHaveBeenCalledWith("rec1");
-    expect(cold.mock.calls[0][0]).toMatchObject({ phoneCallId: "call1", transcript: "Speaker 1: Hi, is this Dana?\nSpeaker 2: Speaking." });
+    expect(cold.mock.calls.at(-1)?.[0]).toMatchObject({ phoneCallId: "call1", transcript: "Speaker 1: Hi, is this Dana?\nSpeaker 2: Speaking." });
     vi.unstubAllGlobals();
   });
 
@@ -110,9 +142,10 @@ describe("Calls inbox", () => {
   });
 
   it("works out cold or sales when nobody picked, and never auto-sends a contract it guessed", async () => {
-    const call = { id: "call3", status: "processing", mode: "auto", workspaceId: "w1", userId: "u1", lead: { id: "l1", name: "Dana" }, transcript: "Speaker 1: Hi Dana.\nSpeaker 2: Hi.", telnyxRecordingId: null, durationSec: 120 };
+    const call = { id: "call3", status: "processing", mode: "auto", wantsProposal: false, wantsContract: false, workspaceId: "w1", userId: "u1", lead: { id: "l1", name: "Dana" }, transcript: "Speaker 1: Hi Dana.\nSpeaker 2: Hi.", telnyxRecordingId: null, durationSec: 120 };
     phoneCall.update.mockClear();
     notify.mockResolvedValue(undefined);
+    build.mockReset().mockResolvedValue({ dealId: "d1" });
     // The notification points at the lead the call ended up on.
     cold.mockResolvedValue({ leadId: "l1", leadName: "Dana", matched: false });
 
@@ -120,20 +153,119 @@ describe("Calls inbox", () => {
     classify.mockResolvedValue({ kind: "cold", inputTokens: 900, outputTokens: 1 });
     await runCallProcessing("call3", "America/Chicago", { auto: true });
     expect(phoneCall.update).toHaveBeenCalledWith({ where: { id: "call3" }, data: { mode: "cold" } });
-    expect(cold).toHaveBeenLastCalledWith(expect.objectContaining({ phoneCallId: "call3" }));
+    expect(cold).toHaveBeenLastCalledWith(expect.objectContaining({ phoneCallId: "call3", mode: "cold", closesMeeting: false }));
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ userId: "u1", linkUrl: "/leads/l1" }));
+    expect(build).not.toHaveBeenCalled();
 
+    // A sales call still gets its notes, then a contract the rep has to send.
     phoneCall.findUnique.mockResolvedValue(call);
     classify.mockResolvedValue({ kind: "sales", inputTokens: 900, outputTokens: 1 });
     await runCallProcessing("call3", "America/Chicago", { auto: true });
-    expect(sales).toHaveBeenCalledWith("call3", { draftOnly: true });
+    expect(cold).toHaveBeenLastCalledWith(expect.objectContaining({ phoneCallId: "call3", mode: "sales", closesMeeting: true }));
+    expect(build).toHaveBeenCalledWith("call3", "contract");
 
-    // A rep who picked "Sales call" in the inbox keeps the workspace's auto-send.
+    // A rep who picked "Sales call" in the inbox gets the same draft to send.
     phoneCall.findUnique.mockResolvedValue({ ...call, mode: "sales" });
     classify.mockClear();
     await runCallProcessing("call3", "America/Chicago");
     expect(classify).not.toHaveBeenCalled();
-    expect(sales).toHaveBeenLastCalledWith("call3", { draftOnly: false });
+    expect(build).toHaveBeenLastCalledWith("call3", "contract");
+  });
+
+  it("makes the proposal and contract the call asked for, after its notes, on the lead it landed on", async () => {
+    const call = { id: "call4", status: "processing", mode: "notes", wantsProposal: true, wantsContract: true, workspaceId: "w1", userId: "u1", lead: { id: "l9", name: "New lead from a call" }, transcript: "Speaker 1: Hi.\nSpeaker 2: Hi.", telnyxRecordingId: null, durationSec: 300 };
+    const order: string[] = [];
+    phoneCall.findUnique.mockResolvedValue(call);
+    classify.mockClear();
+    cold.mockReset().mockImplementation(async () => {
+      order.push("notes");
+      return { leadId: "l2", leadName: "Dana", matched: true };
+    });
+    build.mockReset().mockImplementation(async (_id: string, kind: string) => {
+      order.push(kind);
+      if (kind === "proposal") throw new Error("This workspace has no proposal templates yet");
+      return { dealId: "d2" };
+    });
+    phoneCall.update.mockClear();
+
+    await runCallProcessing("call4", "America/Chicago", { force: true });
+
+    expect(classify).not.toHaveBeenCalled();
+    expect(order).toEqual(["notes", "proposal", "contract"]);
+    expect(build).toHaveBeenLastCalledWith("call4", "contract");
+    // The proposal that couldn't be made is the rep's to hear about; the call
+    // itself is processed, not failed.
+    expect(buildFailed).toHaveBeenCalledWith(expect.objectContaining({ leadId: "l2", kind: "proposal", reason: "This workspace has no proposal templates yet" }));
+    expect(phoneCall.update.mock.calls.some((c) => c[0].data.status === "failed")).toBe(false);
+
+    // The proposal that couldn't be made is marked on the call, next to
+    // what the notes found.
+    expect(phoneCall.update).toHaveBeenCalledWith({ where: { id: "call4" }, data: { extracted: { docFailed: { proposal: true } } } });
+
+    // A contract made while the call recorded isn't made again at the end.
+    order.length = 0;
+    deal.findFirst.mockImplementation(async (args: unknown) => ((args as { where: { kind: string } }).where.kind === "contract" ? { id: "d-live" } : null));
+    await runCallProcessing("call4", "America/Chicago", { force: true });
+    expect(order).toEqual(["notes", "proposal"]);
+    deal.findFirst.mockImplementation(async () => null);
+  });
+
+  it("writes up a live call that made a contract mid-call as the sales call it was, without making the contract again", async () => {
+    // Create contract on the recording panel asks for one on the call (see startLiveDeal).
+    const call = { id: "call6", status: "processing", mode: "notes", wantsProposal: false, wantsContract: true, workspaceId: "w1", userId: "u1", lead: { id: "l1", name: "Dana" }, transcript: "Client: Hi.\nYou: Hi.", telnyxRecordingId: null, durationSec: 600 };
+    phoneCall.findUnique.mockReset().mockResolvedValue(call);
+    cold.mockReset().mockResolvedValue({ leadId: "l1", leadName: "Dana", matched: false });
+    build.mockReset();
+    classify.mockClear();
+    deal.findFirst.mockImplementation(async () => ({ id: "d-live" }));
+
+    await runCallProcessing("call6", "America/Chicago", { force: true });
+
+    expect(classify).not.toHaveBeenCalled();
+    expect(cold).toHaveBeenCalledWith(expect.objectContaining({ mode: "sales", closesMeeting: true, deferCompleted: true }));
+    expect(build).not.toHaveBeenCalled();
+    deal.findFirst.mockImplementation(async () => null);
+
+    // One that has to be made at the end (trashed mid-call) is a draft for the
+    // rep: nothing from a live call is sent on its own.
+    phoneCall.findUnique.mockResolvedValue({ ...call, source: "desktop" });
+    build.mockResolvedValue({ dealId: "d-new" });
+    await runCallProcessing("call6", "America/Chicago", { force: true });
+    expect(build).toHaveBeenCalledWith("call6", "contract");
+  });
+
+  it("marks a document it couldn't make on the call, keeping what the notes found and any other one marked", async () => {
+    const call = { id: "call5", status: "processing", mode: "notes", wantsProposal: false, wantsContract: true, workspaceId: "w1", userId: "u1", lead: { id: "l1", name: "Dana" }, transcript: "Speaker 1: Hi.\nSpeaker 2: Hi.", telnyxRecordingId: null, durationSec: 300 };
+    phoneCall.findUnique.mockReset().mockResolvedValueOnce(call).mockResolvedValueOnce({ extracted: { outcome: "interested", summary: "Wants 5 seats", docFailed: { proposal: true } } });
+    phoneCall.update.mockClear();
+    cold.mockReset().mockResolvedValue({ leadId: "l1", leadName: "Dana", matched: false });
+    build.mockReset().mockRejectedValue(new Error("Anthropic 529"));
+    buildFailed.mockClear();
+
+    await runCallProcessing("call5", "America/Chicago", { force: true });
+
+    expect(phoneCall.update).toHaveBeenCalledWith({
+      where: { id: "call5" },
+      data: { extracted: { outcome: "interested", summary: "Wants 5 seats", docFailed: { proposal: true, contract: true } } },
+    });
+    expect(buildFailed).toHaveBeenCalledWith(expect.objectContaining({ kind: "contract", reason: "Something went wrong reading the terms" }));
+    expect(phoneCall.update.mock.calls.some((c) => c[0].data.status === "failed")).toBe(false);
+  });
+
+  it("gives a failed call a full day from when it failed before it's thrown away", async () => {
+    const now = new Date("2026-11-04T12:00:00Z");
+    phoneCall.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    phoneCall.findMany.mockReset().mockResolvedValue([]);
+
+    await discardStaleCalls(now);
+    const dayAgo = new Date("2026-11-03T12:00:00Z");
+    // Waiting, ringing or recording calls go a day after they started; a
+    // failed one a day after it failed (an abandoned live call finished and
+    // failed in this same cron run isn't dropped with it).
+    expect(phoneCall.findMany.mock.calls[0][0].where).toEqual({
+      OR: [{ status: { in: ["pending", "recording", "dialing"] }, startedAt: { lt: dayAgo } }, { status: "failed", updatedAt: { lt: dayAgo } }],
+      NOT: { source: "desktop", status: "recording" },
+    });
   });
 
   it("hands back a call whose processing was cut off as failed, so it can be tried again", async () => {
@@ -150,5 +282,8 @@ describe("Calls inbox", () => {
     // The daily cleanup does it across the board, before it drops what's a day old.
     await discardStaleCalls(now);
     expect(phoneCall.updateMany.mock.calls.at(-1)?.[0]).toEqual({ where: { status: "processing", updatedAt: { lt: new Date("2026-11-04T11:45:00Z") } }, data: { status: "failed" } });
+    // A call the desktop app was recording live is never thrown away here:
+    // it's finished from what it heard (see finishAbandonedLiveCalls).
+    expect(phoneCall.findMany.mock.calls[0][0].where).toMatchObject({ NOT: { source: "desktop", status: "recording" } });
   });
 });

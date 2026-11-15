@@ -9,9 +9,10 @@ import { useGuideSeen } from "@/lib/guide-seen";
 // The first step that isn't done is the one with the button; the rest are
 // a tap on the row. Each step opens the place it's done, where a short tip
 // says what happens there (GuideTip). Hide puts it away; "Setup guide" in
-// the menu brings it back.
-export default function GetStarted({ steps, hideAction }: { steps: GetStartedStep[]; hideAction: () => Promise<void> }) {
-  const seen = useGuideSeen();
+// the menu brings it back. userId: whose "seen" steps these are, so another
+// account in the same browser doesn't see them ticked.
+export default function GetStarted({ steps, userId, hideAction }: { steps: GetStartedStep[]; userId: string; hideAction: () => Promise<void> }) {
+  const seen = useGuideSeen(userId);
   const [hidden, setHidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -36,7 +37,7 @@ export default function GetStarted({ steps, hideAction }: { steps: GetStartedSte
   }
 
   return (
-    <section id="setup" aria-labelledby="get-started-title" className="glass-card glass-card-solid mb-8 scroll-mt-4 p-5">
+    <section id="setup" aria-labelledby="get-started-title" className="glass-card glass-card-solid mb-6 scroll-mt-4 p-5">
       <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <h2 id="get-started-title" className="text-[15px] font-medium">Set up SealMe</h2>
         <button type="button" disabled={pending} onClick={hide} className="text-[12.5px] font-medium" style={{ color: "var(--ink-muted)" }}>

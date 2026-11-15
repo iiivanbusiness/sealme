@@ -48,6 +48,7 @@ export function ContractPdfDocument({
   signatureImage,
   countersigners,
   docusignAnchors,
+  kind,
 }: {
   templateName: string;
   agencyName: string;
@@ -64,7 +65,11 @@ export function ContractPdfDocument({
   // drop a signature field right there, without SealMe ever computing an
   // absolute x/y position on the page itself.
   docusignAnchors?: { label: string; anchor: string }[];
+  // The deal's kind. A proposal is only read: it names who it's for and who
+  // wrote it, and never has a place to sign.
+  kind?: string | null;
 }) {
+  const isProposal = kind === "proposal";
   const numbers = clauseNumbers(clauses);
   const signatures = [
     ...(signedBy && signedAt ? [{ name: signedBy, signedAt, image: signatureImage }] : []),
@@ -76,14 +81,14 @@ export function ContractPdfDocument({
       <Page size="A4" style={styles.page}>
         {agencyLogo && <Image style={styles.logo} src={agencyLogo} />}
         <Text style={styles.title}>{templateName}</Text>
-        <Text style={styles.parties}>Between {agencyName} and {clientName}</Text>
+        <Text style={styles.parties}>{isProposal ? `Prepared for ${clientName} by ${agencyName}` : `Between ${agencyName} and ${clientName}`}</Text>
         {clauses.map((clause, i) => (
           <View key={`${i}-${clause.title}`} style={styles.clause}>
             <Text style={styles.clauseTitle}>{numbers[i] ? `${numbers[i]} ${clause.title}` : clause.title}</Text>
             <Text style={styles.clauseBody}>{clause.body}</Text>
           </View>
         ))}
-        {signatures.length > 0 && (
+        {!isProposal && signatures.length > 0 && (
           <View style={styles.clause}>
             <Text style={styles.clauseTitle}>{signatures.length === 1 ? "Signature" : "Signatures"}</Text>
             {signatures.map((s, i) => (
@@ -94,7 +99,7 @@ export function ContractPdfDocument({
             ))}
           </View>
         )}
-        {docusignAnchors && docusignAnchors.length > 0 && (
+        {!isProposal && docusignAnchors && docusignAnchors.length > 0 && (
           <View style={styles.docusignBlock}>
             <Text style={styles.clauseTitle}>Signatures</Text>
             {docusignAnchors.map((a) => (

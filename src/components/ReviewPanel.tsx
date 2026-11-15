@@ -111,17 +111,21 @@ function buildTimeline(params: {
     params.contractStatus === "sent" ||
     params.contractStatus === "partially_signed" ||
     params.contractStatus === "signed" ||
+    params.contractStatus === "not_signed" ||
     params.dealStatus === "sent" ||
     params.dealStatus === "signed";
   const isSigned = params.dealStatus === "signed";
+  // The rep marked it not signed: nobody is waiting on the client anymore.
+  const notSigned = params.contractStatus === "not_signed";
 
-  const sentKind: TimelineRow["kind"] = !hasBeenSent ? "upcoming" : isSigned ? "done" : "active";
+  const sentKind: TimelineRow["kind"] = !hasBeenSent ? "upcoming" : isSigned || notSigned ? "done" : "active";
   rows.push({
     id: "sent",
     kind: sentKind,
     title: params.clientName,
-    subtitle: sentKind === "upcoming" ? "up next" : sentKind === "active" ? "awaiting signature" : "sent",
+    subtitle: notSigned ? "not signed" : sentKind === "upcoming" ? "up next" : sentKind === "active" ? "awaiting signature" : "sent",
     time: hasBeenSent ? params.contractSentAt : null,
+    failed: notSigned,
   });
 
   rows.push({
@@ -454,6 +458,8 @@ export default function ReviewPanel({
         ? "Sent to client"
         : contractStatus === "expired"
           ? "Sign link expired"
+          : contractStatus === "not_signed"
+          ? "Not signed"
           : activeStep
           ? `With ${activeStep.assigneeName}`
           : mostRecentDecided?.status === "rejected"
@@ -462,7 +468,9 @@ export default function ReviewPanel({
   const phaseChip =
     dealStatus === "signed" || contractStatus === "sent"
       ? "chip-success"
-      : activeStep
+      : contractStatus === "not_signed"
+        ? "chip-danger"
+        : activeStep
         ? "chip-active"
         : mostRecentDecided?.status === "rejected"
           ? "chip-warn"

@@ -1,14 +1,17 @@
 import { prisma } from "@/lib/db";
 import { apiGuard, apiJson, apiError, parseIsoParam, readJsonObject } from "@/lib/api-auth";
 import { LEAD_API_SELECT, serializeLead } from "@/lib/api-serialize";
-import { parseLeadInput, prospectingOn } from "@/lib/api-leads";
+import { apiStagePipeline, parseLeadInput, prospectingOn } from "@/lib/api-leads";
 import { isLeadStage } from "@/lib/lead-stages";
+import { isPipelineStage, PIPELINE_STAGES } from "@/lib/pipeline-stages";
 import { dispatchLeadsCreated } from "@/lib/webhooks";
 
 const PAGE_SIZE = 50;
 const NOT_ON = "Leads aren't turned on for this workspace";
 
-// GET /api/v1/leads?stage=&ownerEmail=&externalId=&campaign=&updatedSince=&cursor=
+// GET /api/v1/leads?stage=&pipelineStage=&ownerEmail=&externalId=&campaign=&updatedSince=&cursor=
+// stage is the old name a lead's calls give it; pipelineStage is where it is
+// on the Leads list.
 export async function GET(req: Request) {
   const auth = await apiGuard(req);
   if (auth instanceof Response) return auth;
@@ -17,6 +20,8 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const stage = url.searchParams.get("stage");
   if (stage && !isLeadStage(stage)) return apiError(400, "stage must be one of new, contacted, interested, meeting, converted, lost");
+  const pipelineStage = url.searchParams.get("pipelineStage");
+  if (pipelineStage && !isPipelineStage(pipelineStage)) return apiError(400, `pipelineStage must be one of ${PIPELINE_STAGES.join(", ")}`);
   const ownerEmail = url.searchParams.get("ownerEmail")?.trim().toLowerCase() || null;
   const externalId = url.searchParams.get("externalId")?.trim() || null;
   const campaign = url.searchParams.get("campaign")?.trim() || null;
@@ -28,6 +33,7 @@ export async function GET(req: Request) {
     where: {
       workspaceId: auth.workspaceId,
       ...(stage ? { stage } : {}),
+      ...(pipelineStage ? { pipelineStage } : {}),
       ...(ownerEmail ? { owner: { email: { equals: ownerEmail, mode: "insensitive" } } } : {}),
       ...(externalId ? { externalId } : {}),
       ...(campaign ? { campaign: { equals: campaign, mode: "insensitive" } } : {}),
@@ -56,6 +62,9 @@ export async function POST(req: Request) {
   const parsed = await parseLeadInput(auth.workspaceId, body, { requireName: true });
   if ("error" in parsed) return apiError(400, parsed.error);
   const { data } = parsed;
+  // A new lead isn't a client yet: of the stages, only lost moves it (onto
+  // Inactive).
+  const pipeline = apiStagePipeline(null, data.stage);
 
   if (data.externalId) {
     const duplicate = await prisma.lead.findFirst({ where: { workspaceId: auth.workspaceId, externalId: data.externalId }, select: { id: true } });
@@ -75,7 +84,7 @@ export async function POST(req: Request) {
   let lead;
   try {
     lead = await prisma.lead.create({
-      data: { workspaceId: auth.workspaceId, source: "api", ...data, name: data.name as string },
+      data: { workspaceId: auth.workspaceId, source: "api", ...data, ...pipeline.data, name: data.name as string },
       select: LEAD_API_SELECT,
     });
   } catch (err) {

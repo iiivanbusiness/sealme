@@ -10,19 +10,34 @@ import { analyzeUploadedContract, saveUploadedTemplate, type ContractReview } fr
 
 const MAX_BYTES = 4 * 1024 * 1024;
 
-// While the model reads the contract, the message moves on so the wait
+// Which Templates list the upload goes to. The file is read the same way
+// either way; only the wording changes, and a proposal isn't signed in
+// SealMe.
+type Kind = "proposal" | "contract";
+
+// While the model reads the file, the message moves on so the wait
 // doesn't look stuck. [ms after the start, message]
-const STEPS: [number, string][] = [
-  [0, "Reading the contract…"],
-  [6_000, "Finding the client's name, fees and dates…"],
-  [16_000, "Checking every clause…"],
-  [30_000, "Almost done…"],
-  [60_000, "Still working. Long contracts can take up to 2 minutes."],
-];
+const STEPS: Record<Kind, [number, string][]> = {
+  contract: [
+    [0, "Reading the contract…"],
+    [6_000, "Finding the client's name, fees and dates…"],
+    [16_000, "Checking every clause…"],
+    [30_000, "Almost done…"],
+    [60_000, "Still working. Long contracts can take up to 2 minutes."],
+  ],
+  proposal: [
+    [0, "Reading the proposal…"],
+    [6_000, "Finding the client's name, fees and dates…"],
+    [16_000, "Checking every section…"],
+    [30_000, "Almost done…"],
+    [60_000, "Still working. Long proposals can take up to 2 minutes."],
+  ],
+};
 
 // Picking a file is the only step: reading it and finding the fields start
 // right away, and the name is fixed up on the review screen if needed.
-export default function UploadContract() {
+export default function UploadContract({ kind }: { kind: Kind }) {
+  const steps = STEPS[kind];
   const [review, setReview] = useState<ContractReview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -35,9 +50,9 @@ export default function UploadContract() {
 
   useEffect(() => {
     if (!analyzing) return;
-    const timers = STEPS.slice(1).map(([ms], i) => setTimeout(() => setStep(i + 1), ms));
+    const timers = steps.slice(1).map(([ms], i) => setTimeout(() => setStep(i + 1), ms));
     return () => timers.forEach(clearTimeout);
-  }, [analyzing]);
+  }, [analyzing, steps]);
 
   async function analyze(picked: File) {
     if (!/\.(pdf|docx|txt)$/i.test(picked.name)) {
@@ -56,6 +71,7 @@ export default function UploadContract() {
     setAnalyzing(true);
     const data = new FormData();
     data.set("file", picked);
+    data.set("kind", kind);
     try {
       const result = await analyzeUploadedContract(data);
       if (id !== run.current) return;
@@ -63,7 +79,7 @@ export default function UploadContract() {
       else setError(result.error);
     } catch {
       if (id !== run.current) return;
-      setError("We lost the connection while reading your contract. Check your internet and try again.");
+      setError(`We lost the connection while reading your ${kind}. Check your internet and try again.`);
     } finally {
       if (id === run.current) setAnalyzing(false);
     }
@@ -82,13 +98,13 @@ export default function UploadContract() {
     setAnalyzing(false);
   }
 
-  const live = <div className="sr-only" aria-live="polite">{analyzing ? STEPS[step][1] : ""}</div>;
+  const live = <div className="sr-only" aria-live="polite">{analyzing ? steps[step][1] : ""}</div>;
 
   if (review) {
     return (
       <>
         {live}
-        <Review review={review} onRestart={restart} onRetry={file ? () => void analyze(file) : undefined} />
+        <Review kind={kind} review={review} onRestart={restart} onRetry={file ? () => void analyze(file) : undefined} />
       </>
     );
   }
@@ -97,14 +113,14 @@ export default function UploadContract() {
     return (
       <>
         {live}
-        <Intro />
+        <Intro kind={kind} />
         <div className="card flex max-w-[560px] items-start gap-4 p-6">
           <Spinner />
           <div className="min-w-0 flex-1">
             <div className="truncate text-[12.5px]" style={{ color: "var(--ink-muted)" }} title={file?.name}>{file?.name}</div>
-            <div className="mt-1 text-[15px] font-medium">{STEPS[step][1]}</div>
+            <div className="mt-1 text-[15px] font-medium">{steps[step][1]}</div>
             <div className="mt-1 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-              SealMe is finding the parts of your contract that change for each client. This usually takes under a minute.
+              SealMe is finding the parts of your {kind} that change for each client. This usually takes under a minute.
             </div>
             <button type="button" onClick={cancel} className="btn btn-ghost btn-sm mt-3" style={{ padding: "4px 8px", marginLeft: -8 }}>
               Cancel
@@ -118,7 +134,7 @@ export default function UploadContract() {
   return (
     <>
       {live}
-      <Intro />
+      <Intro kind={kind} />
       <div className="card flex max-w-[560px] flex-col gap-3 p-4 md:p-5">
         <label
           onDragOver={(e) => {
@@ -147,11 +163,11 @@ export default function UploadContract() {
             }}
           />
           <span className="text-[15px] font-medium">
-            <span className="hidden md:inline">Drop your contract here</span>
-            <span className="md:hidden">Add your contract</span>
+            <span className="hidden md:inline">Drop your {kind} here</span>
+            <span className="md:hidden">Add your {kind}</span>
           </span>
           <span className="max-w-[400px] text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
-            PDF, Word (.docx) or text file, up to 4 MB. A blank template or a contract you already used with a client.
+            PDF, Word (.docx) or text file, up to 4 MB. {kind === "proposal" ? "A blank template or a proposal you already sent a client." : "A blank template or a contract you already used with a client."}
           </span>
           <span className="btn btn-primary btn-sm mt-1">Choose a file</span>
         </label>
@@ -227,7 +243,7 @@ function segmentOf(node: Node | null): { el: HTMLElement; clause: number; segmen
   return { el, clause, segment, lead };
 }
 
-function Review({ review, onRestart, onRetry }: { review: ContractReview; onRestart: () => void; onRetry?: () => void }) {
+function Review({ kind, review, onRestart, onRetry }: { kind: Kind; review: ContractReview; onRestart: () => void; onRetry?: () => void }) {
   const [clauses, setClauses] = useState<ReviewClause[]>(review.clauses);
   const [pick, setPick] = useState<Pick | null>(null);
   const [naming, setNaming] = useState(false);
@@ -239,6 +255,7 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
   }, [clauses]);
   const [removed, setRemoved] = useState<Set<string>>(() => new Set());
   // The file's own signature block is left out unless the user keeps it.
+  // A proposal's too: it isn't signed in SealMe.
   const [keepSignature, setKeepSignature] = useState(false);
   const [hover, setHover] = useState<string | null>(null);
   const [name, setName] = useState(review.name);
@@ -392,7 +409,7 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
     ? "Try again, or select the words that change for each client to make them fields, so SealMe knows what to fill in from the call."
     : total
       ? "Blue fields change for each client, and SealMe fills them in from the call. Tap one to remove it, or select other words to add one."
-      : "Every part of this contract looks the same for each client. Select words that should come from the call to make them fields, or save it as it is.";
+      : `Every part of this ${kind} looks the same for each client. Select words that should come from the call to make them fields, or save it as it is.`;
 
   return (
     <>
@@ -411,6 +428,7 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
         {/* First in the page so on a phone the list and Save come before a
             long contract; on a wide screen it sits to the right. */}
         <form action={saveAction} className="card flex flex-col gap-3 p-5 lg:sticky lg:top-6 lg:col-start-2 lg:row-start-1">
+          <input type="hidden" name="kind" value={kind} />
           <input type="hidden" name="fileName" value={review.fileName} />
           <input type="hidden" name="summary" value={review.summary ?? ""} />
           <input type="hidden" name="clausesJson" value={clausesJson} />
@@ -466,7 +484,9 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
               <button type="button" onClick={showSignature} className="min-w-0 flex-1 text-left">
                 <span className="block text-[13.5px] font-medium">Signature block</span>
                 <span className="block text-[12px]" style={{ color: "var(--ink-muted)" }}>
-                  {keepSignature ? "Your file's own, kept next to SealMe's" : "Your file's own is removed. SealMe adds its own."}
+                  {kind === "proposal"
+                    ? keepSignature ? "Your file's own, kept for the client to see" : "Your file's own is removed. Proposals aren't signed in SealMe."
+                    : keepSignature ? "Your file's own, kept next to SealMe's" : "Your file's own is removed. SealMe adds its own."}
                 </span>
               </button>
               <button type="button" onClick={toggleSignature} className="btn btn-ghost btn-sm shrink-0" style={{ padding: "4px 8px" }} aria-label={keepSignature ? "Remove your file's signature block" : "Keep your file's signature block"}>
@@ -479,7 +499,7 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
             <p className="text-[12px] leading-[1.5]" style={{ color: "var(--ink-muted)" }}>
               {review.dropped > 0
                 ? `${review.dropped} more ${review.dropped === 1 ? "place looked" : "places looked"} client-specific but couldn't be marked. Read through the text, and select anything we missed to make it a field.`
-                : "Missing one? Select its words in the contract to make it a field."}
+                : `Missing one? Select its words in the ${kind} to make it a field.`}
             </p>
           )}
 
@@ -492,7 +512,7 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
             <button type="button" onClick={onRestart} className="btn btn-ghost w-full justify-center">
               Upload a different file
             </button>
-            <Link href="/templates" className="py-1 text-center text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
+            <Link href={`/templates?kind=${kind}`} className="py-1 text-center text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
               Cancel
             </Link>
           </div>
@@ -554,7 +574,7 @@ function Review({ review, onRestart, onRetry }: { review: ContractReview; onRest
                 {!allSignature && titleEl}
                 {runs.map((run, r) =>
                   run.signature ? (
-                    <SignatureBlock key={r} first={run.first} kept={keepSignature} onToggle={toggleSignature} heading={allSignature && r === 0 ? titleEl : null}>
+                    <SignatureBlock key={r} kind={kind} first={run.first} kept={keepSignature} onToggle={toggleSignature} heading={allSignature && r === 0 ? titleEl : null}>
                       {run.items.map((item) => segment(item, !keepSignature))}
                     </SignatureBlock>
                   ) : (
@@ -628,7 +648,10 @@ function NameField({ words, others, suggestions, onAdd, onCancel }: {
 // The file's own signature block, shown where it sits. Removed, it's crossed
 // out with a way to keep it; kept, it reads like the rest of the contract.
 // Only the first piece of a block (it can run over two clauses) says so.
-function SignatureBlock({ first, kept, onToggle, heading, children }: {
+// SealMe adds its own signature section to a contract, but not to a
+// proposal, so a proposal's block is only there for the client to see.
+function SignatureBlock({ kind, first, kept, onToggle, heading, children }: {
+  kind: Kind;
   first: boolean;
   kept: boolean;
   onToggle: () => void;
@@ -643,7 +666,9 @@ function SignatureBlock({ first, kept, onToggle, heading, children }: {
           <div className="min-w-0 flex-1 basis-[220px]">
             <div className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{kept ? "Your file's signature block, kept" : "Your file's signature block, removed"}</div>
             <div className="mt-0.5 text-[12px] leading-[1.5]" style={{ color: "var(--ink-muted)" }}>
-              {kept ? "The contract will have this block and SealMe's own signature section." : "SealMe adds its own signature section when you send the contract, so this one would be a second."}
+              {kind === "proposal"
+                ? kept ? "The client sees this block. Proposals aren't signed in SealMe, so nobody signs it here." : "Proposals aren't signed in SealMe. Keep it if you want the client to see where they'd accept."
+                : kept ? "The contract will have this block and SealMe's own signature section." : "SealMe adds its own signature section when you send the contract, so this one would be a second."}
             </div>
           </div>
           <button type="button" onClick={onToggle} className="btn btn-secondary btn-sm shrink-0">
@@ -713,10 +738,10 @@ function FieldInText({ segment, label, removed, lit, onToggle, onHover }: {
   );
 }
 
-function Intro() {
+function Intro({ kind }: { kind: Kind }) {
   return (
     <div className="mb-6 max-w-[560px]">
-      <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Upload a contract</h1>
+      <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Upload a {kind}</h1>
       <div className="mt-1 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>
         SealMe finds the parts that change for each client, like names, fees and dates, and fills them in from your calls. You just confirm them.
       </div>

@@ -47,7 +47,7 @@ export default function SupportPage() {
           </Faq>
 
           <Faq question="How do I record a call?">
-            In the SealMe desktop app for Mac, click + Start a call on the Dashboard and choose Record locally. The first time, macOS asks for Microphone and
+            In the SealMe desktop app for Mac, click Start a call on the Dashboard (or Start call on a meeting), then Start recording. The first time, macOS asks for Microphone and
             Screen Recording permission. SealMe needs both to hear you and the other side of the call. If you declined earlier, turn them back on in System
             Settings under Privacy &amp; Security, then restart SealMe. You can also paste in a transcript from any call instead of recording.
           </Faq>

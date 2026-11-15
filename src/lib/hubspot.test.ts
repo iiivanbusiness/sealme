@@ -148,4 +148,33 @@ describe("Pushing a deal to HubSpot", () => {
     expect(reportError).toHaveBeenCalledOnce();
     expect(reportError.mock.calls[0][1]).toBe("HubSpot deal stage");
   });
+
+  const lifecycleWrites = () => calls.filter((c) => c.path === "/crm/v3/objects/contacts/HC1" && (c.body?.properties as Record<string, string>)?.lifecyclestage).map((c) => c.body?.properties);
+
+  it("makes the contact a customer when the deal is signed, and only then", async () => {
+    workspace.findUnique.mockResolvedValue({ hubspotEnabled: true, hubspotAccessToken: "pat", ...off });
+    await syncDealToHubspot("ws1", "d1");
+    expect(lifecycleWrites()).toEqual([{ lifecyclestage: "customer" }]);
+
+    calls.length = 0;
+    deal.findUnique.mockResolvedValue({ ...(await deal.findUnique()), status: "sent" });
+    await syncDealToHubspot("ws1", "d1");
+    expect(lifecycleWrites()).toEqual([]);
+  });
+
+  it("still pushes the deal when HubSpot won't move the contact's stage, and says so", async () => {
+    workspace.findUnique.mockResolvedValue({ hubspotEnabled: true, hubspotAccessToken: "pat", ...off });
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null;
+      calls.push({ method: init?.method ?? "GET", path: new URL(url).pathname, body });
+      if ((body?.properties as Record<string, string> | undefined)?.lifecyclestage) {
+        return new Response('{"status":"error","message":"lifecyclestage can\'t be set backwards"}', { status: 400 });
+      }
+      return new Response(JSON.stringify({ id: "HD1", properties: {} }), { status: 200 });
+    });
+    await syncDealToHubspot("ws1", "d1");
+    expect(dealWrites()).toEqual([{ dealname: "SEO retainer", amount: "5000" }]);
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(reportError.mock.calls[0][1]).toBe("HubSpot lifecycle stage");
+  });
 });

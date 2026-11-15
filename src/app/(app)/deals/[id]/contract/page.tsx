@@ -2,16 +2,22 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { contractExpired } from "@/lib/contract-status";
-import { readContractText } from "@/lib/contract-snapshot";
+import { liveContractText, readContractText, showsLiveTerms, snapshotDiffers } from "@/lib/contract-snapshot";
 import { clauseNumbers } from "@/lib/contract";
 import { docusignVoid } from "@/lib/docusign-sync";
 import { canSendContract } from "@/lib/review";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
+import { leadAccess } from "@/lib/lead-visibility";
 import DownloadContractButton from "@/components/DownloadContractButton";
 import AuditTrailButton from "@/components/AuditTrailButton";
 import LocalDateTime from "@/components/LocalDateTime";
+import ProposalActions from "@/components/ProposalActions";
+import MarkNotSignedButton from "@/components/MarkNotSignedButton";
+import RestoreFromTrashButton from "@/components/RestoreFromTrashButton";
+import { canMarkNotSigned } from "@/lib/deal-status";
+import { wentOut } from "@/lib/lead-pipeline";
 import { startRenewal, updateFieldValues } from "../actions";
 
 function daysUntil(date: Date): number {
@@ -54,20 +60,70 @@ export default async function ContractPage({
         },
       },
       workspace: true,
+      // A proposal's contract, once one was made from it, and the proposal
+      // a contract was made from.
+      derivedDeals: { where: { trashedAt: null, kind: { not: "proposal" } }, select: { id: true }, orderBy: { createdAt: "desc" }, take: 1 },
+      sourceDeal: { select: { id: true } },
+      lead: { select: { id: true, name: true } },
     },
   });
   if (!deal || !deal.contract) notFound();
+  // A proposal is only read: no signing, counter-signers, expiry, review or
+  // renewal, and its sidebar has the proposal's own actions.
+  const isProposal = deal.kind === "proposal";
+  const contractTemplates = isProposal
+    ? await prisma.contractTemplate.findMany({ where: { workspaceId, kind: { not: "proposal" } }, select: { id: true, name: true }, orderBy: { name: "asc" } })
+    : [];
 
   // While the contract is being worked on (draft, review, changes asked for,
   // a lapsed link) this previews what the next send carries; once it's out,
   // it shows exactly what the client got.
-  const agreement = await readContractText({ ...deal.contract, deal }, { asTeam: true });
+  // A proposal stays editable after it went out, so the team always sees its
+  // current terms, with a note when the client still has an earlier version.
+  const now = new Date();
+  const liveProposal = isProposal ? liveContractText({ template: deal.contract.template, deal }) : null;
+  const agreement = liveProposal ?? (await readContractText({ ...deal.contract, deal }, { asTeam: true, now }));
   if (!agreement) notFound();
+  const changedSinceSent = isProposal && deal.contract.status === "sent" && snapshotDiffers(deal.contract.snapshot, liveProposal);
+  // The subtitle says the client has this text only when they do. A proposal
+  // changed since it went out, or a contract being reworked for another send
+  // (readContractText then shows the live terms), shows newer terms.
+  const reworked = isProposal ? changedSinceSent : showsLiveTerms(deal.contract, now) && deal.contract.template != null;
+  const clientName = deal.client.name;
+  const subtitle = !wentOut(deal.contract)
+    ? isProposal
+      ? `Check it before it goes to ${clientName}`
+      : "Confirm the details before sending to your client"
+    : reworked
+      ? isProposal
+        ? `Your latest version. ${clientName} still has the one you sent`
+        : `Check it before it goes back to ${clientName}`
+      : isProposal
+        ? `What ${clientName} sees on their link`
+        : `Sent to ${clientName}`;
+  // Back to the lead only when this viewer can open it: a reviewer, or anyone
+  // on an unowned deal, can see the deal without seeing its lead.
+  const lead = deal.lead
+    ? await prisma.lead.findFirst({ where: { id: deal.lead.id, workspaceId, ...(await leadAccess(currentUser)).where }, select: { id: true, name: true } })
+    : null;
   const numbers = clauseNumbers(agreement.clauses);
   // The sign page stops taking signatures the moment expiresAt passes; the
   // daily cron only catches up on the status later, so both count here.
-  const expired = contractExpired(deal.contract);
+  const expired = !isProposal && contractExpired(deal.contract, now);
+  // The rep closed it by hand: nobody can sign it, and Send again reopens it.
+  // Contract rows keep no updatedAt, so the when comes from the audit log.
+  const notSigned = !isProposal && deal.contract.status === "not_signed";
+  const markedNotSigned = notSigned
+    ? await prisma.auditLog.findFirst({
+        where: { workspaceId, action: "contract.marked_not_signed", targetId: { in: [deal.contract.id, deal.id] } },
+        select: { createdAt: true },
+        orderBy: { createdAt: "desc" },
+      })
+    : null;
   const canResend = canSendContract(deal.contract);
+  // Nothing goes out from the trash (every send refuses it), so the page
+  // says so where Send would be, instead of a button that only fails.
+  const trashed = Boolean(deal.trashedAt);
   const voided = await docusignVoid({ id: deal.contract.id, dealId: deal.id, status: deal.contract.status, deliveryMethod: deal.contract.deliveryMethod }, workspaceId);
   const waitingOn = deal.contract.signers.filter((s) => s.status === "pending").map((s) => `${s.name} (${s.role})`).join(", ");
   // Which deal fields each clause pulls in (e.g. "Fees & Payment" -> {fee}),
@@ -86,18 +142,37 @@ export default async function ContractPage({
 
   return (
     <>
-    <Link href={`/deals/${deal.id}`} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
-      ← Deal
+    {/* Back to the person it's for, opened on the call it came from. Older
+        documents with no lead, or a lead this viewer can't open, go back to
+        their deal page. */}
+    <Link
+      href={lead ? `/leads/${lead.id}${deal.phoneCallId ? `?call=${deal.phoneCallId}` : ""}` : `/deals/${deal.id}`}
+      className="mb-3.5 inline-flex max-w-full items-center gap-1.5 truncate text-[13px] font-medium"
+      style={{ color: "var(--ink-muted)" }}
+    >
+      ← {lead ? lead.name : "Deal"}
     </Link>
 
     <div className="mb-5">
-      <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Contract review</h1>
+      <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>{isProposal ? "Proposal" : "Contract review"}</h1>
       <div className="mt-1 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>
-        Confirm the details before sending to your client
+        {subtitle}
       </div>
+      {!isProposal && deal.sourceDeal && (
+        <Link href={`/deals/${deal.sourceDeal.id}`} className="mt-1 inline-block text-[12.5px] font-medium" style={{ color: "var(--accent-blue)" }}>
+          Made from a proposal →
+        </Link>
+      )}
     </div>
 
-    {deal.contract.status === "signed" && (
+    {trashed && (
+      <div className="mb-[18px] flex flex-wrap items-center gap-3">
+        <div className="chip chip-danger whitespace-normal px-4 py-3 text-[13.5px]">
+          This {isProposal ? "proposal" : "contract"} is in the trash. Restore it to send it
+        </div>
+      </div>
+    )}
+    {!isProposal && deal.contract.status === "signed" && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className="chip chip-success px-4 py-3 text-[13.5px]">
           ✓ Signed by {deal.contract.signerName}{deal.contract.signedAt && <> on <LocalDateTime iso={deal.contract.signedAt.toISOString()} options={{ year: "numeric", month: "numeric", day: "numeric" }} /></>}
@@ -110,7 +185,7 @@ export default async function ContractPage({
         )}
       </div>
     )}
-    {deal.contract.status === "pending_approval" && (
+    {!isProposal && deal.contract.status === "pending_approval" && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className="chip chip-neutral px-4 py-3 text-[13.5px]">
           Waiting on review before this goes to {deal.client.name}
@@ -120,7 +195,7 @@ export default async function ContractPage({
         </Link>
       </div>
     )}
-    {deal.contract.status === "changes_requested" && (
+    {!isProposal && deal.contract.status === "changes_requested" && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className={`chip ${updated ? "chip-success" : "chip-warn"} px-4 py-3 text-[13.5px]`}>
           {updated
@@ -131,7 +206,7 @@ export default async function ContractPage({
         </div>
       </div>
     )}
-    {deal.contract.status === "partially_signed" && (
+    {!isProposal && deal.contract.status === "partially_signed" && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
         <div className="chip chip-warn whitespace-normal px-4 py-3 text-[13.5px]">
           ✓ Signed by {deal.contract.signerName}. Waiting on {waitingOn || "the other signers"}
@@ -145,10 +220,17 @@ export default async function ContractPage({
         </div>
       </div>
     )}
+    {notSigned && (
+      <div className="mb-[18px] flex flex-wrap items-center gap-3">
+        <div className="chip chip-danger whitespace-normal px-4 py-3 text-[13.5px]">
+          Marked as not signed{markedNotSigned && <> on <LocalDateTime iso={markedNotSigned.createdAt.toISOString()} options={{ year: "numeric", month: "numeric", day: "numeric" }} /></>}. Send it again if {deal.client.name} wants to go ahead
+        </div>
+      </div>
+    )}
     {deal.contract.status === "sent" && !expired && (
       <div className="mb-[18px] flex flex-wrap items-center gap-3">
-        <div className="chip chip-warn px-4 py-3 text-[13.5px]">
-          ✓ Sent to {deal.client.name}. Awaiting signature
+        <div className={`chip ${isProposal ? "chip-neutral" : "chip-warn"} px-4 py-3 text-[13.5px]`}>
+          ✓ Sent to {deal.client.name}{isProposal ? "" : ". Awaiting signature"}
         </div>
         {deal.contract.viewedAt && (
           <span className="text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
@@ -208,9 +290,33 @@ export default async function ContractPage({
           {agreement.templateName}
         </div>
         <div className="flex flex-col gap-2.5 p-5 pt-2">
+          {trashed ? (
+            <>
+              <div className="rounded-[10px] px-3 py-2.5 text-[12.5px]" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)", color: "var(--ink-muted)" }}>
+                In the trash. Restore it to send it.
+              </div>
+              <RestoreFromTrashButton dealId={deal.id} />
+              <DownloadContractButton contractId={deal.contract.id} kind={deal.kind} className="btn btn-secondary w-full justify-center" />
+            </>
+          ) : isProposal ? (
+            <ProposalActions
+              compact
+              dealId={deal.id}
+              contractId={deal.contract.id}
+              contractStatus={deal.contract.status}
+              ready={deal.status !== "processing" && deal.fields.every((f) => f.status !== "missing")}
+              notReadyHint="Fill in the missing details on the deal first."
+              viewedAt={deal.contract.viewedAt?.toISOString() ?? null}
+              derivedContractId={deal.derivedDeals[0]?.id ?? null}
+              contractTemplates={contractTemplates}
+              changedSinceSent={changedSinceSent}
+              createDisabled={deal.status === "processing"}
+            />
+          ) : (
+          <>
           {canResend ? (
             <Link href={`/deals/${deal.id}/send`} className="btn btn-primary w-full justify-center">
-              {deal.contract.status === "changes_requested" || expired ? "Send again" : "Send to client"}
+              {deal.contract.status === "changes_requested" || expired || notSigned ? "Send again" : "Send to client"}
             </Link>
           ) : deal.contract.status === "pending_approval" ? (
             <button disabled className="btn btn-primary w-full justify-center">
@@ -221,15 +327,19 @@ export default async function ContractPage({
               <button disabled className="btn btn-primary w-full justify-center">
                 {deal.contract.status === "signed" ? "Signed ✓" : deal.contract.status === "partially_signed" ? "Awaiting counter-signer" : "Sent ✓"}
               </button>
-              {/* A DocuSign contract is signed on DocuSign's own page, never this link. */}
-              {deal.contract.deliveryMethod === "sealme" && (
+              {/* A DocuSign contract is signed on DocuSign's own page, never this
+                  link, and one marked not signed can't be signed at all. */}
+              {deal.contract.deliveryMethod === "sealme" && !notSigned && (
                 <div className="rounded-[10px] px-3 py-2.5 text-[11.5px] break-all" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)", color: "var(--ink-muted)" }}>
                   {`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/sign/${deal.contract.id}`}
                 </div>
               )}
             </>
           )}
+          {canMarkNotSigned(deal.contract, deal.kind) && <MarkNotSignedButton dealId={deal.id} clientName={deal.client.name} />}
           <DownloadContractButton contractId={deal.contract.id} className="btn btn-secondary w-full justify-center" />
+          </>
+          )}
           {Boolean(currentUser.role?.canManageWorkspace) && (
             <AuditTrailButton dealId={deal.id} className="btn btn-secondary w-full justify-center" />
           )}
@@ -237,7 +347,7 @@ export default async function ContractPage({
       </aside>
     </div>
 
-    {deal.contract.status === "signed" && deal.contract.renewalDate && (
+    {!isProposal && deal.contract.status === "signed" && deal.contract.renewalDate && (
       <div className="card mt-[18px] max-w-[600px]">
         <div className="border-b px-5 py-4" style={{ borderColor: "var(--hairline)" }}>
           <h2 className="text-[15px] font-medium">Renewal</h2>

@@ -7,10 +7,13 @@ import { dispatchLeadsCreated } from "@/lib/webhooks";
 import { dispatchLeadsUpdated, leadChanges } from "@/lib/webhook-events";
 import { requireProspecting } from "@/lib/prospecting";
 import { normalizePhone } from "@/lib/phone";
-import { isLeadStage, LEAD_INTERESTS } from "@/lib/lead-stages";
+import { LEAD_INTERESTS } from "@/lib/lead-stages";
 import { leadAccess } from "@/lib/lead-visibility";
 import { currentUserWithRole } from "@/lib/permissions";
 import { logAudit } from "@/lib/audit";
+import { INACTIVE_STAGES, refreshLeadPipeline, wentOutWhere } from "@/lib/lead-pipeline";
+import { after } from "next/server";
+import { dropRecording } from "@/lib/call-inbox";
 
 function text(formData: FormData, key: string): string | null {
   const value = String(formData.get(key) ?? "").trim();
@@ -34,11 +37,13 @@ function parseDay(value: string | null): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+class FieldError extends Error {}
+
 function leadFieldsFrom(formData: FormData) {
   const name = text(formData, "name");
-  if (!name) throw new Error("Add the lead's name");
+  if (!name) throw new FieldError("Add the lead's name");
   const email = text(formData, "email")?.toLowerCase() ?? null;
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("That email doesn't look right");
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new FieldError("That email doesn't look right");
   const rawPhone = text(formData, "phone");
   const interest = text(formData, "interest");
   const decisionMaker = text(formData, "isDecisionMaker");
@@ -82,7 +87,15 @@ export async function updateLead(leadId: string, formData: FormData) {
   const existing = await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, ...access.where } });
   if (!existing) throw new Error("Lead not found");
 
-  const fields = leadFieldsFrom(formData);
+  let fields: ReturnType<typeof leadFieldsFrom>;
+  try {
+    fields = leadFieldsFrom(formData);
+  } catch (err) {
+    // Back to the form with what's wrong, instead of an error page. The form
+    // checks the same things first, so this is rare.
+    if (err instanceof FieldError) redirect(`/leads/${leadId}?edit=1&error=${encodeURIComponent(err.message)}`);
+    throw err;
+  }
   const ownerId = access.canAssign ? await resolveOwner(workspace.id, text(formData, "ownerId")) : existing.ownerId;
   await prisma.lead.update({ where: { id: leadId }, data: { ...fields, ownerId } });
   await dispatchLeadsUpdated(workspace.id, [leadChanges(leadId, existing, { ...fields, ownerId })]);
@@ -91,59 +104,119 @@ export async function updateLead(leadId: string, formData: FormData) {
   redirect(`/leads/${leadId}?saved=1`);
 }
 
-export async function setLeadStage(leadId: string, stage: string) {
-  const workspace = await requireProspecting();
-  const access = await leadAccess();
-  if (!isLeadStage(stage)) throw new Error("Unknown stage");
-  const before = await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, ...access.where }, select: { stage: true } });
-  if (!before) throw new Error("Lead not found");
-  // convertedAt records the first time it became a customer (for /team);
-  // moving it back out of "converted" clears it.
-  const result = await prisma.lead.updateMany({
-    where: { id: leadId, workspaceId: workspace.id, ...access.where },
-    data: stage === "converted" ? { stage } : { stage, convertedAt: null },
-  });
-  if (result.count === 0) throw new Error("Lead not found");
-  if (stage === "converted") {
-    await prisma.lead.updateMany({ where: { id: leadId, workspaceId: workspace.id, convertedAt: null }, data: { convertedAt: new Date() } });
-  }
-  await dispatchLeadsUpdated(workspace.id, [leadChanges(leadId, before, { stage })]);
-  revalidatePath("/leads");
-  revalidatePath(`/leads/${leadId}`);
-}
-
-// Managers only. Tasks go with the lead (cascade); its call transcripts are
-// deleted too, unless the lead became a deal, where the calls are part of
-// the deal's history now. A converted lead's client and deal stay.
-export async function deleteLeads(leadIds: string[]): Promise<{ deleted: number }> {
+// Managers only. Tasks go with the lead (cascade), and so do its calls. Its
+// proposal and contract drafts go to the trash. A client is kept, and so is
+// a lead whose proposal or contract ever went out to the client (that's a
+// record of what they got): mark it lost instead. So is one with a call
+// still going or being written up. keptClients: how many of the kept are
+// clients, which can't be marked lost either.
+export async function deleteLeads(leadIds: string[]): Promise<{ deleted: number; kept: number; keptClients: number }> {
   const workspace = await requireProspecting();
   const access = await leadAccess();
   if (!access.canAssign) throw new Error("Only managers can delete leads");
-  if (!Array.isArray(leadIds) || leadIds.length === 0) return { deleted: 0 };
+  if (!Array.isArray(leadIds) || leadIds.length === 0) return { deleted: 0, kept: 0, keptClients: 0 };
   if (leadIds.length > 1000) throw new Error("Delete up to 1,000 leads at a time");
 
   const leads = await prisma.lead.findMany({
     where: { workspaceId: workspace.id, id: { in: leadIds.map(String) }, AND: [access.where] },
-    select: { id: true },
+    select: {
+      id: true,
+      // A client brought in from Settings has a signed contract that never
+      // went out through SealMe (no sentAt): still a client, still kept.
+      isClient: true,
+      deals: { where: { contract: wentOutWhere }, select: { id: true }, take: 1 },
+      phoneCalls: { where: { status: { in: ["dialing", "recording", "processing"] } }, select: { id: true }, take: 1 },
+    },
   });
-  const ids = leads.map((l) => l.id);
-  if (ids.length === 0) return { deleted: 0 };
+  const ids = leads.filter((l) => !l.isClient && l.deals.length === 0 && l.phoneCalls.length === 0).map((l) => l.id);
+  const kept = leads.length - ids.length;
+  const keptClients = leads.filter((l) => l.isClient).length;
+  if (ids.length === 0) return { deleted: 0, kept, keptClients };
 
   const user = await currentUserWithRole();
+  const [recordings, contracts] = await Promise.all([
+    prisma.phoneCall.findMany({ where: { leadId: { in: ids }, telnyxRecordingId: { not: null } }, select: { id: true, telnyxRecordingId: true } }),
+    prisma.contract.findMany({ where: { deal: { workspaceId: workspace.id, leadId: { in: ids }, trashedAt: null } }, select: { id: true } }),
+  ]);
+  const contractIds = contracts.map((c) => c.id);
   await prisma.$transaction([
-    prisma.phoneCall.deleteMany({ where: { leadId: { in: ids }, dealId: null } }),
+    prisma.deal.updateMany({ where: { workspaceId: workspace.id, leadId: { in: ids }, trashedAt: null }, data: { trashedAt: new Date() } }),
+    // A draft waiting on a reviewer stops waiting: nothing is approved and
+    // sent from the trash.
+    prisma.reviewStep.deleteMany({ where: { contractId: { in: contractIds }, status: "pending" } }),
+    prisma.contract.updateMany({ where: { id: { in: contractIds }, status: "pending_approval" }, data: { status: "draft" } }),
+    prisma.phoneCall.deleteMany({ where: { leadId: { in: ids } } }),
     prisma.lead.deleteMany({ where: { id: { in: ids } } }),
   ]);
-  await logAudit({ workspaceId: workspace.id, actorEmail: user.email, action: "lead.deleted", targetType: "lead", targetId: ids.length === 1 ? ids[0] : undefined, metadata: { count: ids.length } });
+  // Recordings still kept at Telnyx go with their calls.
+  if (recordings.length) after(async () => {
+    for (const r of recordings) await dropRecording(r.telnyxRecordingId, r.id);
+  });
+  await logAudit({ workspaceId: workspace.id, actorEmail: user.email, action: "lead.deleted", targetType: "lead", targetId: ids.length === 1 ? ids[0] : undefined, metadata: { count: ids.length, kept } });
 
   revalidatePath("/leads");
   revalidatePath("/dashboard");
   revalidatePath("/team");
-  return { deleted: ids.length };
+  return { deleted: ids.length, kept, keptClients };
 }
 
 // The "Delete lead" button on a lead's own page.
-export async function deleteLead(leadId: string): Promise<void> {
-  await deleteLeads([leadId]);
-  redirect("/leads?deleted=1");
+export async function deleteLead(leadId: string): Promise<{ error?: string }> {
+  const { deleted, keptClients } = await deleteLeads([leadId]);
+  if (!deleted) {
+    const busy = await prisma.phoneCall.count({ where: { leadId, status: { in: ["dialing", "recording", "processing"] } } });
+    if (busy) return { error: "A call on this lead is still going or being written up. Try again once it's done." };
+    if (keptClients) return { error: "This lead is a client: they signed a contract, so it can't be deleted." };
+    return { error: "This lead's proposal or contract went out to the client, so it can't be deleted. Mark it as lost instead." };
+  }
+  // The page sends them back to the list (a redirect here would land in the
+  // caller's catch).
+  return {};
+}
+
+// "Mark as lost" in a lead's menu: off the Active list until someone
+// reactivates it or a new call comes in.
+export async function markLeadLost(leadId: string): Promise<void> {
+  const workspace = await requireProspecting();
+  const access = await leadAccess();
+  const before = await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, ...access.where }, select: { stage: true, isClient: true } });
+  if (!before) throw new Error("Lead not found");
+  if (before.isClient) throw new Error("A client can't be marked lost");
+  // Not over a signature that landed in the meantime.
+  const { count } = await prisma.lead.updateMany({ where: { id: leadId, isClient: false }, data: { pipelineStage: "lost", stage: "lost", convertedAt: null } });
+  if (count === 0) throw new Error("A client can't be marked lost");
+  await dispatchLeadsUpdated(workspace.id, [leadChanges(leadId, before, { stage: "lost" })]);
+  revalidatePath("/leads");
+  revalidatePath(`/leads/${leadId}`);
+}
+
+// "Not now" in a lead's menu: set aside for later (on Inactive), without
+// calling it lost. A new call or Reactivate brings it back.
+export async function markLeadNotNow(leadId: string): Promise<void> {
+  const workspace = await requireProspecting();
+  const access = await leadAccess();
+  const before = await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, ...access.where }, select: { id: true } });
+  if (!before) throw new Error("Lead not found");
+  const { count } = await prisma.lead.updateMany({ where: { id: leadId, isClient: false }, data: { pipelineStage: "not_now" } });
+  if (count === 0) throw new Error("A client can't be set aside");
+  revalidatePath("/leads");
+  revalidatePath(`/leads/${leadId}`);
+}
+
+// "Reactivate": back on the Active list, from lost, not now, a contract that
+// went unsigned, or a month with nothing going on.
+export async function reactivateLead(leadId: string): Promise<void> {
+  const workspace = await requireProspecting();
+  const access = await leadAccess();
+  const before = await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, ...access.where }, select: { stage: true, pipelineStage: true } });
+  if (!before) throw new Error("Lead not found");
+  const stage = before.stage === "lost" ? "contacted" : before.stage;
+  await prisma.lead.update({
+    where: { id: leadId },
+    data: { lastActivityAt: new Date(), stage, ...(INACTIVE_STAGES.includes(before.pipelineStage) ? { pipelineStage: "new" } : {}) },
+  });
+  await refreshLeadPipeline(leadId);
+  if (stage !== before.stage) await dispatchLeadsUpdated(workspace.id, [leadChanges(leadId, before, { stage })]);
+  revalidatePath("/leads");
+  revalidatePath(`/leads/${leadId}`);
 }

@@ -30,3 +30,27 @@ export function startOfDayInZone(now: Date, tz: string): Date {
   const offset = wallClockAsUtc - Math.floor(now.getTime() / 1000) * 1000;
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day) - offset);
 }
+
+// How far a timezone's clock is from UTC at an instant, in ms.
+function zoneOffset(at: number, tz: string): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" })
+      .formatToParts(new Date(at))
+      .map((p) => [p.type, Number(p.value)]),
+  );
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - Math.floor(at / 1000) * 1000;
+}
+
+// The instant a time on the viewer's clock stands for: a meeting typed in
+// as 2:00 PM on Nov 14 is 2:00 PM where the viewer is, not on the server's
+// clock (UTC on Vercel). day is YYYY-MM-DD, time HH:mm. The offset is
+// checked again at the answer, so a day the clocks change still comes out
+// right. An unreadable day or time gives an invalid Date.
+export function instantInZone(day: string, time: string, tz: string): Date {
+  const [y, m, d] = day.split("-").map(Number);
+  const [hh, mm] = time.split(":").map(Number);
+  const wall = Date.UTC(y, m - 1, d, hh, mm);
+  if (Number.isNaN(wall)) return new Date(NaN);
+  const guess = wall - zoneOffset(wall, tz);
+  return new Date(wall - zoneOffset(guess, tz));
+}

@@ -1,11 +1,14 @@
 import { prisma } from "@/lib/db";
 import { normalizePhone } from "@/lib/phone";
 import { isLeadStage, LEAD_INTERESTS } from "@/lib/lead-stages";
+import { INACTIVE_STAGES } from "@/lib/lead-pipeline";
 
 // Leads are part of Prospecting, which is turned on per workspace.
 export async function prospectingOn(workspaceId: string): Promise<boolean> {
-  const ws = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { prospectingEnabled: true } });
-  return Boolean(ws?.prospectingEnabled);
+  // Every workspace has leads now (see requireProspecting); the 403 these
+  // routes still check for can't happen anymore.
+  void workspaceId;
+  return true;
 }
 
 type LeadInput = {
@@ -96,4 +99,46 @@ export async function parseLeadInput(workspaceId: string, body: Record<string, u
     }
   }
   return { data };
+}
+
+// What a stage sent through the API does to where the lead is on the Leads
+// list (pipelineStage). Written with the lead's other fields; notClient: only
+// while the lead isn't a client, so a signature landing in the meantime wins;
+// refresh: work the real stage out after the write, since a proposal or
+// contract may still be out; dropStage: the lead is a client, so the stage
+// sent is left out of the write (withoutStage).
+export type StagePipeline = { data: { pipelineStage?: string; lastActivityAt?: Date }; notClient: boolean; refresh: boolean; dropStage?: true };
+
+// A client's stage is converted for good: a signed contract made it one. A
+// stage sent for a client is left out rather than refused, so a sync that
+// sends a stage for every lead each night still gets its other changes in.
+// What the stage brings along goes too (when it was converted, where the
+// lead is on the list).
+export function withoutStage<T extends { stage?: string; convertedAt?: Date | null; pipelineStage?: string; lastActivityAt?: Date }>(data: T): T {
+  const rest = { ...data };
+  delete rest.stage;
+  delete rest.convertedAt;
+  delete rest.pipelineStage;
+  delete rest.lastActivityAt;
+  return rest;
+}
+
+// The old stage names keep working and move the lead the way the app does:
+// lost takes it off Active (Mark as lost), and new, contacted, interested or
+// meeting bring a lead that's set aside back (Reactivate). converted is only
+// recorded: a lead becomes a client when a contract on it is signed.
+// existing is the lead as it is, null for a new one.
+export function apiStagePipeline(
+  existing: { stage: string; isClient: boolean; pipelineStage: string } | null,
+  stage: string | undefined,
+  now = new Date(),
+): StagePipeline {
+  if (stage === undefined || stage === "converted") return { data: {}, notClient: false, refresh: false };
+  if (existing?.isClient) return { data: {}, notClient: false, refresh: false, dropStage: true };
+  if (stage === "lost") return { data: { pipelineStage: "lost" }, notClient: existing !== null, refresh: false };
+  // Sending the stage it already has changes nothing, so a sync that sends
+  // every lead each night doesn't undo a rep's Not now or a contract that
+  // went unsigned. Back on Active the way Reactivate does it: active today.
+  const revive = existing !== null && INACTIVE_STAGES.includes(existing.pipelineStage) && existing.stage !== stage;
+  return { data: revive ? { pipelineStage: "new", lastActivityAt: now } : {}, notClient: existing !== null, refresh: revive };
 }

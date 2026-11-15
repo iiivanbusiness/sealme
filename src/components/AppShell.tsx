@@ -26,15 +26,10 @@ import { getUnreadNotifications } from "@/app/(app)/notifications/actions";
 
 const NAV_ICONS: Record<string, () => React.ReactNode> = {
   "/dashboard": DashboardIcon,
-  "/deals": DealsIcon,
-  "/today": TodayIcon,
   "/leads": LeadsIcon,
-  "/calls": CallsIcon,
-  "/notes": NotesIcon,
   "/team": TeamIcon,
   "/calendar": CalendarIcon,
   "/analytics": AnalyticsIcon,
-  "/clients": ClientsIcon,
   "/templates": TemplatesIcon,
   "/feedback": FeedbackIcon,
   "/settings": SettingsIcon,
@@ -55,14 +50,20 @@ export default async function AppShell({ children }: { children: React.ReactNode
   const currentUser = session?.user?.email
     ? await prisma.user.findUnique({ where: { email: session.user.email }, select: { aiDisclosureAcknowledgedAt: true, timezone: true, role: { select: { canManageTeam: true } } } })
     : null;
-  const { unreadCount, items: notificationItems } = await getUnreadNotifications();
-  const groups = navGroupsFor({ prospecting: workspace.prospectingEnabled, admin: isAdmin, manager: Boolean(currentUser?.role?.canManageTeam), phone });
+  const manager = Boolean(currentUser?.role?.canManageTeam);
+  // How many people are in the workspace, for whether Team is in the menu.
+  // Only someone who'd see it needs the count.
+  const [{ unreadCount, items: notificationItems }, members] = await Promise.all([
+    getUnreadNotifications(),
+    manager ? prisma.user.count({ where: { workspaceId: workspace.id, deactivatedAt: null } }) : 0,
+  ]);
+  const groups = navGroupsFor({ admin: isAdmin, manager, members, phone });
   const withIcon = (item: { href: string; label: string }) => {
     const Icon = NAV_ICONS[item.href];
     return { href: item.href, label: item.label, icon: <Icon /> };
   };
   const navGroups = groups.map((g) => ({ label: g.label, collapsible: g.collapsible, items: g.items.map(withIcon) }));
-  const mobileItems = mobilePrimaryItems(groups, { prospecting: workspace.prospectingEnabled, phone }).map(withIcon);
+  const mobileItems = mobilePrimaryItems(groups, { phone }).map(withIcon);
 
   const navLinks = <SidebarNav groups={navGroups} />;
 
@@ -145,7 +146,7 @@ export default async function AppShell({ children }: { children: React.ReactNode
       <TimezoneSync stored={currentUser?.timezone ?? null} />
 
       {/* Over the content on a phone screen; the app has Feedback in the menu. */}
-      {!phone && <FaqChatWidget prospecting={workspace.prospectingEnabled} />}
+      {!phone && <FaqChatWidget prospecting />}
 
       <MobileNav
         items={mobileItems}
@@ -178,16 +179,6 @@ function DashboardIcon() {
   );
 }
 
-function DealsIcon() {
-  return (
-    <svg {...iconProps()}>
-      <rect x="3" y="3.5" width="14" height="4.2" rx="1.2" />
-      <rect x="3" y="9.2" width="14" height="4.2" rx="1.2" />
-      <rect x="3" y="14.9" width="9" height="2.6" rx="1.2" />
-    </svg>
-  );
-}
-
 function CalendarIcon() {
   return (
     <svg {...iconProps()}>
@@ -202,34 +193,6 @@ function AnalyticsIcon() {
     <svg {...iconProps()}>
       <path d="M4 16V9M10 16V4M16 16v-6.5" />
       <path d="M2.5 16h15" />
-    </svg>
-  );
-}
-
-function TodayIcon() {
-  return (
-    <svg {...iconProps()}>
-      <circle cx="10" cy="10" r="3.2" />
-      <path d="M10 2.6v1.8M10 15.6v1.8M2.6 10h1.8M15.6 10h1.8M4.8 4.8l1.3 1.3M13.9 13.9l1.3 1.3M4.8 15.2l1.3-1.3M13.9 6.1l1.3-1.3" />
-    </svg>
-  );
-}
-
-function NotesIcon() {
-  return (
-    <svg {...iconProps()}>
-      <path d="M5.5 2.8h6.2l3.8 3.8v9.6c0 .6-.4 1-1 1H5.5c-.6 0-1-.4-1-1V3.8c0-.6.4-1 1-1Z" />
-      <path d="M11.5 2.9v3.9h3.9" />
-      <path d="M7.4 10.3h5.2M7.4 13.3h3.6" />
-    </svg>
-  );
-}
-
-function CallsIcon() {
-  return (
-    <svg {...iconProps()}>
-      <path d="M6.6 3.2 4.4 3.6c-.9.2-1.5 1-1.4 1.9.6 5.3 4.8 9.5 10.1 10.1.9.1 1.7-.5 1.9-1.4l.4-2.2c.1-.6-.2-1.2-.8-1.5l-2.3-1c-.5-.2-1.1-.1-1.5.3l-.9.9c-1.6-.8-2.9-2.1-3.7-3.7l.9-.9c.4-.4.5-1 .3-1.5l-1-2.3c-.3-.6-.9-.9-1.5-.8Z" />
-      <path d="M12.6 3.4c2.1.4 3.6 1.9 4 4" />
     </svg>
   );
 }
@@ -252,17 +215,6 @@ function LeadsIcon() {
       <circle cx="8" cy="6.6" r="2.7" />
       <path d="M3 16.2c.5-3 2.6-4.6 5-4.6 1.2 0 2.3.4 3.1 1.1" />
       <path d="M14.6 11.2v6M11.6 14.2h6" />
-    </svg>
-  );
-}
-
-function ClientsIcon() {
-  return (
-    <svg {...iconProps()}>
-      <circle cx="7.2" cy="6.8" r="2.6" />
-      <circle cx="13.4" cy="8" r="2.1" />
-      <path d="M2.6 16.2c.5-2.8 2.4-4.4 4.6-4.4s4.1 1.6 4.6 4.4" />
-      <path d="M12.3 12.4c1.7.2 3 1.6 3.4 3.8" />
     </svg>
   );
 }

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
@@ -49,6 +49,15 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
   // so a direct link can't be used to peek at someone else's client.
   if (!client || (!canViewAll && client.deals.length === 0)) notFound();
 
+  // Every client is someone's lead now: their calls, proposals and contracts
+  // are all on the lead. Old links (CRM, API, emails) go there.
+  const lead = await prisma.lead.findFirst({
+    where: { workspaceId, OR: [{ convertedClientId: id }, { deals: { some: { clientId: id } } }] },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (lead) redirect(`/leads/${lead.id}`);
+
   const risk = computeClientRisk(client);
   const allNotes = client.deals
     .flatMap((deal) => deal.notes.map((note) => ({ ...note, dealService: deal.service, dealId: deal.id })))
@@ -60,7 +69,7 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
   return (
     <>
     <div className="mb-2">
-      <Link href="/clients" className="text-[12.5px] font-medium" style={{ color: "var(--ink-muted)" }}>
+      <Link href="/leads?tab=clients" className="text-[12.5px] font-medium" style={{ color: "var(--ink-muted)" }}>
         ← Clients
       </Link>
     </div>
@@ -113,8 +122,8 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
                     <div className="mt-0.5 text-[12px]" style={{ color: "var(--ink-muted)" }}>{timeAgo(deal.updatedAt)}</div>
                   </div>
                   <span className="font-mono-tab flex-none text-[13px] font-medium">{deal.feeDisplay || "—"}</span>
-                  <span className={`chip flex-none ${dealStatusChip(deal.status, expiredDealIds.has(deal.id))}`} style={{ fontSize: 11 }}>
-                    {dealStatusLabel(deal.status, expiredDealIds.has(deal.id))}
+                  <span className={`chip flex-none ${dealStatusChip(deal.status, expiredDealIds.has(deal.id), deal.kind, deal.contract?.status)}`} style={{ fontSize: 11 }}>
+                    {dealStatusLabel(deal.status, expiredDealIds.has(deal.id), deal.kind, deal.contract?.status)}
                   </span>
                 </Link>
               ))

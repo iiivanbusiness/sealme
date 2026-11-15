@@ -1,5 +1,7 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { auth } from "@/lib/auth";
+import { proposalPath } from "@/lib/document-links";
 import { dispatchWebhookEvent } from "@/lib/webhooks";
 import { readContractText } from "@/lib/contract-snapshot";
 import { clauseNumbers } from "@/lib/contract";
@@ -19,17 +21,26 @@ export default async function SignPage({ params, searchParams }: { params: Promi
     include: { deal: { include: { client: true, fields: true, workspace: true } }, template: true, signers: { orderBy: { order: "asc" } } },
   });
   if (!contract) notFound();
+  // A proposal is read on its own page, which has nothing to sign and keeps
+  // its own record of the client opening it.
+  if (contract.deal.kind === "proposal") redirect(proposalPath(contract.id));
   // What the client was sent, never the deal's terms or template as they are now.
   const agreement = await readContractText(contract);
   if (!agreement) notFound();
   const numbers = clauseNumbers(agreement.clauses);
 
-  if (!contract.viewedAt) {
-    // updateMany so two tabs opening at once announce it only once.
-    const viewedAt = new Date();
-    const first = await prisma.contract.updateMany({ where: { id: contract.id, viewedAt: null }, data: { viewedAt } });
-    if (first.count === 1) {
-      await dispatchWebhookEvent(contract.deal.workspaceId, "contract.viewed", { dealId: contract.dealId, contractId: contract.id, clientName: contract.deal.client.name, viewedAt: viewedAt.toISOString() });
+  // Only the client's open counts: the rep checking their own link, or a
+  // version that isn't out with the client, doesn't make it Viewed (the
+  // proposal page goes by the same rule). updateMany so two tabs opening at
+  // once announce it only once.
+  if (!contract.viewedAt && (contract.status === "sent" || contract.status === "partially_signed")) {
+    const session = await auth();
+    if (session?.user?.workspaceId !== contract.deal.workspaceId) {
+      const viewedAt = new Date();
+      const first = await prisma.contract.updateMany({ where: { id: contract.id, viewedAt: null }, data: { viewedAt } });
+      if (first.count === 1) {
+        await dispatchWebhookEvent(contract.deal.workspaceId, "contract.viewed", { dealId: contract.dealId, contractId: contract.id, clientName: contract.deal.client.name, viewedAt: viewedAt.toISOString() });
+      }
     }
   }
 
@@ -54,7 +65,7 @@ export default async function SignPage({ params, searchParams }: { params: Promi
                 className="flex h-[30px] w-[30px] items-center justify-center rounded-[9px] font-display text-[14px] font-semibold"
                 style={{ background: "var(--primary)", color: "var(--on-primary)" }}
               >
-                S
+                {contract.deal.workspace.name.trim().charAt(0).toUpperCase() || "S"}
               </div>
               <span className="text-[14px] font-medium">{contract.deal.workspace.name}</span>
             </>
@@ -134,7 +145,9 @@ export default async function SignPage({ params, searchParams }: { params: Promi
           </div>
         ) : null}
 
-        <DownloadContractButton contractId={contract.id} className="btn btn-secondary mt-5 w-full justify-center" />
+        {/* The PDF route gives nobody outside the team a document in the
+            trash, so the button would only fail. */}
+        {!contract.deal.trashedAt && <DownloadContractButton contractId={contract.id} className="btn btn-secondary mt-5 w-full justify-center" />}
       </main>
     </div>
   );

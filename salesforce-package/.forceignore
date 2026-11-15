@@ -1,0 +1,3 @@
+# Global OAuth settings hold the consumer secret and must never be packaged or committed.
+**/extlClntAppGlobalOauthSets/**
+**/extlClntAppOauthPolicies/**

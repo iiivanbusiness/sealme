@@ -48,7 +48,8 @@ export async function startLeadCall(leadId: string, input: { mode?: string; temp
 
   let templateId: string | null = null;
   if (mode === "sales" && input.templateId) {
-    const template = await prisma.contractTemplate.findFirst({ where: { id: input.templateId, workspaceId: workspace.id }, select: { id: true } });
+    // A sales call's template is the contract it makes.
+    const template = await prisma.contractTemplate.findFirst({ where: { id: input.templateId, workspaceId: workspace.id, kind: { not: "proposal" } }, select: { id: true } });
     if (!template) return { kind: "error", error: "That template isn't in this workspace" };
     templateId = template.id;
   }

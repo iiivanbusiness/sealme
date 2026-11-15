@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { placeFields, promptDocument } from "./detect-fields";
+import { describe, expect, it, vi } from "vitest";
+
+const create = vi.fn();
+vi.mock("@anthropic-ai/sdk", () => ({ default: class { messages = { create }; } }));
+
+import { detectFields, placeFields, promptDocument } from "./detect-fields";
 import { buildClauses } from "./template-fields";
 
 const clauses = [
@@ -208,5 +212,29 @@ describe("clause numbers through the review screen", () => {
       { title: "Fees", body: "Client pays {fee}.", label: "2.03" },
       { title: "Term", body: "One year." },
     ]);
+  });
+});
+
+describe("asking for an uploaded proposal's fields", () => {
+  const answer = { model: "claude-sonnet-5", usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "tool_use", content: [{ type: "tool_use", input: { title: "Web Proposal", summary: "A website.", fields: [] } }] };
+  const file = [{ title: "Next steps", body: "Once you approve, we send the contract to sign." }];
+
+  it("says proposal around the file, and leaves the file's own words alone", async () => {
+    create.mockResolvedValueOnce(answer);
+    await detectFields(file, "proposal");
+    const req = create.mock.calls.at(-1)?.[0] as { system: string; messages: { content: string }[] };
+    expect(req.system).toContain("agency's proposal template");
+    expect(req.system).not.toMatch(/\bcontracts?\b/);
+    expect(req.messages[0].content).toMatch(/^Find the fields in this proposal\./);
+    expect(req.messages[0].content).toContain("<proposal>");
+    expect(req.messages[0].content).toContain("we send the contract to sign.");
+  });
+
+  it("keeps the contract wording as it was", async () => {
+    create.mockResolvedValueOnce(answer);
+    await detectFields(file);
+    const req = create.mock.calls.at(-1)?.[0] as { system: string; messages: { content: string }[] };
+    expect(req.system).toContain("agency's contract template");
+    expect(req.messages[0].content).toMatch(/^Find the fields in this contract\. Each clause is in a <clause> tag with its number n\.\n\n<contract>\n/);
   });
 });

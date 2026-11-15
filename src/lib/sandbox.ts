@@ -15,7 +15,9 @@ export async function createSandbox(parentId: string): Promise<string> {
   const parent = await prisma.workspace.findUniqueOrThrow({ where: { id: parentId }, select: { name: true, prospectingEnabled: true, sandboxOfId: true } });
   if (parent.sandboxOfId) throw new Error("A sandbox can't have its own sandbox");
   const sandbox = await prisma.workspace.create({ data: { name: `${parent.name} (sandbox)`, sandboxOfId: parentId, prospectingEnabled: parent.prospectingEnabled } });
-  const templates = await prisma.contractTemplate.findMany({ where: { workspaceId: parentId }, select: { name: true, description: true, clauses: true, requiredFieldCount: true } });
+  // kind keeps proposal templates in the proposal list. A locked template
+  // stays locked; who locked it is a person in the parent workspace.
+  const templates = await prisma.contractTemplate.findMany({ where: { workspaceId: parentId }, select: { name: true, description: true, clauses: true, requiredFieldCount: true, kind: true, locked: true } });
   if (templates.length) await prisma.contractTemplate.createMany({ data: templates.map((t) => ({ ...t, workspaceId: sandbox.id })) });
   await seedSandbox(sandbox.id);
   return sandbox.id;
@@ -26,7 +28,8 @@ export async function createSandbox(parentId: string): Promise<string> {
 export async function seedSandbox(sandboxId: string): Promise<void> {
   const ws = await prisma.workspace.findUniqueOrThrow({ where: { id: sandboxId }, select: { sandboxOfId: true, prospectingEnabled: true } });
   if (!ws.sandboxOfId) throw new Error("Not a sandbox");
-  const template = await prisma.contractTemplate.findFirst({ where: { workspaceId: sandboxId }, select: { id: true } });
+  // The sample deals are contracts, so they use a contract template.
+  const template = await prisma.contractTemplate.findFirst({ where: { workspaceId: sandboxId, kind: { not: "proposal" } }, select: { id: true } });
 
   const samples = [
     { name: "Avery Chen", company: "Northwind Studio", email: "avery.chen@example.com", service: "Brand identity refresh", fee: "$8,500", status: "ready", missing: false },
@@ -56,7 +59,7 @@ export async function seedSandbox(sandboxId: string): Promise<void> {
     });
   }
 
-  if (ws.prospectingEnabled) {
+  {
     await prisma.lead.createMany({
       data: [
         { workspaceId: sandboxId, name: "Sam Rivera", company: "Acme Freight", title: "Head of Revenue Operations", email: "sam.rivera@example.com", phone: "+12025550161", stage: "new", source: "manual", campaign: "Sample campaign", externalId: "sample-1001" },

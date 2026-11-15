@@ -6,149 +6,57 @@ import { revalidatePath } from "next/cache";
 import crypto from "crypto";
 import { prisma } from "@/lib/db";
 import { requireWorkspace } from "@/lib/workspace";
-import { currentUserWithRole } from "@/lib/permissions";
-import { dispatchDealCreated } from "@/lib/webhooks";
-import { notifySlack } from "@/lib/slack";
-import { syncDealToHubspot } from "@/lib/hubspot";
-import { syncDealToSalesforce } from "@/lib/salesforce";
-import { reportError } from "@/lib/error-report";
-import { createDealFromTranscriptText, finishTranscriptDealInBackground, type TranscriptDeal } from "@/lib/transcript-deal";
-import { extractPlaceholderKeys } from "@/lib/contract";
-import { buildDealFieldRows, fieldMeta } from "@/lib/extract-deal";
 import { requireProspecting } from "@/lib/prospecting";
 import { leadAccess } from "@/lib/lead-visibility";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import { PENDING_TTL_MS, runCallProcessing } from "@/lib/call-inbox";
-import { NEW_LEAD_NAME } from "@/lib/cold-call";
 import { cookieTimeZone } from "@/lib/viewer-time";
+import { leadForCall } from "@/lib/call-lead";
 
-export async function createDeal(formData: FormData) {
-  const clientName = String(formData.get("clientName") ?? "").trim();
-  const company = String(formData.get("company") ?? "").trim() || clientName;
-  const email = String(formData.get("email") ?? "").trim() || null;
-  const service = String(formData.get("service") ?? "").trim();
-  const feeDisplay = String(formData.get("feeDisplay") ?? "").trim();
-  const templateId = String(formData.get("templateId") ?? "") || null;
+// What the start-a-call form shows when a call can't be saved: what to fix.
+// The form keeps everything typed in, to fix and send again.
+export type StartCallState = { error: string } | null;
 
-  if (!clientName || !service || !feeDisplay) {
-    throw new Error("Client, service, and fee are required");
-  }
-
-  const [workspace, user] = await Promise.all([requireWorkspace(), currentUserWithRole()]);
-  const workspaceId = workspace.id;
-
-  // Whatever else the template fills in (a start date, say) isn't on this
-  // form, so it's asked for on the deal instead of showing up in the
-  // contract as "{startDate}".
-  const template = templateId ? await prisma.contractTemplate.findFirst({ where: { id: templateId, workspaceId }, select: { clauses: true } }) : null;
-  const given = ["clientName", "service", "fee"];
-  const asked = (template ? extractPlaceholderKeys(template.clauses) : []).filter((key) => !given.includes(key));
-  const extraFields = asked.map((fieldKey, i) => ({ ...fieldMeta(fieldKey), fieldKey, value: null, status: "missing", orderIndex: 3 + i }));
-
-  const client = await prisma.client.create({
-    data: { workspaceId, name: clientName, company, email },
-  });
-
-  const deal = await prisma.deal.create({
-    data: {
-      workspaceId,
-      clientId: client.id,
-      templateId,
-      ownerId: user.id,
-      teamId: user.teamId,
-      service,
-      feeDisplay,
-      status: extraFields.length ? "missing_info" : "ready",
-      source: "upload",
-      fields: {
-        create: [
-          // The contract is with the company when one was given.
-          { groupLabel: "Client & engagement", label: "Client", fieldKey: "clientName", value: company, status: "confirmed", orderIndex: 0 },
-          { groupLabel: "Client & engagement", label: "Service", fieldKey: "service", value: service, status: "confirmed", orderIndex: 1 },
-          { groupLabel: "Commercial terms", label: "Fee", fieldKey: "fee", value: feeDisplay, status: "confirmed", orderIndex: 2 },
-          ...extraFields,
-        ],
-      },
-    },
-  });
-
-  await prisma.workspace.update({
-    where: { id: workspaceId },
-    data: { callsUsedThisMonth: { increment: 1 } },
-  });
-
-  await dispatchDealCreated(workspaceId, deal.id);
-  await notifySlack(workspaceId, { type: "deal.created", dealId: deal.id, clientName, service });
-  await syncDealToHubspot(workspaceId, deal.id);
-  await syncDealToSalesforce(workspaceId, deal.id);
-
-  redirect(`/deals/${deal.id}`);
-}
-
-export async function createDealFromTranscript(formData: FormData) {
-  const transcript = String(formData.get("transcript") ?? "").trim();
-  const templateId = String(formData.get("templateId") ?? "").trim();
-  // The transcript came from an uploaded video/audio file rather than text.
-  const fromRecording = formData.get("source") === "recording";
-
-  if (!transcript) throw new Error("Paste a call transcript first");
-  if (!templateId) throw new Error("Choose a template");
-
-  const [workspace, user] = await Promise.all([requireWorkspace(), currentUserWithRole()]);
-  const workspaceId = workspace.id;
-
-  const template = await prisma.contractTemplate.findFirst({ where: { id: templateId, workspaceId }, select: { id: true } });
-  if (!template) throw new Error("Template not found");
-
-  let made: TranscriptDeal;
-  try {
-    made = await createDealFromTranscriptText({
-      workspaceId,
-      ownerId: user.id,
-      teamId: user.teamId,
-      templateId,
-      transcript,
-      callSource: fromRecording ? "recording" : "upload",
-      dealSource: "upload",
-    });
-  } catch (err) {
-    await reportError(err, "Deal extraction from pasted transcript", { workspaceId });
-    redirect(`/deals/new?error=${encodeURIComponent("Couldn't extract deal terms from that transcript. Try again or enter it manually.")}`);
-  }
-
-  // Two more model calls plus integrations. Done inline it pushed a long
-  // call past the function timeout before the redirect, so the rep saw
-  // nothing happen. The deal page polls these in as they land.
-  after(() => finishTranscriptDealInBackground(workspaceId, made.dealId, made.callId, transcript));
-
-  redirect(`/deals/${made.dealId}`);
-}
-
-// "Notes only" on Start a call: the call becomes notes on a lead (one
-// picked, or a new one the call names) and never a deal or contract. It's
-// written up in the background the same way as a call from the Calls
-// inbox, which is where the person lands to watch it finish.
-export async function createNotesFromTranscript(formData: FormData) {
-  await saveNotesCall(formData);
-  // From the Notes page, back there: the call shows as being written up.
-  redirect(formData.get("back") === "/notes" ? "/notes?added=1" : "/calls");
+// Start a call with a recording or a transcript: the call goes on a lead
+// (see saveCall) and is written up in the background. The rep lands on the
+// lead's profile with this call open, to watch it finish.
+export async function startCallFromTranscript(_prev: StartCallState, formData: FormData): Promise<StartCallState> {
+  const saved = await saveCall(formData);
+  if ("error" in saved) return saved;
+  // added: the call was just saved, so the lead page can say so.
+  redirect(saved.leadId ? `/leads/${saved.leadId}?call=${saved.callId}&added=1` : "/leads?added=1");
 }
 
 // A meeting recorded in the iPhone app: saved the same way, but the page
-// moves on by itself, after deleting the recording from the phone.
-export async function saveRecordedMeeting(formData: FormData): Promise<void> {
+// moves on by itself, after deleting the recording from the phone. Anything
+// that keeps the call from being saved has to throw: the app deletes the
+// recording once this returns.
+export async function saveRecordedMeeting(formData: FormData): Promise<{ leadId: string; callId: string }> {
   formData.set("source", "app");
-  await saveNotesCall(formData);
+  // Proposals and contracts are made on the computer.
+  formData.delete("wantsProposal");
+  formData.delete("wantsContract");
+  const saved = await saveCall(formData);
+  if ("error" in saved) throw new Error(saved.error);
+  return saved;
 }
 
-async function saveNotesCall(formData: FormData): Promise<void> {
+// Every call is a call on a lead and always gets notes; a proposal or a
+// contract asked for too is made from the same transcript once the notes
+// are in, on the template picked here or the one that fits the call.
+// What the rep can fix comes back as an error instead of a thrown one, which
+// would end on the app's error screen and lose the transcript.
+async function saveCall(formData: FormData): Promise<{ leadId: string; callId: string } | { error: string }> {
   const transcript = String(formData.get("transcript") ?? "").trim();
-  const leadId = String(formData.get("leadId") ?? "new").trim() || "new";
+  const picked = String(formData.get("leadId") ?? "new").trim() || "new";
+  const typed = String(formData.get("who") ?? "").trim();
+  // The meeting's name for the email in "who" (see WhoOnCall).
+  const whoName = String(formData.get("whoName") ?? "").trim();
   const fromApp = formData.get("source") === "app";
   const fromRecording = fromApp || formData.get("source") === "recording";
   const seconds = Math.round(Number(formData.get("seconds")) || 0) || null;
-  if (!transcript) throw new Error("Add the recording or paste the transcript first");
-  if (transcript.length > 400_000) throw new Error("That transcript is too long. Use one call at a time");
+  if (!transcript) return { error: "Add the recording or paste the transcript first" };
+  if (transcript.length > 400_000) return { error: "That transcript is too long. Use one call at a time" };
 
   const workspace = await requireProspecting();
   const access = await leadAccess();
@@ -157,14 +65,20 @@ async function saveNotesCall(formData: FormData): Promise<void> {
   // same person is already being written up.
   if (fromApp) {
     const since = new Date(Date.now() - PENDING_TTL_MS);
-    const already = await prisma.phoneCall.findFirst({ where: { workspaceId: workspace.id, userId: access.userId, source: "app", transcript, startedAt: { gte: since } }, select: { id: true } });
-    if (already) return;
+    const already = await prisma.phoneCall.findFirst({ where: { workspaceId: workspace.id, userId: access.userId, source: "app", transcript, startedAt: { gte: since } }, select: { id: true, leadId: true } });
+    if (already) return { leadId: already.leadId ?? "", callId: already.id };
   }
-  const lead =
-    leadId === "new"
-      ? await prisma.lead.create({ data: { workspaceId: workspace.id, ownerId: access.userId, name: NEW_LEAD_NAME, source: "call" }, select: { id: true } })
-      : await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, AND: [access.where] }, select: { id: true } });
-  if (!lead) throw new Error("That lead isn't available");
+
+  const wantsProposal = formData.get("wantsProposal") === "1";
+  const wantsContract = formData.get("wantsContract") === "1";
+  // One template per call: the contract's when there is one, else the
+  // proposal's. Left out, SealMe picks from what was said.
+  const pickedTemplate = String(formData.get(wantsContract ? "contractTemplateId" : "proposalTemplateId") ?? "").trim();
+  const template = pickedTemplate && (wantsContract || wantsProposal) ? await prisma.contractTemplate.findFirst({ where: { id: pickedTemplate, workspaceId: workspace.id, kind: wantsContract ? { not: "proposal" } : "proposal" }, select: { id: true } }) : null;
+  if (pickedTemplate && (wantsContract || wantsProposal) && !template) return { error: "That template isn't in this workspace" };
+
+  const lead = await leadForCall(workspace.id, access.userId, picked, typed, access.where, whoName);
+  if (!lead) return { error: "That lead isn't available" };
 
   const call = await prisma.phoneCall.create({
     data: {
@@ -173,6 +87,9 @@ async function saveNotesCall(formData: FormData): Promise<void> {
       leadId: lead.id,
       source: fromApp ? "app" : fromRecording ? "upload" : "paste",
       mode: "notes",
+      wantsProposal,
+      wantsContract,
+      templateId: template?.id ?? null,
       status: "processing",
       transcript,
       durationSec: seconds,
@@ -180,6 +97,7 @@ async function saveNotesCall(formData: FormData): Promise<void> {
     },
     select: { id: true },
   });
+  await prisma.lead.update({ where: { id: lead.id }, data: { lastActivityAt: new Date() } });
   const timeZone = await cookieTimeZone();
   // Notes are asked for on purpose, so nothing is set aside as a voicemail:
   // one phone or laptop in a room often hears everyone as one voice, and a
@@ -187,71 +105,7 @@ async function saveNotesCall(formData: FormData): Promise<void> {
   // Process anyway either, so a set-aside call would just vanish. (The app
   // doesn't send recordings under MIN_PROCESS_SECONDS.)
   after(() => runCallProcessing(call.id, timeZone, { force: true }));
-}
-
-// Desktop-app-only: starts a deal backed by a locally-recorded call instead
-// of a Recall bot. Unlike the other actions here, this one returns a value
-// instead of redirecting — the caller is a client component that still needs
-// to kick off native audio capture (via Tauri) before navigating, and needs
-// the upload token back to authenticate that capture's later upload.
-export async function startLocalCapture(formData: FormData): Promise<{ dealId: string; token: string } | { error: string }> {
-  const clientName = String(formData.get("clientName") ?? "").trim();
-  const clientEmail = String(formData.get("clientEmail") ?? "").trim() || null;
-  const templateId = String(formData.get("templateId") ?? "").trim();
-
-  if (!clientName) return { error: "Enter who you're meeting with" };
-  if (!templateId) return { error: "Choose a template" };
-
-  const [workspace, user] = await Promise.all([requireWorkspace(), currentUserWithRole()]);
-  const workspaceId = workspace.id;
-  const template = await prisma.contractTemplate.findFirst({ where: { id: templateId, workspaceId }, select: { clauses: true } });
-  if (!template) return { error: "Choose a template" };
-
-  const client = await prisma.client.create({
-    data: { workspaceId, name: clientName, company: clientName, email: clientEmail },
-  });
-
-  const deal = await prisma.deal.create({
-    data: {
-      workspaceId,
-      clientId: client.id,
-      templateId,
-      ownerId: user.id,
-      teamId: user.teamId,
-      service: "",
-      feeDisplay: "",
-      status: "processing",
-      source: "local",
-    },
-  });
-
-  // Every term the template needs is on the deal from the start, empty, so
-  // the page shows the contract right away and fills it in as the terms are
-  // said, instead of staying blank until the first minute is transcribed.
-  // Who the meeting is with is already known.
-  const { fieldRows } = buildDealFieldRows({ clientName, company: null, email: clientEmail, summary: null, fields: [] }, extractPlaceholderKeys(template.clauses));
-  await prisma.dealField.createMany({
-    data: fieldRows.map((row) => ({
-      dealId: deal.id,
-      ...row,
-      ...(row.fieldKey === "clientName" ? { value: clientName, status: "extracted" } : {}),
-    })),
-  });
-
-  const call = await prisma.call.create({ data: { dealId: deal.id, source: "local" } });
-  const rawToken = await mintLocalCaptureToken(workspaceId, deal.id, call.id);
-
-  await prisma.workspace.update({
-    where: { id: workspaceId },
-    data: { callsUsedThisMonth: { increment: 1 } },
-  });
-
-  await dispatchDealCreated(workspaceId, deal.id);
-  await notifySlack(workspaceId, { type: "deal.created", dealId: deal.id, clientName, service: "" });
-  await syncDealToHubspot(workspaceId, deal.id);
-  await syncDealToSalesforce(workspaceId, deal.id);
-
-  return { dealId: deal.id, token: rawToken };
+  return { leadId: lead.id, callId: call.id };
 }
 
 // The same hash the upload route looks a token up by.
@@ -259,8 +113,8 @@ function hashCaptureToken(rawToken: string): string {
   return crypto.createHash("sha256").update(rawToken).digest("hex");
 }
 
-// Shared by startLocalCapture (brand-new deal) and continueLocalCapture (a
-// follow-up call on an existing deal) — one Call, one token, always.
+// A follow-up call on a deal (see continueLocalCapture): one Call, one
+// token, always.
 async function mintLocalCaptureToken(workspaceId: string, dealId: string, callId: string): Promise<string> {
   const rawToken = crypto.randomBytes(32).toString("hex");
   const tokenHash = hashCaptureToken(rawToken);
@@ -317,7 +171,7 @@ export async function discardLocalCapture(dealId: string, token: string): Promis
   if (!record || !deal) return;
 
   const now = new Date();
-  await prisma.call.updateMany({ where: { id: record.callId, endedAt: null }, data: { endedAt: now } });
+  if (record.callId) await prisma.call.updateMany({ where: { id: record.callId, endedAt: null }, data: { endedAt: now } });
   // Spent the way a finished call's token is (expired as of when it was
   // used): live chunks are turned away, and a final is told it's in.
   await prisma.localCaptureToken.update({ where: { id: record.id }, data: { usedAt: now, expiresAt: now } });

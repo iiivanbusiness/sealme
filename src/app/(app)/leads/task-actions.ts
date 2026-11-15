@@ -89,9 +89,9 @@ export async function assignLeadTasks(input: TaskInput & { leadIds: string[]; ma
   return { created: ids.length };
 }
 
-// One task on a lead, from the lead page. A rep can only give tasks to
-// themselves.
-export async function createLeadTask(leadId: string, input: TaskInput): Promise<void> {
+// One task on a lead (a to-do from the Dashboard). A rep can only give
+// tasks to themselves. Not exported: createTodo is the way in.
+async function createLeadTask(leadId: string, input: TaskInput): Promise<void> {
   const workspace = await requireProspecting();
   const access = await leadAccess();
   const lead = await prisma.lead.findFirst({ where: { id: leadId, workspaceId: workspace.id, AND: [access.where] }, select: { id: true, name: true } });
@@ -166,17 +166,6 @@ export async function setTaskStatus(taskId: string, status: "open" | "done" | "s
   revalidatePath("/dashboard");
 }
 
-// Managers only: take a task off entirely.
-export async function deleteTask(taskId: string): Promise<void> {
-  const workspace = await requireProspecting();
-  const access = await leadAccess();
-  if (!access.canAssign) throw new Error("Only managers can delete tasks");
-  const task = await prisma.task.findFirst({ where: { id: taskId, workspaceId: workspace.id }, select: { id: true, leadId: true } });
-  if (!task) throw new Error("Task not found");
-  await prisma.task.delete({ where: { id: task.id } });
-  if (task.leadId) revalidatePath(`/leads/${task.leadId}`);
-}
-
 // "Hand out work" on the Dashboard: the next leads nobody is working on
 // (no owner, no open task, not converted or lost), oldest first, become
 // cold calls for one rep on one day, and the rep becomes their owner.
@@ -190,7 +179,7 @@ export async function quickAssignLeads(input: { assigneeId: string; count: numbe
   const dueDate = input.day === "tomorrow" ? new Date(new Date(`${today}T00:00:00Z`).getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : today;
 
   const free = await prisma.lead.findMany({
-    where: { workspaceId: workspace.id, ownerId: null, stage: { notIn: ["converted", "lost"] }, tasks: { none: { status: "open" } } },
+    where: { workspaceId: workspace.id, ownerId: null, stage: { notIn: ["converted", "lost"] }, isClient: false, deals: { none: { trashedAt: null } }, tasks: { none: { status: "open" } } },
     orderBy: { createdAt: "asc" },
     take: count,
     select: { id: true },

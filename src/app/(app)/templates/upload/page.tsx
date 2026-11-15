@@ -7,17 +7,21 @@ import UploadContract from "./UploadContract";
 // can take a minute or more on a long one.
 export const maxDuration = 300;
 
-export default async function UploadTemplatePage() {
+// ?kind comes from the Templates tab the upload started on, so the
+// template lands in that list.
+export default async function UploadTemplatePage({ searchParams }: { searchParams: Promise<{ kind?: string }> }) {
+  const { kind: asked } = await searchParams;
+  const kind = asked === "proposal" ? "proposal" : "contract";
   const user = await currentUserWithRole();
-  if (!user.role?.canManageTemplates) redirect("/templates");
+  if (!user.role?.canManageTemplates) redirect(`/templates?kind=${kind}`);
 
   return (
     <>
-    <Link href="/templates" className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
+    <Link href={`/templates?kind=${kind}`} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
       ← Templates
     </Link>
 
-    <UploadContract />
+    <UploadContract kind={kind} />
     </>
   );
 }

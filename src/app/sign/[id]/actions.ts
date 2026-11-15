@@ -9,6 +9,8 @@ import { notifyChangesRequested } from "@/lib/review";
 import { advanceSigningOrFinalize } from "@/lib/signing";
 import { canCommentOnClauses, signPageMessage, signPageState } from "./sign-state";
 
+const PROPOSAL_ERROR = "This is a proposal. There's nothing to sign.";
+
 export async function signContract(contractId: string, formData: FormData): Promise<{ error?: string }> {
   const signerName = String(formData.get("signerName") ?? "").trim();
   const signatureImage = String(formData.get("signatureImage") ?? "").trim();
@@ -33,15 +35,17 @@ export async function signContract(contractId: string, formData: FormData): Prom
   // page and not past its expiry, can be signed. The status moves off
   // "sent" in this same write, so a second submit racing this one finds
   // nothing to update; advanceSigningOrFinalize then settles on
-  // partially_signed or signed.
+  // partially_signed or signed. A proposal is never signed: the page
+  // doesn't offer it, and this write can't do it either.
   const now = new Date();
   const result = await prisma.contract.updateMany({
-    where: { id: contractId, status: "sent", deliveryMethod: "sealme", OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    where: { id: contractId, status: "sent", deliveryMethod: "sealme", OR: [{ expiresAt: null }, { expiresAt: { gt: now } }], deal: { kind: { not: "proposal" } } },
     data: { status: "partially_signed", signedAt: now, signerName, signerIp: ip, signatureImage },
   });
   if (result.count === 0) {
     const current = await prisma.contract.findUnique({ where: { id: contractId }, include: { deal: { include: { workspace: true } } } });
     if (!current) return { error: "Not found" };
+    if (current.deal.kind === "proposal") return { error: PROPOSAL_ERROR };
     const state = signPageState(current, now);
     // A double-submit after the first one went through: just show it signed.
     if (state === "signed") redirect(`/sign/${contractId}`);
@@ -50,10 +54,13 @@ export async function signContract(contractId: string, formData: FormData): Prom
 
   const contract = await prisma.contract.findUniqueOrThrow({ where: { id: contractId } });
 
+  // The client's own signature, with who and from where. contract.signed is
+  // logged once, when everyone who has to sign has (finalizeContractSigned),
+  // the same as for DocuSign, so it isn't logged twice here.
   await logAudit({
     workspaceId: (await prisma.deal.findUniqueOrThrow({ where: { id: contract.dealId }, select: { workspaceId: true } })).workspaceId,
     actorEmail: signerName,
-    action: "contract.signed",
+    action: "contract.client_signed",
     targetType: "Contract",
     targetId: contract.id,
     ip,
@@ -83,13 +90,14 @@ export async function requestClauseChange(contractId: string, clauseTitle: strin
 
   const contract = await prisma.contract.findUnique({ where: { id: contractId }, include: { deal: { include: { workspace: true } } } });
   if (!contract) return { error: "Not found" };
+  if (contract.deal.kind === "proposal") return { error: PROPOSAL_ERROR };
   const closed = signPageMessage(signPageState(contract), contract.deal.workspace.name) ?? "This agreement can no longer be changed";
-  if (!canCommentOnClauses(contract)) return { error: closed };
+  if (!canCommentOnClauses({ ...contract, kind: contract.deal.kind })) return { error: closed };
 
   // Guarded the same way as signing: a contract that moved into approval
   // or got signed since the page loaded doesn't get pulled back.
   const moved = await prisma.contract.updateMany({
-    where: { id: contractId, status: { in: ["sent", "changes_requested"] } },
+    where: { id: contractId, status: { in: ["sent", "changes_requested"] }, deal: { kind: { not: "proposal" } } },
     data: { status: "changes_requested" },
   });
   if (moved.count === 0) return { error: closed };

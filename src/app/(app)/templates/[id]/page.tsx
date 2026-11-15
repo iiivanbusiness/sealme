@@ -22,10 +22,12 @@ export default async function TemplateDetailPage({ params }: { params: Promise<{
   const canManage = Boolean(user.role?.canManageTemplates);
   const canApprove = Boolean(user.role?.canApproveTemplates);
   const canEdit = canManage && (!template.locked || canApprove);
+  const kind = template.kind === "proposal" ? "proposal" : "contract";
+  const used = template.deals.length;
 
   return (
     <>
-    <Link href="/templates" className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
+    <Link href={`/templates?kind=${kind}`} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
       ← Templates
     </Link>
 
@@ -37,7 +39,10 @@ export default async function TemplateDetailPage({ params }: { params: Promise<{
         </div>
         <div className="mt-1 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>{template.description}</div>
       </div>
-      <span className="chip chip-neutral">{clauses.length} clauses</span>
+      <div className="flex flex-wrap gap-2">
+        <span className="chip chip-neutral">{kind === "proposal" ? "Proposal" : "Contract"}</span>
+        <span className="chip chip-neutral">{clauses.length} clauses</span>
+      </div>
     </div>
 
     {template.locked && (
@@ -83,7 +88,7 @@ export default async function TemplateDetailPage({ params }: { params: Promise<{
         </div>
 
         <div className="mb-1.5 border-t pt-3 text-[12.5px]" style={{ color: "var(--ink-muted)", borderColor: "var(--hairline)" }}>
-          Used by {template.deals.length} deal{template.deals.length === 1 ? "" : "s"}
+          Used by {used} {kind}{used === 1 ? "" : "s"}
         </div>
 
         {canEdit ? (
@@ -110,10 +115,10 @@ export default async function TemplateDetailPage({ params }: { params: Promise<{
           <form action={deleteTemplate.bind(null, template.id)}>
             <button
               type="submit"
-              disabled={template.deals.length > 0}
+              disabled={used > 0}
               className="btn btn-secondary w-full justify-center"
-              style={{ color: template.deals.length > 0 ? "var(--ink-muted)" : "#ff6b57" }}
-              title={template.deals.length > 0 ? "In use by a deal. Can't be deleted" : undefined}
+              style={{ color: used > 0 ? "var(--ink-muted)" : "#ff6b57" }}
+              title={used > 0 ? `In use by a ${kind}. Can't be deleted` : undefined}
             >
               Delete template
             </button>

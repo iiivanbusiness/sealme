@@ -40,8 +40,8 @@ export default function PendingCallCard({
 }) {
   const router = useRouter();
   const wantsContract = call.mode === "sales" && !notesOnly;
-  // Notes only: SealMe finds the client's lead from the call by default.
-  const [leadId, setLeadId] = useState(call.leadId ?? (wantsContract ? "" : "new"));
+  // SealMe finds the client's lead from the call by default.
+  const [leadId, setLeadId] = useState(call.leadId ?? "new");
   // Most calls only need notes; a contract is the exception.
   const [need, setNeed] = useState<"notes" | "contract">(wantsContract ? "contract" : "notes");
   const isNew = leadId === "new";
@@ -191,7 +191,7 @@ export default function PendingCallCard({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={pending || !leadId || (isNew && need === "contract")}
+              disabled={pending || !leadId}
               onClick={() => run(() => processAction({ leadId, mode: need === "notes" ? "notes" : "sales" }))}
               className="btn btn-primary btn-sm"
             >
@@ -201,8 +201,7 @@ export default function PendingCallCard({
               Discard
             </button>
             {!leadId && <span className="text-[12px]" style={{ color: "var(--ink-muted)" }}>Pick the lead, or make a new one from the call.</span>}
-            {isNew && need === "contract" && <span className="text-[12px]" style={{ color: "var(--ink-muted)" }}>For a contract, pick the lead it&apos;s for.</span>}
-            {leadId && !(isNew && need === "contract") && (
+            {leadId && (
               <span className="text-[12px]" style={{ color: "var(--ink-muted)" }}>
                 {need === "notes" ? `SealMe writes the notes on the lead and sets up the next step.${notesOnly ? "" : " No contract."}` : "SealMe writes the notes and drafts the contract for you to check."}
               </span>

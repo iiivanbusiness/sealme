@@ -5,18 +5,18 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { dispatchDealCreated } from "@/lib/webhooks";
 import { requireWorkspaceId } from "@/lib/workspace";
-import { applyExtractionToDeal, contractLocksTerms, syncCoreDealFields } from "@/lib/deal-live";
+import { applyExtractionToDeal, syncCoreDealFields } from "@/lib/deal-live";
+import { documentLocksTerms } from "@/lib/contract-status";
 import { extractPlaceholderKeys } from "@/lib/contract";
 import { auth } from "@/lib/auth";
-import { canSendContract, requestOrSendReview } from "@/lib/review";
+import { canSendDocument, requestOrSendReview, type SendSetup } from "@/lib/review";
 import { logAudit } from "@/lib/audit";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import { currentUserWithRole } from "@/lib/permissions";
-import { randomBytes } from "crypto";
 import { reportError } from "@/lib/error-report";
 
 const TERMS_LOCKED_ERROR = "This contract is with a reviewer or the client, so its terms can't change";
-// What contractLocksTerms needs to tell a lapsed sign link from a live one.
+// What documentLocksTerms needs to tell a lapsed sign link from a live one.
 const TERMS_LOCK_SELECT = { status: true, deliveryMethod: true, expiresAt: true } as const;
 
 export type LiveDealState = {
@@ -120,11 +120,11 @@ export async function sendViaDocusignNow(dealId: string): Promise<{ error?: stri
     include: { client: true, template: true, contract: true, workspace: true },
   });
   if (!deal || !deal.contract || !deal.template) return { error: "Deal not found" };
+  if (deal.kind === "proposal") return { error: "Proposals go out by email or link, not DocuSign" };
+  if (deal.trashedAt) return { error: "This contract is in the trash. Restore it first" };
   if (deal.contract.status !== "draft") return { error: "This contract was already sent" };
   if (!deal.workspace.docusignEnabled) return { error: "DocuSign isn't connected for this workspace" };
   if (!deal.client.email) return { error: "This client has no email on file yet. Add one first" };
-
-  await prisma.contract.update({ where: { id: deal.contract.id }, data: { deliveryMethod: "docusign" } });
 
   const subject = `${deal.template.name} from ${deal.workspace.name}`;
   const message = `Hi ${deal.client.name.split(" ")[0]},\n\nHere's the ${deal.template.name.toLowerCase()} we just discussed. Take a look and sign whenever you're ready.`;
@@ -132,7 +132,7 @@ export async function sendViaDocusignNow(dealId: string): Promise<{ error?: stri
   const session = await auth();
   let result: Awaited<ReturnType<typeof requestOrSendReview>>;
   try {
-    result = await requestOrSendReview(dealId, { to: deal.client.email, subject, message }, session?.user?.email);
+    result = await requestOrSendReview(dealId, { to: deal.client.email, subject, message }, session?.user?.email, { deliveryMethod: "docusign" });
   } catch (err) {
     return { error: err instanceof Error ? err.message : "Couldn't send via DocuSign" };
   }
@@ -148,7 +148,7 @@ export async function generateContract(dealId: string) {
   if (!deal) throw new Error("Deal not found");
 
   const missing = deal.fields.some((f) => f.status === "missing");
-  if (missing) throw new Error("Cannot generate a contract while information is missing");
+  if (missing) throw new Error(`Cannot generate a ${deal.kind === "proposal" ? "proposal" : "contract"} while information is missing`);
 
   await prisma.contract.upsert({
     where: { dealId },
@@ -168,7 +168,7 @@ export async function fillMissingFields(dealId: string, formData: FormData) {
   const workspaceId = await requireWorkspaceId();
   const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId, ...where }, include: { fields: true, contract: { select: TERMS_LOCK_SELECT } } });
   if (!deal) throw new Error("Deal not found");
-  if (contractLocksTerms(deal.contract)) throw new Error(TERMS_LOCKED_ERROR);
+  if (documentLocksTerms(deal.contract, deal.kind)) throw new Error(TERMS_LOCKED_ERROR);
 
   const missingFields = deal.fields.filter((f) => f.status === "missing");
   const changed: { fieldKey: string; value: string }[] = [];
@@ -196,7 +196,7 @@ export async function updateFieldValues(dealId: string, formData: FormData) {
   const workspaceId = await requireWorkspaceId();
   const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId, ...where }, include: { fields: true, contract: { select: TERMS_LOCK_SELECT } } });
   if (!deal) throw new Error("Deal not found");
-  if (contractLocksTerms(deal.contract)) throw new Error(TERMS_LOCKED_ERROR);
+  if (documentLocksTerms(deal.contract, deal.kind)) throw new Error(TERMS_LOCKED_ERROR);
 
   const changed: { fieldKey: string; value: string }[] = [];
   for (const field of deal.fields) {
@@ -256,7 +256,7 @@ export async function applyVoiceFieldCorrection(dealId: string, fieldKey: string
   const workspaceId = await requireWorkspaceId();
   const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId, ...where }, include: { fields: true, contract: { select: TERMS_LOCK_SELECT } } });
   if (!deal) return { error: "Deal not found" };
-  if (contractLocksTerms(deal.contract)) return { error: TERMS_LOCKED_ERROR };
+  if (documentLocksTerms(deal.contract, deal.kind)) return { error: TERMS_LOCKED_ERROR };
 
   const field = deal.fields.find((f) => f.fieldKey === fieldKey);
   if (!field) return { error: "This deal has no such term anymore" };
@@ -302,61 +302,49 @@ export async function sendContractEmail(dealId: string, formData: FormData): Pro
     ? ccRaw.split(",").map((e) => e.trim()).filter(Boolean)
     : [];
 
-  const signerNames = formData.getAll("signerName").map((v) => String(v).trim());
-  const signerEmails = formData.getAll("signerEmail").map((v) => String(v).trim());
-  const signerRoles = formData.getAll("signerRole").map((v) => String(v).trim());
-  const signerRows = signerNames.map((name, i) => ({ name, email: signerEmails[i] ?? "", role: signerRoles[i] || "Counter-signer" }));
-  // A row with only a name or only an email would otherwise be dropped
-  // without a word, taking that signer off the contract.
-  if (signerRows.some((s) => !s.name !== !s.email)) {
-    return { status: "error", error: "Add a name and an email for each additional signer, or remove the row" };
-  }
-  const countersigners = signerRows.filter((s) => s.name && s.email);
-
   const { where } = await dealVisibilityFilter();
   const workspaceId = await requireWorkspaceId();
   const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId, ...where }, include: { contract: true } });
   if (!deal || !deal.contract) return { status: "error", error: "Deal not found" };
-  if (!canSendContract(deal.contract)) {
-    return { status: "error", error: deal.contract.status === "pending_approval" ? "This contract is already waiting on review" : "This contract was already sent" };
+  // A proposal is only read: nobody signs it, so there are no signers and no
+  // DocuSign, whatever the form sent.
+  const isProposal = deal.kind === "proposal";
+  const doc = isProposal ? "proposal" : "contract";
+  // Nothing goes out from the trash: the client's link there doesn't open.
+  if (deal.trashedAt) return { status: "error", error: `This ${doc} is in the trash. Restore it first` };
+  if (!canSendDocument(deal.contract, deal.kind)) {
+    return { status: "error", error: deal.contract.status === "pending_approval" ? `This ${doc} is already waiting on review` : `This ${doc} was already sent` };
   }
 
-  const deliveryMethod = String(formData.get("deliveryMethod") ?? "sealme") === "docusign" ? "docusign" : "sealme";
+  let countersigners: { name: string; email: string; role: string }[] = [];
+  if (!isProposal) {
+    const signerNames = formData.getAll("signerName").map((v) => String(v).trim());
+    const signerEmails = formData.getAll("signerEmail").map((v) => String(v).trim());
+    const signerRoles = formData.getAll("signerRole").map((v) => String(v).trim());
+    const signerRows = signerNames.map((name, i) => ({ name, email: signerEmails[i] ?? "", role: signerRoles[i] || "Counter-signer" }));
+    // A row with only a name or only an email would otherwise be dropped
+    // without a word, taking that signer off the contract.
+    if (signerRows.some((s) => !s.name !== !s.email)) {
+      return { status: "error", error: "Add a name and an email for each additional signer, or remove the row" };
+    }
+    countersigners = signerRows.filter((s) => s.name && s.email);
+  }
 
   // CC list, counter-signers, and delivery method are contract setup, not
-  // part of the approval-gated email content — stored immediately
-  // regardless of whether an approval chain holds the actual send.
-  await prisma.contract.update({
-    where: { id: deal.contract.id },
-    data: { ccEmails: ccList.length > 0 ? JSON.stringify(ccList) : null, deliveryMethod },
-  });
-  // The Send page starts from the current signers, so what comes back is the
-  // whole list: it replaces everyone on an earlier version, including anyone
-  // who signed or declined it, and an empty list means no counter-signers
-  // (how a rep takes off one who declined).
-  try {
-    await prisma.contractSigner.deleteMany({ where: { contractId: deal.contract.id } });
-    if (countersigners.length > 0) {
-      await prisma.contractSigner.createMany({
-        data: countersigners.map((s, i) => ({
-          contractId: deal.contract!.id,
-          name: s.name,
-          email: s.email,
-          role: s.role,
-          order: i + 1,
-          token: randomBytes(24).toString("hex"),
-        })),
-      });
-    }
-  } catch (err) {
-    await reportError(err, "Save counter-signers", { dealId });
-    return { status: "error", error: "Couldn't save the additional signers. Try again" };
-  }
+  // part of the approval-gated email content. requestOrSendReview stores
+  // them only in the write that records the send, or as a review starts
+  // holding it, so a send that's refused, loses to another or fails leaves
+  // the contract as its last round went out.
+  const setup: SendSetup = {
+    deliveryMethod: !isProposal && String(formData.get("deliveryMethod") ?? "sealme") === "docusign" ? "docusign" : "sealme",
+    ccEmails: ccList,
+    countersigners: isProposal ? undefined : countersigners,
+  };
 
   const session = await auth();
   let result: Awaited<ReturnType<typeof requestOrSendReview>>;
   try {
-    result = await requestOrSendReview(dealId, { to, subject, message }, session?.user?.email);
+    result = await requestOrSendReview(dealId, { to, subject, message }, session?.user?.email, setup);
   } catch (err) {
     return { status: "error", error: err instanceof Error ? err.message : "Couldn't send the email. Check your Resend setup and try again." };
   }
@@ -379,12 +367,17 @@ export async function startRenewal(dealId: string) {
     include: { fields: true, contract: true },
   });
   if (!deal) throw new Error("Deal not found");
+  // A proposal is never signed, and a renewal is a new contract to sign.
+  if (deal.kind === "proposal") throw new Error("A proposal can't be renewed");
   if (deal.contract?.status !== "signed") throw new Error("Only a signed deal can be renewed");
 
   const newDeal = await prisma.deal.create({
     data: {
       workspaceId,
       clientId: deal.clientId,
+      // The renewal is on the same lead, as the same kind of document.
+      leadId: deal.leadId,
+      kind: deal.kind,
       templateId: deal.templateId,
       ownerId: userId,
       teamId: currentUser.teamId,

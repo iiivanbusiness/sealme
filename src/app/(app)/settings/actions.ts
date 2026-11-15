@@ -13,7 +13,9 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { isValidDomain, lookupDomainVerification, newDomainVerificationToken, normalizeDomain } from "@/lib/domain-verification";
 
-type ToggleField = "requireApproval" | "notifyOnSigned" | "autoRemind" | "zoomConnected" | "meetConnected";
+// requireApproval is no longer one: nothing goes to a client without a rep's
+// click, so there's nothing for it to turn off.
+type ToggleField = "notifyOnSigned" | "autoRemind" | "zoomConnected" | "meetConnected";
 
 export async function toggleWorkspaceFlag(field: ToggleField) {
   await requirePermission("canManageWorkspace");

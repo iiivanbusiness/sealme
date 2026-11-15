@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { exchangeCodeForTokens, getUserEmail, hasCalendarScope, revokeGoogleToken } from "@/lib/google-calendar";
+import { exchangeCodeForTokens, getUserEmail, hasCalendarScope, revokeGoogleToken, syncCalendarIfDue } from "@/lib/google-calendar";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { requirePermission } from "@/lib/permissions";
 import { isValidOAuthState } from "@/lib/oauth-state";
@@ -50,6 +50,9 @@ export async function GET(req: Request) {
         googleAccountEmail: email,
       },
     });
+    // The meetings are there when the Calendar page opens. Never throws: if
+    // this first sync fails, the next one comes a few minutes later.
+    await syncCalendarIfDue(workspaceId, { force: true });
 
     return NextResponse.redirect(new URL("/calendar?connected=1", req.url));
   } catch {

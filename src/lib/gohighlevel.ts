@@ -1,7 +1,8 @@
 // GoHighLevel (LeadConnector) API v2, with a sub-account's Private
 // Integration token. Everything a sub-account owns is keyed by its Location
 // ID, which the admin pastes next to the token in Settings. One-way: SealMe
-// writes contacts, notes, tasks and opportunities and reads only pipelines.
+// writes contacts, notes, tasks and opportunities (opened on a call, won on a
+// signature) and reads only pipelines.
 
 const GHL_API = "https://services.leadconnectorhq.com";
 // The API version GoHighLevel's own Private Integration examples use, still
@@ -90,6 +91,14 @@ export async function createGhlOpportunity(
   });
   if (!data.opportunity?.id) throw new Error("GoHighLevel didn't return the opportunity");
   return data.opportunity.id;
+}
+
+// The lead signed: the opportunity its first call opened is won.
+export async function markGhlOpportunityWon(token: string, opportunityId: string): Promise<void> {
+  await ghl(token, `/opportunities/${encodeURIComponent(opportunityId)}/status`, {
+    method: "PUT",
+    body: JSON.stringify({ status: "won" }),
+  });
 }
 
 // The note a call leaves on the contact: what it was, the write-up, and

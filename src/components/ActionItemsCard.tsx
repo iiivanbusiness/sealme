@@ -11,21 +11,29 @@ type ActionItem = {
   sourceQuote: string | null;
 };
 
+// A fixed locale: the server renders this first, and the browser's own
+// locale ("14 Nov" vs "Nov 14") would make the page fail to hydrate.
 function formatDue(date: Date): string {
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-function isOverdue(date: Date): boolean {
-  return date.getTime() < Date.now();
+// Due dates are calendar days (stored at midnight UTC), so an item is late
+// only once its whole day has passed on the viewer's clock. today is that
+// day (YYYY-MM-DD), worked out on the server so both renders agree.
+export function isOverdue(date: Date, today: string): boolean {
+  return date.toISOString().slice(0, 10) < today;
 }
 
 export default function ActionItemsCard({
   dealId,
   items,
+  today,
   toggleAction,
 }: {
   dealId: string;
   items: ActionItem[];
+  // The viewer's current day, YYYY-MM-DD.
+  today: string;
   toggleAction: (dealId: string, itemId: string) => Promise<{ error?: string }>;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +88,7 @@ export default function ActionItemsCard({
       <div className="px-5 py-1.5">
         {ordered.map((item) => {
           const done = item.status === "done";
-          const overdue = !done && item.dueDate && isOverdue(item.dueDate);
+          const overdue = !done && item.dueDate && isOverdue(item.dueDate, today);
           return (
             <div key={item.id} className="border-b py-3 last:border-b-0" style={{ borderColor: "var(--hairline-soft)" }}>
               <div className="flex items-start gap-3">

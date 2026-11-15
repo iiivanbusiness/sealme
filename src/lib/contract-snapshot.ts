@@ -1,7 +1,7 @@
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/db";
 import { contractParty, fillClauses, type Clause } from "@/lib/contract";
-import { contractExpired } from "@/lib/contract-status";
+import { contractClosed } from "@/lib/contract-status";
 
 // The contract exactly as it went out: stored on Contract.snapshot at every
 // send, so a later edit to the deal's terms or to the template can't change
@@ -25,8 +25,8 @@ export type ContractTextSource = {
 };
 
 // Statuses where the contract has reached the client. Its text is whatever
-// it went out with, even once the link lapsed.
-const SENT_STATUSES = new Set(["sent", "partially_signed", "signed", "expired"]);
+// it went out with, even once the link lapsed or it was marked not signed.
+const SENT_STATUSES = new Set(["sent", "partially_signed", "signed", "expired", "not_signed"]);
 
 export function buildContractSnapshot(template: { name: string; clauses: string }, deal: DealTerms): ContractSnapshot {
   return {
@@ -56,10 +56,40 @@ export function parseContractSnapshot(value: unknown): ContractSnapshot | null {
 
 // The team's contract page (and its PDF) previews what the next send would
 // carry while the contract is still being worked on: a draft, in review,
-// changes asked for, or a sign link that lapsed. Once it's out with the
-// client, it shows what they got.
+// changes asked for, or one that won't be signed (a sign link that lapsed, or
+// marked not signed). Once it's out with the client, it shows what they got.
 export function showsLiveTerms(contract: { status: string; deliveryMethod: string; expiresAt: Date | null }, now = new Date()): boolean {
-  return contract.status === "draft" || contract.status === "pending_approval" || contract.status === "changes_requested" || contractExpired(contract, now);
+  return contract.status === "draft" || contract.status === "pending_approval" || contract.status === "changes_requested" || contractClosed(contract, now);
+}
+
+type LiveTermsSource = Pick<ContractTextSource, "status" | "deliveryMethod" | "expiresAt" | "template">;
+
+// What readContractText gives the team instead of the sent text: the live
+// terms, while showsLiveTerms and there's a template left to fill them from.
+function teamSeesLiveTerms(contract: LiveTermsSource, asTeam: boolean, now: Date): boolean {
+  return asTeam && showsLiveTerms(contract, now) && contract.template != null;
+}
+
+// A signature only ever sits under the terms that were signed: the text as
+// it went out. Marking a contract not signed after the client signed (or a
+// counter-signer turning it down) keeps their signature on record, and the
+// rep can then change the terms; putting that signature under the reworked
+// terms the team previews would read as the client agreeing to a version
+// they never saw. Everyone else sees the sent text, so its signatures stay,
+// and a real signature that finishes the contract later shows it as sent.
+export function showsSignatures(contract: LiveTermsSource, { asTeam = false }: { asTeam?: boolean } = {}, now = new Date()): boolean {
+  return !teamSeesLiveTerms(contract, asTeam, now);
+}
+
+// A sent proposal whose terms were changed after it went out: what the client
+// has (the stored snapshot) no longer matches what the next send would carry.
+export function snapshotDiffers(stored: unknown, live: ContractSnapshot | null): boolean {
+  // Both go through the same reader, so extra keys on a clause can't count
+  // as a change.
+  const sent = parseContractSnapshot(stored);
+  const next = parseContractSnapshot(live);
+  if (!sent || !next) return false;
+  return JSON.stringify(sent) !== JSON.stringify(next);
 }
 
 export function liveContractText(contract: Pick<ContractTextSource, "template" | "deal">): ContractSnapshot | null {
@@ -81,8 +111,10 @@ export function pickContractText(contract: ContractTextSource): { text: Contract
 // The text to show or use for a contract. `asTeam` is for the workspace's own
 // pages, which preview the live terms while the contract is being reworked
 // (see showsLiveTerms); everyone else sees what was sent.
-export async function readContractText(contract: ContractTextSource, { asTeam = false }: { asTeam?: boolean } = {}): Promise<ContractSnapshot | null> {
-  if (asTeam && showsLiveTerms(contract)) {
+// Pass the same `now` as to showsSignatures, so a sign link lapsing between
+// the two calls can't put the sent signatures under the live terms.
+export async function readContractText(contract: ContractTextSource, { asTeam = false, now = new Date() }: { asTeam?: boolean; now?: Date } = {}): Promise<ContractSnapshot | null> {
+  if (teamSeesLiveTerms(contract, asTeam, now)) {
     const live = liveContractText(contract);
     if (live) return live;
   }

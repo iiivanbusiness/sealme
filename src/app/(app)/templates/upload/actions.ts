@@ -25,6 +25,12 @@ export type ContractReview = {
 export type AnalyzeResult = { ok: true; review: ContractReview } | { ok: false; error: string };
 export type SaveResult = { error: string } | null;
 
+// Which Templates list it goes to. Anything else is a contract.
+type Kind = "proposal" | "contract";
+function templateKind(value: FormDataEntryValue | null): Kind {
+  return value === "proposal" ? "proposal" : "contract";
+}
+
 // Keep in step with serverActions.bodySizeLimit in next.config.ts, which
 // has a little room on top for the form's own overhead.
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -37,6 +43,7 @@ const MAX_BYTES = 4 * 1024 * 1024;
 export async function analyzeUploadedContract(formData: FormData): Promise<AnalyzeResult> {
   await requirePermission("canManageTemplates");
 
+  const kind = templateKind(formData.get("kind"));
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) return { ok: false, error: "Choose a file to upload." };
   const isWord = /\.docx$/i.test(file.name);
@@ -61,7 +68,7 @@ export async function analyzeUploadedContract(formData: FormData): Promise<Analy
   let found: DetectedContract | null = null;
   if (isExtractionConfigured()) {
     try {
-      found = await detectFields(clauses);
+      found = await detectFields(clauses, kind);
     } catch (err) {
       // The contract is still usable without fields: the review screen says
       // they weren't found and offers to add them by hand.
@@ -70,13 +77,14 @@ export async function analyzeUploadedContract(formData: FormData): Promise<Analy
   }
   const placed = found ?? placeFields(clauses, []);
   // The file's own signature block, which the review screen leaves out
-  // unless the user keeps it: SealMe adds its own signature section.
+  // unless the user keeps it: SealMe adds its own signature section to a
+  // contract, and a proposal isn't signed in SealMe at all.
   const marked = markSignatureBlocks(placed.clauses, findSignatureBlocks(clauses));
 
   return {
     ok: true,
     review: {
-      name: found?.title || nameFromFile(file.name),
+      name: found?.title || nameFromFile(file.name, kind),
       summary: found?.summary ?? null,
       fileName: file.name.slice(0, 200),
       clauses: marked,
@@ -88,7 +96,7 @@ export async function analyzeUploadedContract(formData: FormData): Promise<Analy
 
 // "Acme_Corp-MSA FINAL signed v3.pdf" becomes "Acme Corp MSA". Only used
 // when the model didn't suggest a name; the user can change it either way.
-function nameFromFile(fileName: string): string {
+function nameFromFile(fileName: string, kind: Kind): string {
   const name = fileName
     .replace(/\.[^.]+$/, "")
     .replace(/[_]+|\s-\s|-{2,}/g, " ")
@@ -97,7 +105,7 @@ function nameFromFile(fileName: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120);
-  return name || "Uploaded contract";
+  return name || (kind === "proposal" ? "Uploaded proposal" : "Uploaded contract");
 }
 
 // Step 2: store the template with the fields the user kept. The clauses
@@ -107,6 +115,7 @@ function nameFromFile(fileName: string): string {
 export async function saveUploadedTemplate(_prev: SaveResult, formData: FormData): Promise<SaveResult> {
   const user = await requirePermission("canManageTemplates");
 
+  const kind = templateKind(formData.get("kind"));
   const name = String(formData.get("name") ?? "").trim().slice(0, 120);
   const fileName = String(formData.get("fileName") ?? "").trim().slice(0, 200) || "your file";
   const summary = String(formData.get("summary") ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
@@ -125,7 +134,7 @@ export async function saveUploadedTemplate(_prev: SaveResult, formData: FormData
     clauses = [];
   }
   if (!name) return { error: "The template needs a name. Upload the file again." };
-  if (clauses.length === 0) return { error: "There's no contract text to save. Upload the file again." };
+  if (clauses.length === 0) return { error: `There's no ${kind} text to save. Upload the file again.` };
 
   const keys = new Set(clauses.flatMap((c) => [...c.body.matchAll(/\{(\w+)\}/g)].map((m) => m[1])));
   let id: string;
@@ -141,6 +150,7 @@ export async function saveUploadedTemplate(_prev: SaveResult, formData: FormData
           : summary || `Imported from ${fileName}. ${keys.size} ${keys.size === 1 ? "field fills" : "fields fill"} in from the call.`,
         requiredFieldCount: keys.size,
         clauses: JSON.stringify(clauses),
+        kind,
       },
     });
     id = template.id;

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requirePermission } from "@/lib/permissions";
 import { logAudit } from "@/lib/audit";
+import { buildSampleProposalTemplate } from "@/lib/default-templates";
 
 type ClauseInput = { title: string; body: string };
 
@@ -23,10 +24,17 @@ function parseClausesJson(raw: string): ClauseInput[] {
   }
 }
 
+// Templates is two lists, and the kind is set once, when a template is
+// made: deals of that kind already point at it. Anything else is a contract.
+function templateKind(value: FormDataEntryValue | null): "proposal" | "contract" {
+  return value === "proposal" ? "proposal" : "contract";
+}
+
 export async function createTemplate(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
   const clauses = parseClausesJson(String(formData.get("clausesJson") ?? "[]"));
+  const kind = templateKind(formData.get("kind"));
 
   if (!name) throw new Error("Template name is required");
   if (clauses.length === 0) throw new Error("Add at least one clause");
@@ -41,7 +49,21 @@ export async function createTemplate(formData: FormData) {
       description: description || `Custom template with ${clauses.length} clauses.`,
       requiredFieldCount: countPlaceholders(clauses),
       clauses: JSON.stringify(clauses),
+      kind,
     },
+  });
+
+  redirect(`/templates/${template.id}`);
+}
+
+// "Start from a sample proposal": a workspace's first proposal template in
+// one click, written for the workspace by name.
+export async function createSampleProposalTemplate() {
+  const user = await requirePermission("canManageTemplates");
+  const workspace = await prisma.workspace.findUnique({ where: { id: user.workspaceId }, select: { name: true } });
+
+  const template = await prisma.contractTemplate.create({
+    data: { workspaceId: user.workspaceId, ...buildSampleProposalTemplate(workspace?.name ?? "") },
   });
 
   redirect(`/templates/${template.id}`);
@@ -92,7 +114,7 @@ export async function deleteTemplate(templateId: string) {
     throw new Error("This template is used by one or more deals and can't be deleted.");
   }
   await prisma.contractTemplate.deleteMany({ where: { id: templateId, workspaceId } });
-  redirect("/templates");
+  redirect(`/templates?kind=${templateKind(template.kind)}`);
 }
 
 export async function lockTemplate(templateId: string) {

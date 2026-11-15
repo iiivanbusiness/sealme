@@ -11,9 +11,9 @@ import CompanionPanel from "@/components/CompanionPanel";
 export default async function CompanionPage() {
   const workspace = await requireWorkspace();
 
-  // Same query shape as the Dashboard's "Upcoming calls" widget — next 5,
-  // not bounded to today specifically, so the panel isn't empty right after
-  // the last event of the day passes.
+  // The next 5 meetings, not just today's (the Dashboard's Coming up is
+  // today only), so the panel isn't empty right after the last meeting of
+  // the day passes.
   const upcomingEvents = await prisma.calendarEvent.findMany({
     where: { workspaceId: workspace.id, startTime: { gte: new Date() } },
     orderBy: { startTime: "asc" },

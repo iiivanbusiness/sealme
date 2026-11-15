@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { discardStaleCalls, fillTelnyxCosts } from "@/lib/call-inbox";
+import { finishAbandonedLiveCalls } from "@/lib/live-call";
 import { syncPendingDocusignContracts } from "@/lib/docusign-sync";
 import { keepDocusignConnectionsAlive } from "@/lib/docusign";
 import { prisma } from "@/lib/db";
@@ -70,6 +71,8 @@ export async function GET(req: Request) {
           renewalDate: contract.renewalDate,
           autoRenews: contract.autoRenews,
           renewalNote: contract.renewalNote,
+          // The contract page, not the lead: it has Start renewal and opens
+          // for exactly these recipients (the lead page may 404 for them).
           dealUrl: `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/deals/${contract.dealId}/contract`,
         });
         await prisma.contract.update({ where: { id: contract.id }, data: { renewalReminderSentAt: new Date() } });
@@ -158,7 +161,7 @@ export async function GET(req: Request) {
     let crmLeadSync = { workspaces: 0 };
     try {
       const importing = await prisma.workspace.findMany({
-        where: { prospectingEnabled: true, OR: [{ salesforceLeadImport: true }, { hubspotLeadImport: true }] },
+        where: { OR: [{ salesforceLeadImport: true }, { hubspotLeadImport: true }] },
         select: { id: true, salesforceLeadImport: true, salesforceRefreshToken: true, salesforceLeadsSyncedAt: true, hubspotLeadImport: true, hubspotAccessToken: true, hubspotLeadsSyncedAt: true },
       });
       for (const ws of importing) await syncCrmLeadsIfDue(ws, { force: true, budgetMs: 20_000 });
@@ -180,9 +183,17 @@ export async function GET(req: Request) {
     }
 
     // Calls in the Calls inbox nobody processed or discarded within a day.
-    let staleCalls = { discarded: 0 };
+    // Desktop calls whose app closed mid-call are finished first, from what
+    // they heard.
+    const staleCalls = { finished: 0, discarded: 0 };
     try {
-      staleCalls = { discarded: await discardStaleCalls(now) };
+      staleCalls.finished = await finishAbandonedLiveCalls(now);
+    } catch (err) {
+      console.error("Finishing abandoned live calls (piggybacked on renewals cron) crashed", err);
+      await reportError(err, "Finishing abandoned live calls");
+    }
+    try {
+      staleCalls.discarded = await discardStaleCalls(now);
     } catch (err) {
       console.error("Stale call cleanup (piggybacked on renewals cron) crashed", err);
       await reportError(err, "Stale call cleanup");

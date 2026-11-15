@@ -314,9 +314,13 @@ export async function syncDealToSalesforce(workspaceId: string, dealId: string):
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   if (!workspace || !workspace.salesforceEnabled || !workspace.salesforceAccessToken) return;
 
+  let signedLead: string | null = null;
   try {
-    const deal = await prisma.deal.findUnique({ where: { id: dealId }, include: { client: true } });
+    const deal = await prisma.deal.findUnique({ where: { id: dealId }, include: { client: true, lead: { select: { salesforceRecordId: true, salesforceRecordType: true } } } });
     if (!deal) return;
+    // Same test as call logging: a lead from Salesforce is a Lead there
+    // unless it came in as a Contact.
+    if (deal.status === "signed" && deal.lead?.salesforceRecordId && deal.lead.salesforceRecordType !== "Contact") signedLead = deal.lead.salesforceRecordId;
 
     const contactId = await upsertContact(workspaceId, deal.client);
     await upsertOpportunity(workspaceId, deal, contactId);
@@ -324,6 +328,57 @@ export async function syncDealToSalesforce(workspaceId: string, dealId: string):
     console.error(`Salesforce sync failed for deal ${dealId}`, err);
     await reportError(err, "Salesforce deal sync", { workspaceId, dealId });
   }
+
+  // Apart from the deal push, so one failing doesn't hold up the other.
+  if (signedLead) {
+    try {
+      await markSalesforceLeadConverted(workspaceId, signedLead);
+    } catch (err) {
+      console.error(`Salesforce lead status failed for deal ${dealId}`, err);
+      await reportError(err, "Salesforce lead status", { workspaceId, dealId });
+    }
+  }
+}
+
+type LeadStatusRow = { ApiName?: string | null; MasterLabel?: string | null };
+
+// Every org marks which of its Lead Statuses mean "converted" (IsConverted),
+// and only those are asked for, first in the org's own order. Guessing by
+// name moved signed leads back to statuses like "Marketing Qualified", or
+// onto "Closed - Non-Converted". The value written to Lead.Status is the
+// picklist's API name; the label is only a fallback for a row without one.
+const CONVERTED_LEAD_STATUS_SOQL = "SELECT ApiName, MasterLabel FROM LeadStatus WHERE IsConverted = true ORDER BY SortOrder";
+
+// Throws when the org can't be read, so each caller decides what not
+// knowing means: signing leaves the lead's status alone, and so does call
+// logging (see crm-call-sync.ts).
+export async function salesforceConvertedLeadStatuses(workspaceId: string): Promise<LeadStatusRow[]> {
+  const res = await salesforceGet<{ records?: LeadStatusRow[] }>(workspaceId, `/services/data/${API_VERSION}/query?q=${encodeURIComponent(CONVERTED_LEAD_STATUS_SOQL)}`);
+  return res.records ?? [];
+}
+
+export function salesforceConvertedStatusFor(rows: LeadStatusRow[]): string | null {
+  for (const row of rows) {
+    const value = row.ApiName || row.MasterLabel;
+    if (value) return value;
+  }
+  return null;
+}
+
+// A Salesforce Lead that signed shows as converted there. Only its status:
+// a real Lead convert isn't possible over the REST API, so the person also
+// has the Contact the deal push made. A lead already converted, or already
+// at that status, is left alone, and so is every lead in an org with no
+// converted status. A failed lookup throws, so the caller reports it.
+async function markSalesforceLeadConverted(workspaceId: string, leadId: string): Promise<void> {
+  if (!/^[a-zA-Z0-9]{15,18}$/.test(leadId)) throw new Error("Not a Salesforce id");
+  const base = `/services/data/${API_VERSION}/sobjects`;
+  const target = salesforceConvertedStatusFor(await salesforceConvertedLeadStatuses(workspaceId));
+  if (!target) return;
+  const lead = await salesforceGet<{ Status?: string | null; IsConverted?: boolean }>(workspaceId, `${base}/Lead/${leadId}?fields=Status,IsConverted`);
+  if (lead.IsConverted || lead.Status === target) return;
+  const res = await sfFetch(workspaceId, `${base}/Lead/${leadId}`, { method: "PATCH", body: JSON.stringify({ Status: target }) });
+  if (!res.ok && res.status !== 204) throw new Error(`Salesforce Lead status update failed: ${res.status} ${await res.text()}`);
 }
 
 // A write against the org's REST API (call logging, lead status), with the

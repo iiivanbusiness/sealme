@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addGhlNote, addGhlTask, createGhlOpportunity, ghlCallNote, ghlNameParts, listGhlPipelines, upsertGhlContact } from "./gohighlevel";
+import { addGhlNote, addGhlTask, createGhlOpportunity, ghlCallNote, ghlNameParts, listGhlPipelines, markGhlOpportunityWon, upsertGhlContact } from "./gohighlevel";
 
 type Sent = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
@@ -46,6 +46,13 @@ describe("GoHighLevel requests", () => {
     sent = mockFetch({ opportunity: { id: "o1" } });
     expect(await createGhlOpportunity("t", { locationId: "loc", pipelineId: "p1", stageId: "s1", contactId: "c1", name: "Brightline (Laura Chen)" })).toBe("o1");
     expect(sent[0].body).toEqual({ locationId: "loc", pipelineId: "p1", pipelineStageId: "s1", contactId: "c1", name: "Brightline (Laura Chen)", status: "open" });
+  });
+
+  it("marks the opportunity won when the lead signs", async () => {
+    const sent = mockFetch({ succeded: true });
+    await markGhlOpportunityWon("pit-abc", "o1");
+    expect(sent[0]).toMatchObject({ url: "https://services.leadconnectorhq.com/opportunities/o1/status", method: "PUT", body: { status: "won" } });
+    expect(sent[0].headers.Version).toBe("2021-07-28");
   });
 
   it("says what went wrong when GoHighLevel refuses", async () => {

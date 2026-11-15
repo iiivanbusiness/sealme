@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contractExpired, contractLocksTerms } from "./contract-status";
+import { contractClosed, contractExpired, contractLocksTerms, documentLocksTerms } from "./contract-status";
 import { dealStatusChip, dealStatusLabel } from "./deal-status";
 
 const NOW = new Date("2026-11-04T12:00:00Z");
@@ -34,5 +34,35 @@ describe("An expired sign link", () => {
     expect(dealStatusLabel("sent")).toBe("Sent - awaiting signature");
     // Only a sent deal is waiting on the link.
     expect(dealStatusLabel("changes_requested", true)).toBe("Changes requested");
+  });
+});
+
+describe("A contract that won't be signed", () => {
+  it("is one whose link ran out or that the rep marked not signed", () => {
+    expect(contractClosed({ status: "not_signed", deliveryMethod: "docusign", expiresAt: null }, NOW)).toBe(true);
+    expect(contractClosed({ status: "expired", deliveryMethod: "sealme", expiresAt: null }, NOW)).toBe(true);
+    expect(contractClosed({ status: "sent", deliveryMethod: "sealme", expiresAt: YESTERDAY }, NOW)).toBe(true);
+    for (const status of ["draft", "pending_approval", "sent", "partially_signed", "changes_requested", "signed"]) {
+      expect(contractClosed({ status, deliveryMethod: "sealme", expiresAt: TOMORROW }, NOW)).toBe(false);
+    }
+    expect(contractClosed(null, NOW)).toBe(false);
+  });
+
+  it("leaves its terms open to rework before it's sent again", () => {
+    expect(contractLocksTerms({ status: "not_signed", deliveryMethod: "sealme", expiresAt: null }, NOW)).toBe(false);
+    expect(contractLocksTerms("not_signed")).toBe(false);
+  });
+});
+
+describe("Editing terms after sending", () => {
+  it("stays open for a proposal, which is never signed", () => {
+    expect(documentLocksTerms({ status: "sent", deliveryMethod: "sealme", expiresAt: null }, "proposal", NOW)).toBe(false);
+    expect(documentLocksTerms("sent", "proposal")).toBe(false);
+  });
+
+  it("locks a contract that's out for signature, as before", () => {
+    expect(documentLocksTerms({ status: "sent", deliveryMethod: "sealme", expiresAt: TOMORROW }, "contract", NOW)).toBe(true);
+    expect(documentLocksTerms("signed", undefined)).toBe(true);
+    expect(documentLocksTerms({ status: "sent", deliveryMethod: "sealme", expiresAt: YESTERDAY }, null, NOW)).toBe(false);
   });
 });

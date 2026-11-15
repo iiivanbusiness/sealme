@@ -29,7 +29,7 @@ export default async function EditTemplatePage({ params }: { params: Promise<{ i
     </Link>
 
     <div className="mb-6 max-w-[560px]">
-      <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>Edit template</h1>
+      <h1 className="text-[25px] font-medium" style={{ letterSpacing: "-0.8px" }}>{template.kind === "proposal" ? "Edit proposal template" : "Edit contract template"}</h1>
       <div className="mt-1 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>
         Add {"{fieldKey}"} placeholders anywhere you want deal terms filled in automatically.
       </div>

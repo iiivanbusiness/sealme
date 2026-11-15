@@ -4,6 +4,8 @@ import { apiGuard, apiJson, apiError, parseIsoParam, readJsonObject } from "@/li
 import { serializeDeal } from "@/lib/api-serialize";
 import { announceNewDeal, finishTranscriptDeal } from "@/lib/api-deals";
 import { reportError } from "@/lib/error-report";
+import { findApiLead } from "@/lib/api-activity";
+import { leadForClient } from "@/lib/client-lead";
 
 // Reading terms from a long transcript can take a minute; it runs after
 // the 202, within this route's time.
@@ -13,10 +15,12 @@ const MAX_TRANSCRIPT = 400_000;
 
 const PAGE_SIZE = 50;
 
-// GET /api/v1/deals?status=&updatedSince=&cursor= — a workspace's own IT
+const DEAL_KINDS = ["contract", "proposal", "all"];
+
+// GET /api/v1/deals?status=&updatedSince=&kind=&cursor=: a workspace's own IT
 // team pulling deals into their own systems (a CRM sync, a BI dashboard).
 // An API key is a workspace-wide credential (no per-user identity), so
-// this deliberately sees every deal, the same way SCIM does — not scoped
+// this deliberately sees every deal, the same way SCIM does, not scoped
 // by dealVisibilityFilter, which is about a person's own view inside the
 // app.
 export async function GET(req: Request) {
@@ -29,11 +33,16 @@ export async function GET(req: Request) {
   const since = parseIsoParam(url.searchParams.get("updatedSince"), "updatedSince");
   if ("error" in since) return apiError(400, since.error);
   const updatedSinceDate = since.date;
+  // Contracts only unless asked: integrations written before proposals
+  // existed treat every deal here as a contract.
+  const kind = url.searchParams.get("kind") || "contract";
+  if (!DEAL_KINDS.includes(kind)) return apiError(400, `kind must be one of: ${DEAL_KINDS.join(", ")}`);
 
   const deals = await prisma.deal.findMany({
     where: {
       workspaceId: auth.workspaceId,
       trashedAt: null,
+      ...(kind === "all" ? {} : { kind }),
       ...(status ? { status } : {}),
       ...(updatedSinceDate ? { updatedAt: { gte: updatedSinceDate } } : {}),
     },
@@ -63,7 +72,10 @@ const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v
 //  - { client | clientId, service, fee, templateId? }: a deal whose terms
 //    are already known, "ready" straight away.
 // ownerEmail gives the deal to a teammate; without it the deal has no
-// owner, which everyone who can see deals can see.
+// owner, which everyone who can see deals can see. leadId or leadExternalId
+// puts the deal on that lead (its client details fill in for a missing
+// client); without them it goes on the client's lead, found by the client's
+// earlier deals or email, or made from the client.
 export async function POST(req: Request) {
   const auth = await apiGuard(req, { write: true });
   if (auth instanceof Response) return auth;
@@ -76,8 +88,11 @@ export async function POST(req: Request) {
   if (transcript.length > MAX_TRANSCRIPT) return apiError(413, `transcript is too long (${MAX_TRANSCRIPT.toLocaleString("en-US")} characters at most)`);
 
   const templateId = text(body.templateId, 100);
-  const template = templateId ? await prisma.contractTemplate.findFirst({ where: { id: templateId, workspaceId }, select: { id: true, clauses: true } }) : null;
+  const template = templateId ? await prisma.contractTemplate.findFirst({ where: { id: templateId, workspaceId }, select: { id: true, clauses: true, kind: true } }) : null;
   if (templateId && !template) return apiError(400, "templateId doesn't match a template in this workspace. GET /api/v1/templates lists them");
+  // The API makes contracts; a proposal template would make a contract
+  // that reads like a proposal.
+  if (template?.kind === "proposal") return apiError(400, "templateId must be a contract template (kind contract). GET /api/v1/templates lists them");
 
   const ownerEmail = text(body.ownerEmail, 200)?.toLowerCase() ?? null;
   const owner = ownerEmail ? await prisma.user.findFirst({ where: { workspaceId, email: { equals: ownerEmail, mode: "insensitive" }, deactivatedAt: null }, select: { id: true, teamId: true } }) : null;
@@ -87,16 +102,37 @@ export async function POST(req: Request) {
   const given = { name: text(clientIn?.name, 200), company: text(clientIn?.company, 200), email: text(clientIn?.email, 200)?.toLowerCase() ?? null };
   if (given.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(given.email)) return apiError(400, "client.email doesn't look like an email address");
   const clientId = text(body.clientId, 100);
-  const existingClient = clientId ? await prisma.client.findFirst({ where: { id: clientId, workspaceId } }) : null;
-  if (clientId && !existingClient) return apiError(400, "clientId doesn't match a client in this workspace");
+  const pickedClient = clientId ? await prisma.client.findFirst({ where: { id: clientId, workspaceId } }) : null;
+  if (clientId && !pickedClient) return apiError(400, "clientId doesn't match a client in this workspace");
+
+  // Any value but a blank one goes to findApiLead, which takes a number too
+  // (as the leads API stores it) and answers 400 or 404 for the rest, so a
+  // lead asked for is never skipped for one made from the client.
+  const leadAsked = (v: unknown) => v != null && !(typeof v === "string" && !v.trim());
+  const named = leadAsked(body.leadId) || leadAsked(body.leadExternalId) ? await findApiLead(workspaceId, body) : null;
+  if (named && "error" in named) return apiError(named.status, named.error);
+  const lead = named?.lead ?? null;
+  // A lead's deals all go to one client: the one its earlier deals went to.
+  const leadClient = !pickedClient && lead?.convertedClientId ? await prisma.client.findFirst({ where: { id: lead.convertedClientId, workspaceId } }) : null;
+  const existingClient = pickedClient ?? leadClient;
+  if (lead && !existingClient && !given.name) Object.assign(given, { name: lead.name.slice(0, 200), company: given.company ?? lead.company, email: given.email ?? lead.email });
+  const leadFor = async (client: { id: string; name: string; company: string; email: string | null }) => {
+    if (!lead) return leadForClient(workspaceId, client, { ownerId: owner?.id ?? null, source: "api" });
+    if (!lead.convertedClientId) await prisma.lead.update({ where: { id: lead.id }, data: { convertedClientId: client.id } });
+    return lead.id;
+  };
 
   if (transcript) {
     if (!template) return apiError(400, "templateId is required with a transcript, so SealMe knows which terms to look for");
     const client = existingClient ?? (await prisma.client.create({ data: { workspaceId, name: given.name ?? "New client", company: given.company ?? given.name ?? "New client", email: given.email } }));
+    // Nobody said who the client is: the transcript names them, then the
+    // deal goes on their lead (see finishTranscriptDeal).
+    const unnamed = !lead && !existingClient && !given.name;
     const deal = await prisma.deal.create({
       data: {
         workspaceId,
         clientId: client.id,
+        leadId: unnamed ? null : await leadFor(client),
         templateId: template.id,
         ownerId: owner?.id ?? null,
         teamId: owner?.teamId ?? null,
@@ -118,6 +154,7 @@ export async function POST(req: Request) {
         transcript,
         templateClauses: template.clauses,
         clientGiven: existingClient ? { name: true, company: true, email: Boolean(existingClient.email) } : { name: Boolean(given.name), company: Boolean(given.company), email: Boolean(given.email) },
+        linkLead: unnamed ? { ownerId: owner?.id ?? null } : undefined,
       }),
     );
     return apiJson(serializeDeal(deal), 202);
@@ -132,6 +169,7 @@ export async function POST(req: Request) {
     data: {
       workspaceId,
       clientId: client.id,
+      leadId: await leadFor(client),
       templateId: template?.id ?? null,
       ownerId: owner?.id ?? null,
       teamId: owner?.teamId ?? null,

@@ -27,15 +27,20 @@ export type TranscriptDeal = { dealId: string; callId: string; clientId: string;
 // contract can't be sent to nobody.
 export async function createDealFromTranscriptText(options: {
   workspaceId: string;
-  ownerId: string;
+  ownerId: string | null;
   teamId: string | null;
   templateId: string;
   transcript: string;
   callSource: string; // Call.source
   dealSource: string; // Deal.source
   knownClient?: KnownClient | null;
+  // The client this lead's earlier proposals and contracts went to: the new
+  // deal goes to them too, instead of a client found or made from the call.
+  clientId?: string | null;
   requireEmail?: boolean;
   note?: { authorEmail: string; authorName: string; body: string } | null;
+  // The lead and the call the deal was made from, and what it is.
+  link?: { leadId: string; phoneCallId: string; kind: "proposal" | "contract" } | null;
 }): Promise<TranscriptDeal> {
   const { workspaceId, knownClient } = options;
   const template = await prisma.contractTemplate.findFirst({ where: { id: options.templateId, workspaceId } });
@@ -50,7 +55,11 @@ export async function createDealFromTranscriptText(options: {
   const heardEmail = extracted.email?.trim().toLowerCase() || null;
   const email = knownClient?.email?.toLowerCase() || (heardEmail && EMAIL.test(heardEmail) ? heardEmail : null);
 
-  const existingClient = knownClient && email ? await prisma.client.findFirst({ where: { workspaceId, email: { equals: email, mode: "insensitive" } } }) : null;
+  const existingClient = options.clientId
+    ? await prisma.client.findFirst({ where: { id: options.clientId, workspaceId } })
+    : knownClient && email
+      ? await prisma.client.findFirst({ where: { workspaceId, email: { equals: email, mode: "insensitive" } } })
+      : null;
 
   // A known client's contract is with their company, when there is one.
   let fieldRows = knownClient ? built.fieldRows.map((f) => (f.fieldKey === "clientName" ? { ...f, value: company, status: "confirmed", confidence: null } : f)) : built.fieldRows;
@@ -97,6 +106,7 @@ export async function createDealFromTranscriptText(options: {
         status: hasMissing ? "missing_info" : "ready",
         summary: extracted.summary,
         source: options.dealSource,
+        ...(options.link ? { leadId: options.link.leadId, phoneCallId: options.link.phoneCallId, kind: options.link.kind } : {}),
         fields: { create: fieldRows },
         calls: { create: { transcript: options.transcript, source: options.callSource, endedAt: new Date() } },
         ...(options.note ? { notes: { create: options.note } } : {}),
@@ -112,11 +122,13 @@ export async function createDealFromTranscriptText(options: {
 
 // The slow half, for after the rep is already looking at the deal: action
 // items and highlights from the call (two more model calls), then the
-// deal.created webhook, Slack and the CRM push.
-export async function finishTranscriptDealInBackground(workspaceId: string, dealId: string, callId: string, transcript: string): Promise<void> {
+// deal.created webhook, Slack and the CRM push. A proposal isn't announced:
+// webhooks, Slack and the CRM hear about contracts.
+export async function finishTranscriptDealInBackground(workspaceId: string, dealId: string, callId: string, transcript: string, options: { announce?: boolean } = {}): Promise<void> {
   await Promise.all([
     extractActionItems(callId).catch((err) => reportError(err, "Action item extraction", { dealId })),
     extractCallHighlights(dealId, transcript, callId).catch((err) => reportError(err, "Call highlight extraction", { dealId })),
   ]);
+  if (options.announce === false) return;
   await announceNewDeal(workspaceId, dealId).catch((err) => reportError(err, "Integrations after a new deal", { dealId }));
 }

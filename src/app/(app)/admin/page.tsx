@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db";
 import { requireAdmin } from "@/lib/admin";
 import { formatMinutes, formatUsd, NO_USAGE, totalUsage, usageBy } from "@/lib/admin-usage";
 import { isTestEmail, NOT_TEST_EMAIL } from "@/lib/test-emails";
-import { applyPlanChange, dismissUpgradeRequest, setProspectingEnabled } from "./actions";
+import { applyPlanChange, dismissUpgradeRequest } from "./actions";
 
 function startOfMonth(): Date {
   const now = new Date();
@@ -27,7 +27,7 @@ function timeAgo(date: Date): string {
 
 // The admin tables have to fit beside the sidebar at any window width,
 // not just full screen: lower-priority columns drop out as the window
-// narrows instead of pushing the Prospecting switch off the edge.
+// narrows instead of pushing the table off the edge.
 // When someone signed up is in New sign-ups, so it isn't repeated here.
 const COLUMN_SHOW = {
   owner: "hidden lg:table-cell",
@@ -47,7 +47,6 @@ const WORKSPACE_COLUMNS = [
   { label: "Cost", show: COLUMN_SHOW.cost },
   { label: "Deals", show: COLUMN_SHOW.deals },
   { label: "Last activity", show: COLUMN_SHOW.lastActivity },
-  { label: "Prospecting", show: "" },
 ];
 
 // New sign-ups: who joined, how, whether they came back, and what they've used.
@@ -102,25 +101,110 @@ const AUDIT_COLUMNS = [
   { label: "Details", show: AUDIT_SHOW.details },
 ];
 
+// One short label for every action logAudit records (grep logAudit( to
+// check). Anything missing shows its raw name.
 const AUDIT_ACTION_LABEL: Record<string, string> = {
   "login.success": "Signed in",
   "login.failure": "Failed sign-in",
   "login.rate_limited": "Sign-in rate-limited",
-  "workspace.created": "Workspace created",
   "password.reset": "Password reset",
-  "contract.sent": "Contract sent",
-  "contract.signed": "Contract signed",
+  "2fa.enabled": "2FA turned on",
+  "2fa.disabled": "2FA turned off",
+  "2fa.backup_codes_regenerated": "New 2FA backup codes",
+  "account.self_deleted": "Account deleted",
+  "account.unverified_password_removed": "Unverified password removed",
+  "workspace.created": "Workspace created",
+  "workspace.domain_verified": "Domain verified",
+  "workspace.domain_restriction_updated": "Domain restriction changed",
+  "workspace.sso_enabled": "SSO turned on",
+  "workspace.sso_disabled": "SSO turned off",
+  "workspace.sso_config_updated": "SSO settings changed",
+  "workspace.scim_token_generated": "SCIM token made",
+  "workspace.scim_token_revoked": "SCIM token revoked",
   "teammate.invited": "Teammate invited",
+  "teammate.joined": "Teammate joined",
   "teammate.removed": "Teammate removed",
+  "teammate.sso_provisioned": "Teammate added by SSO",
+  "team.created": "Team created",
+  "team.deleted": "Team deleted",
+  "team.member_assigned": "Moved to a team",
+  "role.created": "Role created",
+  "role.updated": "Role changed",
+  "role.deleted": "Role deleted",
+  "role.assigned": "Role assigned",
+  "review_chain.created": "Review chain created",
+  "review_chain.deleted": "Review chain deleted",
+  "review_chain_step.added": "Review step added",
+  "review_chain_step.removed": "Review step removed",
+  "approval_delegate.created": "Approvals delegated",
+  "approval_delegate.revoked": "Delegation ended",
+  "proposal.sent": "Proposal sent",
+  "proposal.reminder_sent": "Proposal reminder sent",
+  "proposal.reminder_link_copied": "Reminder link copied",
+  "proposal.link_shared": "Proposal link shared",
+  "proposal.link_updated": "Proposal link updated",
+  "deal.contract_from_proposal": "Contract from proposal",
+  "deal.renewal_started": "Renewal started",
+  "deal.restored": "Restored from trash",
+  "deals.trash_emptied": "Trash emptied",
+  "deal.local_capture_transcribed": "Desktop recording transcribed",
+  "call.local_capture_transcribed": "Desktop recording transcribed",
+  "call.deleted": "Call deleted",
+  "lead.deleted": "Lead deleted",
+  "client.updated": "Client edited",
+  "template.locked": "Template locked",
+  "template.unlocked": "Template unlocked",
+  "contract.sent": "Contract sent",
+  "contract.sent_for_review": "Sent for review",
+  "contract.approval_requested": "Approval requested",
+  "contract.approval_approved": "Approved",
+  "contract.approval_rejected": "Approval rejected",
+  "contract.clause_change_requested": "Client asked for changes",
+  "contract.client_signed": "Client signed",
+  "contract.countersigned": "Counter-signed",
+  "contract.countersign_declined": "Counter-sign declined",
+  "contract.signed": "Contract signed",
+  "contract.marked_not_signed": "Marked not signed",
+  "contract.expired": "Contract expired",
+  "contract.docusign_declined": "Declined in DocuSign",
+  "contract.docusign_voided": "Voided in DocuSign",
+  "api_key.created": "API key created",
+  "api_key.revoked": "API key revoked",
+  "webhook.created": "Webhook added",
+  "webhook.deleted": "Webhook removed",
+  "sandbox.reset": "Sandbox reset",
+  "sandbox.deleted": "Sandbox deleted",
+  "data.bulk_imported": "Data imported",
+  "hubspot.connected": "HubSpot connected",
+  "hubspot.disconnected": "HubSpot disconnected",
+  "hubspot.deal_stages.saved": "HubSpot deal stages set",
+  "hubspot.deal_stages.off": "HubSpot deal stages off",
+  "hubspot.lead_import.on": "HubSpot lead import on",
+  "hubspot.lead_import.off": "HubSpot lead import off",
+  "hubspot.webhook_secret.saved": "HubSpot secret saved",
+  "hubspot.webhook_secret.cleared": "HubSpot secret cleared",
+  "salesforce.connected": "Salesforce connected",
+  "salesforce.disconnected": "Salesforce disconnected",
+  "salesforce.lead_import.on": "Salesforce lead import on",
+  "salesforce.lead_import.off": "Salesforce lead import off",
+  "salesforce.webhook_key.created": "Salesforce key made",
+  "salesforce.webhook_key.removed": "Salesforce key removed",
+  "gohighlevel.connected": "GoHighLevel connected",
+  "gohighlevel.disconnected": "GoHighLevel disconnected",
+  "docusign.connected": "DocuSign connected",
+  "docusign.disconnected": "DocuSign disconnected",
+  "slack.connected": "Slack connected",
+  "slack.disconnected": "Slack disconnected",
+  "slack.channel_set": "Slack channel set",
   "admin.plan_changed": "Plan changed",
-  "admin.prospecting_enabled": "Prospecting turned on",
-  "admin.prospecting_disabled": "Prospecting turned off",
 };
 
 const AUDIT_ACTION_CHIP: Record<string, string> = {
   "login.failure": "chip-warn",
   "login.rate_limited": "chip-warn",
   "contract.signed": "chip-success",
+  "contract.marked_not_signed": "chip-warn",
+  "contract.expired": "chip-warn",
   "workspace.created": "chip-success",
 };
 
@@ -397,17 +481,6 @@ export default async function AdminPage() {
                   <td className={`font-mono-tab ${cell} ${COLUMN_SHOW.deals}`} style={border}>{stats._count}</td>
                   <td className={`whitespace-nowrap ${cell} ${COLUMN_SHOW.lastActivity}`} style={muted}>
                     {stats._max.updatedAt ? timeAgo(stats._max.updatedAt) : "-"}
-                  </td>
-                  <td className={cell} style={border}>
-                    <form action={setProspectingEnabled.bind(null, w.id, !w.prospectingEnabled)}>
-                      <button
-                        type="submit"
-                        className={`chip ${w.prospectingEnabled ? "chip-success" : "chip-neutral"}`}
-                        title={w.prospectingEnabled ? "Turn off Leads, tasks, and calls for this workspace" : "Turn on Leads, tasks, and calls for this workspace"}
-                      >
-                        {w.prospectingEnabled ? "On" : "Off"}
-                      </button>
-                    </form>
                   </td>
                 </tr>
               );

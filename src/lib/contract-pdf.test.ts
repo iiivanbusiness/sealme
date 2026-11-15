@@ -84,3 +84,31 @@ describe("contract PDF text", () => {
     }
   }, 30_000);
 });
+
+describe("proposal PDF", () => {
+  it("names who it's for and who wrote it, and never has a place to sign", async () => {
+    const buffer = await renderToBuffer(
+      createElement(ContractPdfDocument, {
+        templateName: "SEO proposal",
+        agencyName: "Acme",
+        clientName: "Priya Shah",
+        clauses: [{ title: "Scope", body: "Monthly SEO." }],
+        signedBy: "Priya Shah",
+        signedAt: new Date("2026-11-05T02:30:00Z"),
+        docusignAnchors: [{ label: "Priya Shah (Client)", anchor: "[[sig1]]" }],
+        kind: "proposal",
+      }) as Parameters<typeof renderToBuffer>[0],
+    );
+    const parser = new PDFParse({ data: new Uint8Array(buffer) });
+    try {
+      const { text } = await parser.getText();
+      expect(text).toContain("Prepared for Priya Shah by Acme");
+      expect(text).not.toContain("Between");
+      expect(text).not.toContain("Signed electronically");
+      expect(text).not.toContain("Signature");
+      expect(text).not.toContain("[[sig1]]");
+    } finally {
+      await parser.destroy();
+    }
+  }, 30_000);
+});

@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { LeadPicker, type LeadOption } from "@/components/CallUploadForm";
+import { WhoOnCall } from "@/components/CallUploadForm";
+import type { CallLeadOption } from "@/app/(app)/leads/search-actions";
 import { formatClock, recorder, recorderError, type RecorderStatus, type SavedRecording } from "@/lib/native-recorder";
 import { transcriptFromListenResponse } from "@/lib/recording-transcript";
 import { formatCallDuration, formatFileSize } from "@/lib/recording-upload";
@@ -34,7 +35,7 @@ const STATE_LINE: Record<string, string> = {
 // notes on the client's lead (picked here, or found from the call) and only
 // then deletes it from the phone. A recording that didn't make it (no
 // signal, the app closed) stays on the phone and is offered here again.
-export default function MeetingRecorder({ save, searchLeads }: { save: (formData: FormData) => Promise<void>; searchLeads: (q: string) => Promise<LeadOption[]> }) {
+export default function MeetingRecorder({ save, searchLeads }: { save: (formData: FormData) => Promise<{ leadId: string; callId: string }>; searchLeads: (q: string) => Promise<CallLeadOption[]> }) {
   const router = useRouter();
   const form = useRef<HTMLFormElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -114,10 +115,11 @@ export default function MeetingRecorder({ save, searchLeads }: { save: (formData
       data.set("transcript", heard.transcript);
       data.set("seconds", String(Math.round(recording.seconds || heard.seconds)));
       data.set("leadId", leadId);
-      await save(data);
+      const saved = await save(data);
       // Saved: the recording can go from the phone.
       await recorder.discard(recording.path).catch(() => {});
-      router.push("/notes?added=1");
+      // The lead opens on this call, the same as after an upload on the computer.
+      router.push(saved.leadId ? `/leads/${saved.leadId}?call=${saved.callId}&added=1` : "/leads?added=1");
     } catch (err) {
       setPhase({ kind: "error", message: err instanceof Error ? err.message : recorderError(err).message, recording, leadId, heard });
     }
@@ -278,7 +280,7 @@ export default function MeetingRecorder({ save, searchLeads }: { save: (formData
 
       {(phase.kind === "ready" || phase.kind === "live") && (
         <div className="card p-5">
-          <LeadPicker search={searchLeads} />
+          <WhoOnCall search={searchLeads} />
         </div>
       )}
 

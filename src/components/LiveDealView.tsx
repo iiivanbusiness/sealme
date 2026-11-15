@@ -15,8 +15,11 @@ import VoiceCorrectionButton from "./VoiceCorrectionButton";
 import DealNotes from "./DealNotes";
 import ClientText from "./ClientText";
 import ReviewPanel from "./ReviewPanel";
-import { contractLocksTerms } from "@/lib/contract-status";
-import { dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
+import ProposalActions from "./ProposalActions";
+import MarkNotSignedButton from "./MarkNotSignedButton";
+import RestoreFromTrashButton from "./RestoreFromTrashButton";
+import { documentLocksTerms } from "@/lib/contract-status";
+import { canMarkNotSigned, dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -25,6 +28,10 @@ type FieldItem = { id: string; fieldKey: string; groupLabel: string; label: stri
 type CallItem = { id: string; source: string; startedAt: Date; endedAt: Date | null; transcript: string };
 type ActionItemT = { id: string; description: string; ownerType: string; dueDate: Date | null; status: string; sourceQuote: string | null };
 type CallHighlightItem = { id: string; type: string; body: string; sourceQuote: string | null };
+// secondary sits under the main button, for a less common way out.
+type NextStep = { title: string; detail: string; action?: React.ReactNode; secondary?: React.ReactNode };
+// Who put the contract in changes_requested, from the audit trail.
+export type ChangesRequestedBy = { by: "reviewer" | "client" | "signer"; name: string | null };
 
 type LiveDealState = {
   status: string;
@@ -104,6 +111,7 @@ function timeAgo(date: Date): string {
 // is over and the deal has left "processing".
 export default function LiveDealView({
   dealId,
+  leadId,
   clientName,
   service,
   callLength,
@@ -132,13 +140,25 @@ export default function LiveDealView({
   sendForReviewToAction,
   docusignEnabled,
   contractStatus: initialContractStatus,
+  contractSentAt = null,
+  trashed = false,
   contractExpired: initialContractExpired,
   docusignVoid,
+  changesRequestedBy,
   clientHasEmail,
   sendViaDocusignNowAction,
   reviewPanel,
+  kind = "contract",
+  contractId = null,
+  derivedContractId = null,
+  contractTemplates = [],
+  sourceDealId = null,
+  changedSinceSent = false,
+  today,
 }: {
   dealId: string;
+  // The lead the deal is on, for the way back; null when the viewer can't open it.
+  leadId: string | null;
   clientName: string;
   service: string;
   callLength: string | null;
@@ -168,12 +188,21 @@ export default function LiveDealView({
   sendForReviewToAction: (dealId: string, assigneeId: string) => Promise<{ error?: string }>;
   docusignEnabled: boolean;
   contractStatus: string | null;
+  // When the contract went to the client, if it did: changes asked for
+  // after that can still be marked not signed (canMarkNotSigned).
+  contractSentAt?: Date | null;
+  // In the trash: nothing goes out from it until it's restored.
+  trashed?: boolean;
   // The SealMe sign link ran out (contractExpired in contract-status.ts),
   // worked out on the server, which knows expiresAt.
   contractExpired: boolean;
   // Set when a DocuSign envelope was voided rather than anyone asking for
   // changes; reason is DocuSign's, when it gave one.
   docusignVoid?: { reason: string | null };
+  // Who asked for the changes, when the contract is in changes_requested
+  // and the audit trail says (a reviewer, the client, or a signer who
+  // declined, with their name).
+  changesRequestedBy?: ChangesRequestedBy;
   clientHasEmail: boolean;
   sendViaDocusignNowAction: (dealId: string) => Promise<{ error?: string; heldForReviewBy?: string }>;
   reviewPanel: {
@@ -202,6 +231,21 @@ export default function LiveDealView({
     deleteCommentAction: (dealId: string, commentId: string) => Promise<{ error?: string }>;
     updateStepMetaAction: (dealId: string, reviewStepId: string, formData: FormData) => Promise<{ error?: string }>;
   } | null;
+  // "proposal" or "contract" (anything else counts as a contract). A
+  // proposal is only sent and read: no signing, DocuSign or review.
+  kind?: string;
+  // The Contract row, which holds the document (a proposal's too).
+  contractId?: string | null;
+  // A proposal's contract, once one was made from it.
+  derivedContractId?: string | null;
+  // The workspace's contract templates, for making a proposal's contract.
+  contractTemplates?: { id: string; name: string }[];
+  // The proposal a contract was made from.
+  sourceDealId?: string | null;
+  // A sent proposal whose terms changed after it went out.
+  changedSinceSent?: boolean;
+  // The viewer's current day (YYYY-MM-DD), for overdue action items.
+  today: string;
 }) {
   const [status, setStatus] = useState(initialStatus);
   const [summary, setSummary] = useState(initialSummary);
@@ -283,17 +327,73 @@ export default function LiveDealView({
     groups.get(field.groupLabel)!.push(field);
   }
   const missing = fields.filter((f) => f.status === "missing");
-  const canSendToDocusignNow = docusignEnabled && status === "ready" && contractStatus === "draft" && clientHasEmail;
+  const isProposal = kind === "proposal";
+  const canSendToDocusignNow = !trashed && !isProposal && docusignEnabled && status === "ready" && contractStatus === "draft" && clientHasEmail;
   // The same rule the server actions enforce: the terms are what a reviewer
   // or the client is looking at, so they can't be edited, unless the sign
-  // link expired and the contract has to go out again anyway.
-  const termsLocked = !contractExpired && contractLocksTerms(contractStatus);
+  // link expired or the rep marked it not signed (a status that never locks)
+  // and the contract has to go out again anyway.
+  const termsLocked = !contractExpired && documentLocksTerms(contractStatus, kind);
   const firstName = clientName.split(/\s+/)[0] || clientName;
+  // Wherever the contract screen offers it too: still out, past its link,
+  // or changes asked for after it went out. Not from the trash, which the
+  // server refuses.
+  const markNotSigned = !trashed && canMarkNotSigned(contractStatus ? { status: contractStatus, sentAt: contractSentAt } : null, kind)
+    ? <MarkNotSignedButton dealId={dealId} clientName={clientName} inverted />
+    : undefined;
+  // Every send refuses the trash, so the next step is getting it back out.
+  const trashedNextStep: NextStep = {
+    title: "In the trash",
+    detail: `Nothing goes to ${firstName} from the trash. Restore it to carry on.`,
+    action: <RestoreFromTrashButton dealId={dealId} inverted />,
+  };
+
+  // A proposal goes Draft, Sent, Viewed, then on to its contract. It's never
+  // signed, reviewed or expired, so none of the contract's steps apply.
+  function proposalNextStep(): NextStep {
+    if (status === "processing") return { title: "SealMe is reading the call", detail: "The terms fill in by themselves in a moment." };
+    if (status === "extraction_failed") return { title: "Reading the call failed", detail: "Try again; nothing is lost.", action: <form action={retryExtractionAction}><NextButton>Try again</NextButton></form> };
+    if (missing.length > 0) {
+      return {
+        title: missing.length === 1 ? `Fill in ${missing[0].label.toLowerCase()}` : `Fill in ${missing.length} details`,
+        detail: "The call didn't cover them. Then the proposal is ready to send.",
+        action: <a href="#missing" className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Fill them in</a>,
+      };
+    }
+    if (!hasContract) return { title: "Make the proposal", detail: `Everything's in. SealMe drafts it on the ${templateName ?? "default"} template.`, action: <form action={generateContractAction}><NextButton>Make the proposal</NextButton></form> };
+    if (derivedContractId) return { title: "Contract made", detail: "Carry on from the contract.", action: <Link href={`/deals/${derivedContractId}`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open contract</Link> };
+    if (contractStatus === "sent") {
+      return contractViewedAt
+        ? { title: `${firstName} opened it ${timeAgo(contractViewedAt)}`, detail: "Make the contract when they're ready to go ahead." }
+        : { title: `Sent to ${firstName}`, detail: "They haven't opened it yet." };
+    }
+    return { title: "Check the proposal and send it", detail: "Send it by email or copy the link. Nothing goes out until you do.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Review and send</Link> };
+  }
+
+  // Not from contractSentAt: it stays set from an earlier round when a new
+  // one goes to review, so a reviewer's or counter-signer's no would read as
+  // the client's.
+  function changesRequestedStep(): NextStep {
+    const action = <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link>;
+    if (changesRequestedBy?.by === "signer") {
+      return { title: "Declined to sign", detail: `${changesRequestedBy.name ?? "A signer"} declined to sign. Make any changes, then send it again.`, action };
+    }
+    const detail =
+      changesRequestedBy?.by === "client"
+        ? `${firstName} asked for changes. Make them, then send it again.`
+        : changesRequestedBy?.by === "reviewer"
+          ? "A reviewer asked for changes before it goes out."
+          : "Changes were asked for. Make them, then send it again.";
+    return { title: "Make the requested changes", detail, action };
+  }
 
   // The one thing this deal needs next, said at the top so nobody has to
   // hunt for the button.
-  const next: { title: string; detail: string; action?: React.ReactNode } =
-    status === "processing"
+  const stepNow: NextStep = trashed
+    ? trashedNextStep
+    : isProposal
+    ? proposalNextStep()
+    : status === "processing"
       ? { title: "SealMe is reading the call", detail: "The terms fill in by themselves in a moment." }
       : status === "extraction_failed"
         ? { title: "Reading the call failed", detail: "Try again; nothing is lost.", action: <form action={retryExtractionAction}><NextButton>Try again</NextButton></form> }
@@ -305,12 +405,15 @@ export default function LiveDealView({
             }
           : !hasContract
             ? { title: "Make the contract", detail: `Everything's in. SealMe drafts it on the ${templateName ?? "default"} template.`, action: <form action={generateContractAction}><NextButton>Make the contract</NextButton></form> }
+            // Checked on the contract: marking it leaves the deal at "sent".
+            : contractStatus === "not_signed"
+              ? { title: "Not signed", detail: `${firstName} didn't sign it. Send it again whenever they're ready.`, action: <Link href={`/deals/${dealId}/send`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Send again</Link> }
             : status === "pending_approval"
               ? { title: "Waiting for approval", detail: "It goes to the client as soon as it's approved.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
               : status === "changes_requested"
                 ? docusignVoid
                   ? { title: "Voided in DocuSign", detail: `${docusignVoid.reason ? `${docusignVoid.reason}. ` : ""}Make any changes, then send it again.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
-                  : { title: "Make the requested changes", detail: "A reviewer asked for changes before it goes out.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
+                  : changesRequestedStep()
                 : status === "sent" && contractExpired
                   ? { title: "Sign link expired", detail: `${firstName} can't sign it anymore. Send it again for a new link.`, action: <Link href={`/deals/${dealId}/send`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Send again</Link> }
                   : status === "sent"
@@ -318,11 +421,16 @@ export default function LiveDealView({
                     : status === "signed"
                       ? { title: "Signed", detail: "Nothing left to do on this deal." }
                       : { title: "Check the contract and send it", detail: `${firstName} gets it to sign as soon as you send.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Review and send</Link> };
+  // Mark as not signed rides along whatever the step says, wherever
+  // canMarkNotSigned allows it (still out, past its link, changes asked for
+  // after it went out, or a sent one still missing a detail), the same as
+  // on the contract screen.
+  const next: NextStep = markNotSigned && !stepNow.secondary ? { ...stepNow, secondary: markNotSigned } : stepNow;
 
   return (
     <>
-      <Link href="/deals" className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
-        ← Deals
+      <Link href={leadId ? `/leads/${leadId}` : "/leads"} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
+        ← {leadId ? clientName : "Leads"}
       </Link>
 
       <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
@@ -332,15 +440,20 @@ export default function LiveDealView({
             {service}
             {callLength ? ` · from a ${callLength}` : ""}
           </div>
+          {!isProposal && sourceDealId && (
+            <Link href={`/deals/${sourceDealId}`} className="mt-1 inline-block text-[12.5px] font-medium" style={{ color: "var(--accent-blue)" }}>
+              Made from a proposal →
+            </Link>
+          )}
         </div>
         <div className="flex flex-none flex-col items-end gap-1.5">
-          <span className={`chip ${dealStatusChip(status, contractExpired)}`}>
+          <span className={`chip ${dealStatusChip(status, contractExpired, kind, contractStatus)}`}>
             <span className="chip-dot" />
-            {dealStatusLabel(status, contractExpired)}
+            {dealStatusLabel(status, contractExpired, kind, contractStatus)}
           </span>
           {contractViewedAt && (
             <span className="text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
-              👁 Viewed {timeAgo(contractViewedAt)}
+              👁 Viewed <ClientText text={() => timeAgo(contractViewedAt)} />
             </span>
           )}
         </div>
@@ -349,10 +462,17 @@ export default function LiveDealView({
       <section className="mb-[18px] flex flex-col gap-3 rounded-[20px] p-5 sm:flex-row sm:items-center sm:justify-between" style={{ background: "var(--surface-inverted)", color: "var(--on-surface-inverted)" }}>
         <div className="flex min-w-0 flex-col gap-1">
           <span className="text-[11px] font-semibold" style={{ letterSpacing: "1px", color: "var(--on-surface-inverted-muted)" }}>NEXT STEP</span>
-          <h2 className="break-words text-[19px] font-semibold" style={{ letterSpacing: "-0.3px" }}>{next.title}</h2>
-          <div className="text-[13px]" style={{ color: "var(--on-surface-inverted-muted)" }}>{next.detail}</div>
+          {/* The title and detail can say "opened it 5m ago", and the clock moves
+              between the server render and the browser's, so the browser's text wins. */}
+          <h2 className="break-words text-[19px] font-semibold" style={{ letterSpacing: "-0.3px" }} suppressHydrationWarning>{next.title}</h2>
+          <div className="text-[13px]" style={{ color: "var(--on-surface-inverted-muted)" }} suppressHydrationWarning>{next.detail}</div>
         </div>
-        {next.action && <div className="w-full flex-none sm:w-[220px]">{next.action}</div>}
+        {(next.action || next.secondary) && (
+          <div className="flex w-full flex-none flex-col gap-2 sm:w-[220px]">
+            {next.action}
+            {next.secondary}
+          </div>
+        )}
       </section>
 
       <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-[1fr_300px]">
@@ -377,7 +497,7 @@ export default function LiveDealView({
           />
 
           {!hasContract && templateClauses && fields.length > 0 && (
-            <ContractPreview templateName={templateName} clausesJson={templateClauses} fields={fields} live={status === "processing"} />
+            <ContractPreview templateName={templateName} clausesJson={templateClauses} fields={fields} live={status === "processing"} kind={kind} />
           )}
 
           {calls.length > 0 && (
@@ -413,7 +533,7 @@ export default function LiveDealView({
             </div>
           )}
 
-          <ActionItemsCard dealId={dealId} items={actionItems} toggleAction={toggleActionItemAction} />
+          <ActionItemsCard dealId={dealId} items={actionItems} today={today} toggleAction={toggleActionItemAction} />
 
           <DealNotes
             dealId={dealId}
@@ -430,10 +550,10 @@ export default function LiveDealView({
 
           {/* Its changes would be refused while the terms are locked. */}
           {!termsLocked && fields.some((f) => f.status !== "missing") && (
-            <VoiceCorrectionButton dealId={dealId} applyAction={applyVoiceFieldCorrectionAction} reviewAction={sendForReviewToAction} />
+            <VoiceCorrectionButton dealId={dealId} applyAction={applyVoiceFieldCorrectionAction} reviewAction={isProposal ? refuseProposalReview : sendForReviewToAction} />
           )}
 
-          {reviewPanel && (
+          {reviewPanel && !isProposal && (
             <ReviewPanel
               dealId={dealId}
               clientName={clientName}
@@ -507,6 +627,37 @@ export default function LiveDealView({
             </div>
           )}
 
+          {trashed ? (
+            <div className="card flex flex-col gap-2.5 p-5">
+              <div className="rounded-[10px] px-3 py-2.5 text-[12.5px]" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)", color: "var(--ink-muted)" }}>
+                In the trash. Restore it to send it.
+              </div>
+              {hasContract && (
+                <Link href={`/deals/${dealId}/contract`} className="btn btn-secondary w-full justify-center">
+                  {isProposal ? "View proposal" : "View contract"}
+                </Link>
+              )}
+            </div>
+          ) : isProposal ? (
+            <ProposalActions
+              dealId={dealId}
+              contractId={contractId}
+              contractStatus={contractStatus}
+              ready={hasContract && Boolean(contractId) && missing.length === 0 && status !== "processing" && status !== "extraction_failed"}
+              notReadyHint={
+                status === "processing" || status === "extraction_failed"
+                  ? "Ready once SealMe has read the call."
+                  : missing.length > 0
+                    ? "Fill in the missing details first."
+                    : "Make the proposal first."
+              }
+              viewedAt={contractViewedAt ? new Date(contractViewedAt).toISOString() : null}
+              derivedContractId={derivedContractId}
+              contractTemplates={contractTemplates}
+              changedSinceSent={changedSinceSent}
+              createDisabled={status === "processing"}
+            />
+          ) : (
           <div className="card flex flex-col gap-2.5 p-5">
             {hasContract ? (
               <Link href={`/deals/${dealId}/contract`} className="btn btn-primary w-full justify-center">
@@ -523,6 +674,7 @@ export default function LiveDealView({
               Uses the {templateName ?? "default"} template
             </span>
           </div>
+          )}
 
           {(canSendToDocusignNow || docusignNowStarted) && (
             <SendToDocusignButton dealId={dealId} sendAction={sendViaDocusignNowAction} onStart={() => setDocusignNowStarted(true)} />
@@ -531,6 +683,12 @@ export default function LiveDealView({
       </div>
     </>
   );
+}
+
+// A proposal never goes through review, so the voice "send it to X for
+// review" ask is turned down instead of starting a chain.
+async function refuseProposalReview(): Promise<{ error?: string }> {
+  return { error: "A proposal doesn't go through review. Send it by email or copy the link." };
 }
 
 const NEXT_BUTTON_STYLE: React.CSSProperties = { height: 46, fontSize: 15, background: "var(--on-surface-inverted)", color: "var(--surface-inverted)" };

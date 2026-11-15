@@ -13,6 +13,10 @@ const base: Lead = {
   phone: null,
   domain: null,
   stage: "new",
+  pipelineStage: "new",
+  isClient: false,
+  clientAt: null,
+  lastActivityAt: null,
   interest: null,
   isDecisionMaker: null,
   painPoints: null,
@@ -51,6 +55,17 @@ describe("mergedLeadData", () => {
     expect(data.nextStep).toBe("Sign contract");
     expect(data.painPoints).toBe("No content calendar; Blog dormant");
     expect(data.lastContactedAt?.toISOString()).toBe("2026-10-07T00:00:00.000Z");
+  });
+
+  it("keeps a client a client, from the first signature, with the latest activity", () => {
+    const target = { ...base, id: "t", pipelineStage: "proposal_sent", lastActivityAt: new Date("2026-11-01T00:00:00Z") };
+    const source = { ...base, id: "s", isClient: true, clientAt: new Date("2026-10-20T00:00:00Z"), pipelineStage: "client", lastActivityAt: new Date("2026-10-25T00:00:00Z") };
+    const data = mergedLeadData(target, source);
+    expect(data).toMatchObject({ isClient: true, pipelineStage: "client" });
+    expect(data.clientAt?.toISOString()).toBe("2026-10-20T00:00:00.000Z");
+    expect(data.lastActivityAt?.toISOString()).toBe("2026-11-01T00:00:00.000Z");
+    // Lost or not now never wins over a lead with a document out.
+    expect(mergedLeadData({ ...base, pipelineStage: "lost" }, { ...base, pipelineStage: "contract_sent" }).pipelineStage).toBe("contract_sent");
   });
 
   it("takes the stage that's further along, and lost never wins over a live lead", () => {

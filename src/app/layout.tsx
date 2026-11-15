@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Inter, Baloo_2 } from "next/font/google";
-import Script from "next/script";
 import { PHONE_APP_MARKER } from "@/lib/phone-app";
 import "./globals.css";
 
@@ -47,14 +46,22 @@ export const viewport: Viewport = {
   themeColor: "#f5f5f7",
 };
 
-const THEME_INIT_SCRIPT = `
+// Puts the saved theme and which app this is (desktop or iPhone) on <html>
+// while the browser reads <head>, so the very first paint already has them:
+// no light flash for dark mode, and no browser-only text showing in the apps
+// (globals.css). A plain inline script on purpose: next/script's
+// beforeInteractive only queues it in the App Router, to run once the main
+// JS bundle has downloaded, which is after the page is on screen. It only
+// sets attributes, so running it twice is harmless, and suppressHydrationWarning
+// on <html> keeps React from flagging the ones it didn't render.
+const THEME_INIT_SCRIPT = `(function () {
+  var root = document.documentElement;
   try {
-    var t = localStorage.getItem("sealme-theme");
-    if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    if (localStorage.getItem("sealme-theme") === "dark") root.setAttribute("data-theme", "dark");
   } catch (e) {}
-  if ("__TAURI_INTERNALS__" in window) document.documentElement.setAttribute("data-desktop", "");
-  if ("__SEALME_MOBILE__" in window || navigator.userAgent.indexOf("${PHONE_APP_MARKER}") !== -1) document.documentElement.setAttribute("data-mobile-app", "");
-`;
+  if ("__TAURI_INTERNALS__" in window) root.setAttribute("data-desktop", "");
+  if ("__SEALME_MOBILE__" in window || navigator.userAgent.indexOf("${PHONE_APP_MARKER}") !== -1) root.setAttribute("data-mobile-app", "");
+})();`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
@@ -63,7 +70,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         {/* Older iOS (pre-17.4) only recognizes the apple-prefixed tag; Next's
             appleWebApp metadata emits the newer standard one but not this. */}
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <Script id="theme-init" strategy="beforeInteractive">{THEME_INIT_SCRIPT}</Script>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col">
         {/* Only shown in the iPhone app, behind the status bar (globals.css). */}

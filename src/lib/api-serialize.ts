@@ -31,6 +31,8 @@ type DealRow = {
   updatedAt: Date;
   client: { id: string; name: string; company: string; email: string | null };
   owner?: { name: string; email: string } | null;
+  leadId?: string | null;
+  kind?: string;
 };
 
 export function serializeDeal(deal: DealRow) {
@@ -39,6 +41,9 @@ export function serializeDeal(deal: DealRow) {
     id: deal.id,
     status: deal.status,
     source: deal.source,
+    // A proposal or a contract, and the lead it's for.
+    kind: deal.kind ?? "contract",
+    leadId: deal.leadId ?? null,
     service: deal.service,
     fee: deal.feeDisplay,
     value: fee || null,
@@ -79,6 +84,8 @@ export function serializeLead(lead: {
   phone: string | null;
   domain: string | null;
   stage: string;
+  pipelineStage: string;
+  isClient: boolean;
   interest: string | null;
   isDecisionMaker: boolean | null;
   painPoints: string | null;
@@ -105,7 +112,11 @@ export function serializeLead(lead: {
     email: lead.email,
     phone: lead.phone,
     domain: lead.domain,
+    // The old stage names, which calls move on; pipelineStage is where the
+    // lead is on the Leads list, and isClient whether a contract was signed.
     stage: lead.stage,
+    pipelineStage: lead.pipelineStage,
+    isClient: lead.isClient,
     interest: lead.interest,
     isDecisionMaker: lead.isDecisionMaker,
     painPoints: lead.painPoints,
@@ -136,6 +147,8 @@ export const LEAD_API_SELECT = {
   phone: true,
   domain: true,
   stage: true,
+  pipelineStage: true,
+  isClient: true,
   interest: true,
   isDecisionMaker: true,
   painPoints: true,

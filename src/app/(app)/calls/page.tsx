@@ -81,7 +81,7 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
       : Promise.resolve([]),
     tab === "pending"
       ? prisma.lead.findMany({
-          where: { workspaceId: workspace.id, AND: [access.where], stage: { not: "converted" } },
+          where: { workspaceId: workspace.id, AND: [access.where] },
           select: { id: true, name: true, company: true, phone: true },
           orderBy: { updatedAt: "desc" },
           take: 2000,
@@ -161,7 +161,7 @@ export default async function CallsPage({ searchParams }: { searchParams: Promis
               const skipped = (c.extracted as { skipped?: string } | null)?.skipped;
               const chip =
                 c.status === "processed" && c.mode === "sales"
-                  ? { cls: "chip-success", label: phone ? "Sales call" : "Sales call · deal created" }
+                  ? { cls: "chip-success", label: phone || !c.dealId ? "Sales call" : "Sales call · contract drafted" }
                   : c.status === "processed" && c.outcome
                   ? { cls: CALL_OUTCOME_CHIP[c.outcome] ?? "chip-neutral", label: CALL_OUTCOME_LABEL[c.outcome] ?? c.outcome }
                   : c.status === "skipped"

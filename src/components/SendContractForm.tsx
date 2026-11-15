@@ -24,7 +24,9 @@ export default function SendContractForm({
   docusignAccountEmail,
   defaultCc = "",
   defaultDeliveryMethod = "sealme",
+  wentOutBefore,
   initialSigners,
+  kind,
   sendAction,
 }: {
   dealId: string;
@@ -40,9 +42,21 @@ export default function SendContractForm({
   // rep removes them (say, a signer who declined).
   defaultCc?: string;
   defaultDeliveryMethod?: string;
+  // The contract went out, or a review that saved how it goes out sent it
+  // back, so defaultDeliveryMethod was picked. A first send has only the
+  // stored default.
+  wentOutBefore?: boolean;
   initialSigners?: CountersignerInput[];
+  // The deal's kind. A proposal is only read, so it has no signers and
+  // always goes by SealMe email.
+  kind?: string | null;
   sendAction: (dealId: string, formData: FormData) => Promise<SendResult>;
 }) {
+  const isProposal = kind === "proposal";
+  // With DocuSign connected, it's the main way to sign (decided 2026-11-11)
+  // and the SealMe link stays a free option. Sending again keeps the way it
+  // went last time.
+  const initialDeliveryMethod = wentOutBefore && defaultDeliveryMethod !== "docusign" ? "sealme" : "docusign";
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SendResult | null>(null);
@@ -85,7 +99,7 @@ export default function SendContractForm({
         <input name="to" type="email" required defaultValue={defaultTo} placeholder="client@company.com" className="input" />
       </label>
       <label className="flex flex-col gap-1.5">
-        <span className="text-[13px] font-medium">CC <span style={{ color: "var(--ink-muted)", fontWeight: 400 }}>(optional. Comma-separated, gets a copy but doesn&apos;t sign)</span></span>
+        <span className="text-[13px] font-medium">CC <span style={{ color: "var(--ink-muted)", fontWeight: 400 }}>{isProposal ? "(optional. Comma-separated, gets a copy)" : "(optional. Comma-separated, gets a copy but doesn't sign)"}</span></span>
         <input name="cc" defaultValue={defaultCc} placeholder="assistant@client.com, ops@yourcompany.com" className="input" />
       </label>
       <label className="flex flex-col gap-1.5">
@@ -96,16 +110,16 @@ export default function SendContractForm({
         <span className="text-[13px] font-medium">Message</span>
         <textarea name="message" required rows={7} defaultValue={defaultMessage} className="input" />
         <span className="text-[12px]" style={{ color: "var(--ink-muted)" }}>
-          The sign link is appended below your message automatically.
+          {isProposal ? "The proposal link is added below your message automatically." : "The sign link is appended below your message automatically."}
         </span>
       </label>
-      <CountersignerFields clientName={clientName} initialSigners={initialSigners} />
-      {docusignAvailable && (
+      {!isProposal && <CountersignerFields clientName={clientName} initialSigners={initialSigners} />}
+      {docusignAvailable && !isProposal && (
         <label className="flex flex-col gap-1.5">
           <span className="text-[13px] font-medium">Sign via</span>
-          <select name="deliveryMethod" defaultValue={defaultDeliveryMethod === "docusign" ? "docusign" : "sealme"} className="input">
-            <option value="sealme">SealMe (built-in signing)</option>
+          <select name="deliveryMethod" defaultValue={initialDeliveryMethod} className="input">
             <option value="docusign">DocuSign ({docusignAccountEmail})</option>
+            <option value="sealme">SealMe link (built-in signing, free)</option>
           </select>
         </label>
       )}

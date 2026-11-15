@@ -5,8 +5,9 @@ import { prisma } from "@/lib/db";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
-import { canSendContract, performActualSend, notifyStepAssignee, notifyChangesRequested, resolveReviewChain } from "@/lib/review";
+import { assertNoBlanks, canSendContract, performActualSend, notifyStepAssignee, notifyChangesRequested, resolveReviewChain, retireBeforeSend } from "@/lib/review";
 import { logAudit } from "@/lib/audit";
+import { refreshLeadPipeline } from "@/lib/lead-pipeline";
 
 type ReviewStepWithAssignee = { id: string; assigneeId: string; contractId: string };
 
@@ -132,9 +133,15 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
 
   const deal = await prisma.deal.findFirst({
     where: { id: dealId, workspaceId, ...where },
-    include: { contract: true, client: true, template: true, workspace: true },
+    include: { contract: { include: { template: true } }, client: true, template: true, workspace: true, fields: true },
   });
   if (!deal || !deal.contract) return { error: "Generate a contract for this deal first" };
+  // A proposal has no review: the last approval would email the client
+  // without the rep clicking Send.
+  if (deal.kind === "proposal") return { error: "Proposals don't go through review. Send it from the proposal." };
+  // A review ends in a send, and nothing goes out from the trash (the last
+  // approval would be refused anyway, after everyone reviewed it).
+  if (deal.trashedAt) return { error: "This contract is in the trash. Restore it first" };
 
   const assignee = await prisma.user.findFirst({ where: { id: assigneeId, workspaceId, deactivatedAt: null } });
   if (!assignee) return { error: "Teammate not found" };
@@ -158,6 +165,17 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
     return { error: "This contract was already sent" };
   }
   const startingFreshChain = !activeStep;
+  // The last approval sends it, and a send refuses blanks (performActualSend).
+  // Found only then, the rep couldn't fill them in: the terms are locked
+  // while it's in review. So a new round asks for them first, the way the
+  // Send page does (requestOrSendReview).
+  if (startingFreshChain && deal.contract.template) {
+    try {
+      assertNoBlanks(deal.contract.template.clauses, deal.fields, deal.kind);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Fill in the blanks before sending" };
+    }
+  }
   const canHandOff =
     !!activeStep &&
     (activeStep.assigneeId === assigneeId || Boolean(caller.role?.canManageWorkspace) || (await checkReviewStepEligibility(activeStep, caller.id)).eligible);
@@ -177,6 +195,22 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
   const needsPendingEmail = startingFreshChain && !deal.contract.pendingTo && !deal.contract.pendingSubject && !deal.contract.pendingMessage;
   if (needsPendingEmail && !deal.client.email) {
     return { error: "This client has no email on file yet. Add one before sending for review" };
+  }
+  // How a fresh round goes out: the way the contract went last time, as
+  // there's no Send page to change it. One that never went out has only the
+  // schema default stored, so it goes by DocuSign when that's connected, as
+  // a first send from the Send page would (SendContractForm).
+  const neverWentOut = deal.contract.sentAt == null && deal.contract.status === "draft";
+  const deliveryMethod = startingFreshChain && neverWentOut && deal.workspace.docusignEnabled ? "docusign" : deal.contract.deliveryMethod;
+  // A fresh round goes to the client on its last approval, so it's a new
+  // round like a Send (requestOrSendReview): the envelope the contract went
+  // out in before is dealt with now, before anyone reviews it.
+  if (startingFreshChain) {
+    try {
+      await retireBeforeSend(deal.contract, deal, deliveryMethod);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Couldn't check the DocuSign envelope sent before. Try again in a minute" };
+    }
   }
 
   // The step whose assignee hears about it now. A teammate queued behind the
@@ -203,9 +237,12 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
 
     if (startingFreshChain) {
       notifyStepId = firstStepId;
-      const contractUpdate: { status: string; pendingTo?: string; pendingSubject?: string; pendingMessage?: string } = {
+      const contractUpdate: { status: string; deliveryMethod?: string; pendingTo?: string; pendingSubject?: string; pendingMessage?: string } = {
         status: "pending_approval",
       };
+      // Stored as the review starts, like the Send page's setup: the last
+      // approval sends the way it's stored.
+      if (deliveryMethod !== deal.contract.deliveryMethod) contractUpdate.deliveryMethod = deliveryMethod;
       if (needsPendingEmail) {
         contractUpdate.pendingTo = deal.client.email!;
         contractUpdate.pendingSubject = `${deal.template?.name ?? "Contract"} from ${deal.workspace.name}`;
@@ -213,6 +250,10 @@ export async function sendForReviewTo(dealId: string, assigneeId: string): Promi
       }
       await prisma.contract.update({ where: { id: deal.contract.id }, data: contractUpdate });
       await prisma.deal.update({ where: { id: dealId }, data: { status: "pending_approval" } });
+      // As on the Send page (requestOrSendReview): a contract that went
+      // unsigned is on its way back to the client, so the lead leaves Not
+      // signed now, not once the last approval sends it.
+      await refreshLeadPipeline(deal.leadId, { sentNow: true });
     }
   }
 
@@ -237,6 +278,8 @@ export async function decideReviewStep(dealId: string, reviewStepId: string, dec
 
   const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId }, include: { contract: true } });
   if (!deal || !deal.contract) return { error: "Deal not found" };
+  // Thrown away with its lead or call: nothing goes out from the trash.
+  if (deal.trashedAt) return { error: "This is in the trash. Restore it first" };
   // A decision only counts while the contract is in review: once it's back
   // with the rep (changes requested) or out with the client, approving would
   // send it again and rejecting would pull it back.

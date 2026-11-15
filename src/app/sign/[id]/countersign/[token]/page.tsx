@@ -15,7 +15,8 @@ export default async function CountersignPage({ params }: { params: Promise<{ id
     where: { id },
     include: { deal: { include: { client: true, fields: true, workspace: true } }, template: true },
   });
-  if (!contract) notFound();
+  // A proposal has no counter-signers, so no link of theirs leads anywhere.
+  if (!contract || contract.deal.kind === "proposal") notFound();
 
   const signer = await prisma.contractSigner.findFirst({ where: { contractId: id, token } });
   if (!signer) notFound();

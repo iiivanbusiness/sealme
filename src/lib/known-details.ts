@@ -2,7 +2,7 @@
 // the client on file), matched to the fields a template asks for by what
 // they're called. An uploaded contract often has {clientSignerName},
 // {contactTitle} or {clientAddress}, which nobody says out loud on a call;
-// left empty they'd hold up a contract that could go out on its own.
+// left empty they'd hold up a contract that's otherwise ready to send.
 
 export type KnownDetails = { name?: string | null; title?: string | null; email?: string | null; phone?: string | null; address?: string | null };
 

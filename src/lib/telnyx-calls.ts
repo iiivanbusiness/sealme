@@ -102,7 +102,7 @@ async function answerIncoming(callControlId: string, rawFrom: string | null): Pr
   const from = normalizePhone(rawFrom);
   const rep = from
     ? await prisma.user.findFirst({
-        where: { phone: from, deactivatedAt: null, workspace: { prospectingEnabled: true } },
+        where: { phone: from, deactivatedAt: null },
         select: { id: true, workspaceId: true, workspace: { select: { allPartyStatePolicy: true } } },
       })
     : null;

@@ -1,17 +1,17 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { revalidatePath } from "next/cache";
 import crypto from "crypto";
 import { prisma } from "@/lib/db";
 import { transcribeWav, isDeepgramConfigured, isUnusableAudio } from "@/lib/deepgram";
 import { applyExtractionToDeal } from "@/lib/deal-live";
 import { extractPlaceholderKeys } from "@/lib/contract";
-import { autoGenerateAndSendContract } from "@/lib/auto-send";
 import { extractActionItems } from "@/lib/extract-action-items";
 import { extractCallHighlights } from "@/lib/extract-call-highlights";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { reportError } from "@/lib/error-report";
-import { createNotification } from "@/lib/notifications";
+import { finishLiveCall, refreshLiveDeals } from "@/lib/live-call";
+import { dispatchCallCompleted } from "@/lib/webhook-events";
 
 export const runtime = "nodejs";
 // Transcribing, then reading the terms, and on a final the action items and
@@ -23,6 +23,19 @@ export const maxDuration = 300;
 // the call. Past this, longer than any request can run, a final sent again
 // takes it over.
 const FINAL_LEASE_MS = 10 * 60 * 1000;
+
+// What Deepgram bills for a chunk: its length, once for every channel (it
+// bills each channel of a multichannel request, and the desktop records
+// two). Read from the plain 44-byte header both capture backends write (see
+// desktop-app/src-tauri/src/wav.rs); anything else counts as nothing rather
+// than a guess.
+function billedWavSeconds(wav: Buffer): number {
+  if (wav.length <= 44 || wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE" || wav.toString("ascii", 36, 40) !== "data") return 0;
+  const channels = wav.readUInt16LE(22);
+  const byteRate = wav.readUInt32LE(28);
+  if (!channels || !byteRate) return 0;
+  return Math.round(((wav.length - 44) / byteRate) * channels);
+}
 
 function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -36,15 +49,16 @@ function isFinished(record: { usedAt: Date | null; expiresAt: Date }): boolean {
 }
 
 // Receives a chunk of a locally-recorded call from the desktop app's native
-// capture bridge, authenticated with a token minted by startLocalCapture —
+// capture bridge, authenticated with a token minted by continueLocalCapture,
 // not a session cookie, since this request comes from Rust, not the webview.
 //
 // Called repeatedly while the call is still going (?final=false, roughly
-// once a minute — see begin_live_updates in the Rust side) so deal terms
-// fill in live the same way they do for a Recall bot call, and once more
-// when the call ends (?final=true), which checks auto-send and can mark the
-// deal extraction_failed. The token is spent only once a final pass gets all
-// the way through, so the desktop can send a failed final again.
+// once a minute, see begin_live_updates in the Rust side) so deal terms
+// fill in live, and once more when the call ends (?final=true), which reads
+// the action items and highlights and can mark the deal extraction_failed.
+// Nothing is sent from here: the contract waits for the rep. The token is
+// spent only once a final pass gets all the way through, so the desktop can
+// send a failed final again.
 export async function POST(req: Request) {
   const authHeader = req.headers.get("authorization") ?? "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -57,8 +71,12 @@ export async function POST(req: Request) {
   const allowed = await checkRateLimit(`local-capture:${hashToken(token)}`, 120, 60 * 60 * 1000);
   if (!allowed) return NextResponse.json({ error: "Too many attempts" }, { status: 429 });
 
-  const record = await prisma.localCaptureToken.findUnique({ where: { tokenHash: hashToken(token) }, include: { call: { select: { endedAt: true } } } });
-  if (!record) return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
+  const found = await prisma.localCaptureToken.findUnique({ where: { tokenHash: hashToken(token) }, include: { call: { select: { endedAt: true } } } });
+  // A call started from Start a call: a call on a lead (see liveCallChunk).
+  if (found?.phoneCallId) return liveCallChunk(req, { ...found, phoneCallId: found.phoneCallId }, isFinal);
+  // Older tokens are a deal's: its call, its deal.
+  if (!found?.call || !found.dealId || !found.callId) return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
+  const record = { ...found, call: found.call, dealId: found.dealId, callId: found.callId };
   // A final sent again because the answer to the first one got lost on the
   // way back: the call is already in.
   if (isFinal && isFinished(record)) return NextResponse.json({ ok: true, dealId: record.dealId, final: true });
@@ -68,7 +86,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
   }
 
-  const deal = await prisma.deal.findUnique({ where: { id: record.dealId }, include: { template: true, workspace: true, client: { select: { name: true } } } });
+  const deal = await prisma.deal.findUnique({ where: { id: record.dealId }, include: { template: true, workspace: true } });
   if (!deal || !deal.template) return NextResponse.json({ error: "Deal not found" }, { status: 404 });
 
   const audioBuffer = Buffer.from(await req.arrayBuffer());
@@ -137,13 +155,13 @@ export async function POST(req: Request) {
     }
 
     // Mid-call chunks with only silence would re-run the paid extraction on an
-    // unchanged transcript. The final pass always runs: it decides auto-send.
+    // unchanged transcript. The final pass always runs: it finishes the call.
     if (!isFinal && !gotNewWords) {
       return NextResponse.json({ ok: true, dealId: deal.id, final: false });
     }
 
     const fresh = await prisma.deal.findUnique({ where: { id: deal.id } });
-    const { hasMissing } = await applyExtractionToDeal(deal.id, fresh?.liveTranscript ?? "", placeholderKeys, record.callId);
+    await applyExtractionToDeal(deal.id, fresh?.liveTranscript ?? "", placeholderKeys, record.callId);
 
     if (isFinal) {
       try {
@@ -161,25 +179,6 @@ export async function POST(req: Request) {
       } catch (err) {
         console.error(`Failed to extract call highlights for call ${record.callId}`, err);
         await reportError(err, "Call highlight extraction", { dealId: deal.id, callId: record.callId });
-      }
-      if (!hasMissing && !deal.workspace.requireApproval) {
-        try {
-          await autoGenerateAndSendContract(deal.id);
-        } catch (err) {
-          // The call was read fine; the email (or DocuSign) is what failed.
-          // That's for the rep to fix and send, not "reading the call failed".
-          await reportError(err, "Auto-send after a local call", { dealId: deal.id });
-          if (deal.ownerId) {
-            await createNotification({
-              workspaceId: deal.workspaceId,
-              userId: deal.ownerId,
-              type: "contract.send_failed",
-              title: `Contract for ${deal.client.name} couldn't be sent`,
-              body: `${err instanceof Error ? err.message.slice(0, 200) : "Sending failed"}. Check the client's email and send it from the deal.`,
-              linkUrl: `/deals/${deal.id}`,
-            }).catch((notifyErr) => reportError(notifyErr, "Send-failed notification", { dealId: deal.id }));
-          }
-        }
       }
       await logAudit({ workspaceId: deal.workspaceId, action: "deal.local_capture_transcribed", targetType: "deal", targetId: deal.id });
     }
@@ -212,5 +211,106 @@ export async function POST(req: Request) {
     await letGo();
     await reportError(err, "Local capture transcription (final)", { workspace: `${deal.workspace.name} (${deal.workspaceId})`, dealId: deal.id });
     return NextResponse.json({ error: "Transcription failed" }, { status: 500 });
+  }
+}
+
+// A chunk of a call started from Start a call: the words go on the call
+// (a PhoneCall on a lead). While it records, only a proposal or contract
+// made on it reads them (see refreshLiveDeals, which keeps that to about
+// every third chunk); the notes are written once, after the final, so the
+// answer to the final comes back right away instead of after every model
+// call. Same token rules as a deal's: live chunks stop with the call, the
+// final can be sent again until one gets through.
+async function liveCallChunk(req: Request, record: { id: string; phoneCallId: string; usedAt: Date | null; expiresAt: Date }, isFinal: boolean) {
+  const call = await prisma.phoneCall.findUnique({ where: { id: record.phoneCallId }, select: { id: true, status: true, startedAt: true, endedAt: true, workspaceId: true } });
+  if (!call) return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
+  if (isFinal && isFinished(record)) return NextResponse.json({ ok: true, final: true });
+  if (record.expiresAt < new Date() || (!isFinal && (record.usedAt || call.status !== "recording"))) {
+    return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
+  }
+
+  const audioBuffer = Buffer.from(await req.arrayBuffer());
+  const claimedAt = new Date();
+  if (isFinal) {
+    const { count } = await prisma.localCaptureToken.updateMany({
+      where: { id: record.id, expiresAt: { gt: claimedAt }, OR: [{ usedAt: null }, { usedAt: { lt: new Date(claimedAt.getTime() - FINAL_LEASE_MS) } }] },
+      data: { usedAt: claimedAt },
+    });
+    if (count === 0) return NextResponse.json({ error: "This call is still being finished. Try again in a few minutes" }, { status: 409 });
+    await prisma.phoneCall.updateMany({ where: { id: call.id, endedAt: null }, data: { endedAt: claimedAt } });
+  }
+  const letGo = () => prisma.localCaptureToken.updateMany({ where: { id: record.id, usedAt: claimedAt }, data: { usedAt: null } });
+
+  if (!isDeepgramConfigured()) {
+    if (isFinal) await letGo();
+    return NextResponse.json({ error: "Transcription isn't configured" }, { status: 500 });
+  }
+
+  try {
+    let gotNewWords = false;
+    if (audioBuffer.length > 0) {
+      let billed = true;
+      const chunkTranscript = await transcribeWav(audioBuffer).catch(async (err) => {
+        if (!isUnusableAudio(err)) throw err;
+        billed = false;
+        await reportError(err, "Local capture chunk Deepgram can't read", { phoneCallId: call.id, final: isFinal });
+        return "";
+      });
+      // Every chunk Deepgram transcribed counts toward the call's cost,
+      // silent or sent again. Counting never holds up the chunk.
+      const sttSeconds = billed ? billedWavSeconds(audioBuffer) : 0;
+      if (sttSeconds > 0) {
+        try {
+          await prisma.$executeRaw`UPDATE "PhoneCall" SET "sttSeconds" = COALESCE("sttSeconds", 0) + ${sttSeconds}::int WHERE id = ${call.id}`;
+        } catch (err) {
+          await reportError(err, "Counting a live call's transcription", { phoneCallId: call.id });
+        }
+      }
+      // A chunk sent again (its answer got lost) may already be in.
+      const mayBeResent = !isFinal || call.endedAt !== null;
+      const alreadyIn =
+        mayBeResent && chunkTranscript.trim() !== "" && ((await prisma.phoneCall.findUnique({ where: { id: call.id }, select: { transcript: true } }))?.transcript ?? "").endsWith(`\n${chunkTranscript}`);
+      if (chunkTranscript.trim() && !alreadyIn) {
+        // Raw SQL leaves updatedAt alone: set it, it's how a call that never
+        // got its final is told apart (see finishAbandonedLiveCalls).
+        await prisma.$executeRaw`UPDATE "PhoneCall" SET "transcript" = COALESCE("transcript", '') || ${`\n${chunkTranscript}`}, "updatedAt" = NOW() WHERE id = ${call.id}`;
+        gotNewWords = true;
+      }
+    }
+
+    if (!isFinal) {
+      // Reading the terms takes longer than a chunk: after the answer, so
+      // the next chunk isn't held up behind it.
+      if (gotNewWords) {
+        after(async () => {
+          const fresh = await prisma.phoneCall.findUnique({ where: { id: call.id }, select: { transcript: true } });
+          await refreshLiveDeals(call.id, fresh?.transcript ?? "");
+        });
+      }
+      return NextResponse.json({ ok: true, final: false });
+    }
+
+    const words = (await prisma.phoneCall.findUnique({ where: { id: call.id }, select: { transcript: true } }))?.transcript?.trim() ?? "";
+    const durationSec = Math.max(1, Math.round((claimedAt.getTime() - call.startedAt.getTime()) / 1000));
+    if (words) {
+      await prisma.phoneCall.update({ where: { id: call.id }, data: { status: "processing", durationSec } });
+      after(() => finishLiveCall(call.id).catch((err) => reportError(err, "Finishing a live call", { phoneCallId: call.id })));
+    } else {
+      // Nothing was heard the whole call: no notes to write. A document
+      // made on it stays for the rep, waiting on what the call didn't say.
+      await prisma.phoneCall.update({ where: { id: call.id }, data: { status: "skipped", connected: false, durationSec, extracted: { skipped: "no_speech" }, processedAt: claimedAt } });
+      await prisma.deal.updateMany({ where: { phoneCallId: call.id, status: "processing" }, data: { status: "missing_info" } });
+      // Set aside, like any call nothing was heard on: SealMe is done with it.
+      await dispatchCallCompleted(call.workspaceId, call.id);
+    }
+    await prisma.localCaptureToken.update({ where: { id: record.id }, data: { expiresAt: claimedAt } });
+    await logAudit({ workspaceId: call.workspaceId, action: "call.local_capture_transcribed", targetType: "phone_call", targetId: call.id });
+    return NextResponse.json({ ok: true, final: true });
+  } catch (err) {
+    console.error(`Local capture transcription failed for call ${call.id} (final=${isFinal})`, err);
+    await reportError(err, isFinal ? "Local capture transcription (final)" : "Local capture chunk (mid-call)", { phoneCallId: call.id });
+    if (isFinal) await letGo();
+    // Nothing went in: the desktop keeps the chunk and sends it again.
+    return NextResponse.json({ error: "Transcription failed" }, { status: isFinal ? 500 : 502 });
   }
 }

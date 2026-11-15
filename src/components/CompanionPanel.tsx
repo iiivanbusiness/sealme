@@ -2,16 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT } from "./LocalCaptureForm";
+import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT, readCaptureSession, type CaptureSession } from "./LocalCaptureForm";
 import CallHighlightsList, { type CallHighlightItem } from "./CallHighlightsList";
 import RecentNotesList, { type RecentNoteItem } from "./RecentNotesList";
 import ClientText from "@/components/ClientText";
 import { useInDesktopApp } from "@/lib/native-shell";
 import { captureErrorText } from "@/lib/capture-error";
-import { discardLocalCapture } from "@/app/(app)/deals/new/actions";
-
-type Session = { dealId: string; token: string; startedAt: number };
-type StopResult = { ok: boolean; error?: string };
+import { createLiveDocument } from "@/app/(app)/deals/new/live-actions";
+import { stopCapture, discardCapture, useLiveCallState, useElapsed, docProgress } from "@/lib/live-capture-client";
 
 type DealField = { id: string; groupLabel: string; label: string; value: string | null; status: string };
 type DealState = {
@@ -76,15 +74,6 @@ function glassButtonStyle(tone: "neutral" | "success" | "danger" = "neutral"): R
   };
 }
 
-function readSession(): Session | null {
-  try {
-    const raw = localStorage.getItem(LOCAL_CAPTURE_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Session) : null;
-  } catch {
-    return null;
-  }
-}
-
 function formatEventTime(iso: string): string {
   const date = new Date(iso);
   const today = new Date();
@@ -105,7 +94,7 @@ function formatEventTime(iso: string): string {
 export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { upcomingEvents: UpcomingEvent[]; fastPoll?: boolean }) {
   const searchParams = useSearchParams();
   const isTauri = useInDesktopApp();
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<CaptureSession | null>(null);
   const [dealState, setDealState] = useState<DealState | null>(null);
   const [notes, setNotes] = useState<RecentNoteItem[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -117,12 +106,20 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
     const param = searchParams.get("view");
     return param === "live" || param === "notes" ? param : "calendar";
   });
-  const hadSessionRef = useRef(false);
+  // The token of the session shown, to tell a new call (or none) from a
+  // re-fire about the same one.
+  const sessionTokenRef = useRef<string | null>(null);
+  // A call on a lead (started from Start a call) shows what SealMe has made
+  // of it; an older call on a deal shows that deal's terms.
+  const [bump, setBump] = useState(0);
+  const [making, setMaking] = useState<string | null>(null);
+  const live = useLiveCallState(session?.phoneCallId, bump);
+  const elapsed = useElapsed(session?.startedAt);
 
   useEffect(() => {
-    const initial = readSession();
+    const initial = readCaptureSession();
     setSession(initial);
-    hadSessionRef.current = Boolean(initial);
+    sessionTokenRef.current = initial?.token ?? null;
     // Deliberately NOT forcing activeView to "live" here even if a call is
     // already active on mount — this window only mounts fresh when the rail
     // navigates it to a specific ?view=, and CompanionRail.tsx is what
@@ -139,13 +136,34 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
     // session — otherwise stopping a call while browsing Notes would yank
     // you back to a tab about to go empty.
     const onChange = () => {
-      const next = readSession();
+      const prevToken = sessionTokenRef.current;
+      const next = readCaptureSession();
+      sessionTokenRef.current = next?.token ?? null;
       setSession(next);
-      if (next && !hadSessionRef.current) setActiveView("live");
-      hadSessionRef.current = Boolean(next);
+      if (next && !prevToken) setActiveView("live");
+      // Ended, or ended and followed by the next call, somewhere else: a
+      // half-open "Discard this recording?", a stuck "Finishing…" or an old
+      // error was about the call before.
+      if ((next?.token ?? null) !== prevToken) {
+        setConfirmingDiscard(false);
+        setBusy(false);
+        setError(null);
+      }
+    };
+    // LOCAL_CAPTURE_EVENT only reaches this window. A call stopped,
+    // discarded or started in the main window (another webview on the same
+    // origin) arrives as a "storage" event. Without it this panel kept the
+    // ended call, and its Stop stopped the next call's recording under the
+    // old token.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === LOCAL_CAPTURE_STORAGE_KEY) onChange();
     };
     window.addEventListener(LOCAL_CAPTURE_EVENT, onChange);
-    return () => window.removeEventListener(LOCAL_CAPTURE_EVENT, onChange);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(LOCAL_CAPTURE_EVENT, onChange);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   // Polls while a call is active so terms/notes reflect the same throttled
@@ -154,14 +172,15 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
   // DEMO_FAST_EXTRACTION, see companion/page.tsx) shortens this to match
   // the realtime webhook's faster extraction cadence when recording a demo.
   useEffect(() => {
-    if (!session) {
+    const dealId = session?.dealId;
+    if (!dealId) {
       setDealState(null);
       return;
     }
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch(`/api/companion/state?dealId=${session!.dealId}`);
+        const res = await fetch(`/api/companion/state?dealId=${dealId}`);
         if (cancelled) return;
         // A failed poll used to fail completely silently — the panel just
         // kept showing "Nothing captured yet. Keep talking." forever, which
@@ -274,26 +293,25 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
     }
   }
 
+  // The call shown had already ended in another window: show the session
+  // as it is now, with why nothing happened.
+  function showCurrent(error: string | undefined) {
+    const next = readCaptureSession();
+    sessionTokenRef.current = next?.token ?? null;
+    setSession(next);
+    setConfirmingDiscard(false);
+    setError(error ?? null);
+  }
+
   async function handleStop() {
     if (!session) return;
     setBusy(true);
     setError(null);
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const result = await invoke<StopResult>("stop_local_capture_and_upload", { token: session.token });
-      if (!result.ok) {
-        setError(captureErrorText(result.error, "Something went wrong stopping the recording"));
-        setBusy(false);
-        return;
-      }
-      localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
-      window.dispatchEvent(new Event(LOCAL_CAPTURE_EVENT));
-      setSession(null);
-      setBusy(false);
-    } catch (err) {
-      setError(captureErrorText(err, "Something went wrong stopping the recording"));
-      setBusy(false);
-    }
+    const result = await stopCapture(session);
+    setBusy(false);
+    if (result.stale) return showCurrent(result.error);
+    if (result.error) return setError(result.error);
+    setSession(null);
   }
 
   // Same as the main window's banner: the session is only forgotten once the
@@ -303,26 +321,26 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
     if (!session) return;
     setBusy(true);
     setError(null);
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("discard_local_capture");
-    } catch (err) {
-      setError(captureErrorText(err, "Couldn't stop the recording"));
-      setBusy(false);
-      return;
-    }
-    try {
-      await discardLocalCapture(session.dealId, session.token);
-    } catch {
-      setError("The recording is stopped, but SealMe couldn't close the call. Check your connection and discard it again");
-      setBusy(false);
-      return;
-    }
-    localStorage.removeItem(LOCAL_CAPTURE_STORAGE_KEY);
-    window.dispatchEvent(new Event(LOCAL_CAPTURE_EVENT));
-    setSession(null);
+    const result = await discardCapture(session);
     setBusy(false);
+    if (result.stale) return showCurrent(result.error);
+    if (result.error) return setError(result.error);
+    setSession(null);
     setConfirmingDiscard(false);
+  }
+
+  async function make(kind: "proposal" | "contract") {
+    if (!session?.phoneCallId) return;
+    setMaking(kind);
+    setError(null);
+    try {
+      const result = await createLiveDocument(session.phoneCallId, kind);
+      if (result.error) setError(result.error);
+      setBump((n) => n + 1);
+    } catch {
+      setError(`Couldn't start the ${kind}. Try again`);
+    }
+    setMaking(null);
   }
 
   if (isTauri === null) return null;
@@ -388,8 +406,9 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
                       <span className="relative inline-flex h-2 w-2 rounded-full" style={{ background: glass.success }} />
                     </span>
                     <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" style={{ color: glass.text }}>
-                      {dealState?.clientName ?? "Recording…"}
+                      {session.phoneCallId ? (live?.leadName ?? "New lead") : (dealState?.clientName ?? "Recording…")}
                     </span>
+                    {elapsed && <span className="flex-none text-[11.5px] tabular-nums" style={{ color: glass.textDim }}>{elapsed}</span>}
                   </div>
                   {confirmingDiscard ? (
                     <div className="flex items-center gap-2">
@@ -413,6 +432,50 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
                   )}
                 </div>
 
+                {session.phoneCallId ? (
+                  <>
+                    <div className="flex flex-col gap-2">
+                      <h2 className="text-[10.5px] font-semibold uppercase" style={{ color: glass.textFaint, letterSpacing: "0.06em" }}>
+                        Proposal and contract
+                      </h2>
+                      {(live?.docs ?? []).map((doc) => {
+                        const { line, missing } = docProgress(doc);
+                        return (
+                          <div key={doc.dealId} className="flex flex-col gap-0.5">
+                            <span className="text-[12px] font-medium" style={{ color: glass.text }}>{line}</span>
+                            {missing && <span className="text-[11.5px]" style={{ color: glass.textDim }}>{missing}</span>}
+                          </div>
+                        );
+                      })}
+                      {(live?.canMake.proposal || live?.canMake.contract) && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {live.canMake.proposal && (
+                            <button type="button" disabled={busy || making !== null} onClick={() => make("proposal")} style={glassButtonStyle("neutral")}>
+                              {making === "proposal" ? "Starting…" : "Create proposal"}
+                            </button>
+                          )}
+                          {live.canMake.contract && (
+                            <button type="button" disabled={busy || making !== null} onClick={() => make("contract")} style={glassButtonStyle("neutral")}>
+                              {making === "contract" ? "Starting…" : "Create contract"}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {live && live.docs.length === 0 && !live.canMake.proposal && !live.canMake.contract && (
+                        <p className="text-[12px]" style={{ color: glass.textDim }}>Notes are written when the call ends.</p>
+                      )}
+                    </div>
+                    <div>
+                      <h2 className="mb-2 text-[10.5px] font-semibold uppercase" style={{ color: glass.textFaint, letterSpacing: "0.06em" }}>
+                        Heard lately
+                      </h2>
+                      <p className="whitespace-pre-line text-[12px]" style={{ color: live?.heard ? glass.text : glass.textDim }}>
+                        {live?.heard || "Nothing yet. The first words show up about a minute in."}
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                <>
                 <div>
                   <h2 className="mb-2 text-[10.5px] font-semibold uppercase" style={{ color: glass.textFaint, letterSpacing: "0.06em" }}>
                     Deal terms
@@ -455,6 +518,8 @@ export default function CompanionPanel({ upcomingEvents, fastPoll = false }: { u
                     <CallHighlightsList items={dealState?.callHighlights ?? []} />
                   </div>
                 </div>
+                </>
+                )}
               </div>
             ) : (
               <p className="py-10 text-center text-[12.5px]" style={{ color: glass.textDim }}>

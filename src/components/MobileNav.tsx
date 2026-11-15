@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import GlassPanel from "./GlassPanel";
+import { activeNavHref } from "@/lib/nav-config";
 
 export type MobileNavItem = {
   href: string;
@@ -29,8 +30,8 @@ function CloseIcon() {
   );
 }
 
-// A floating liquid-glass pill fixed to the bottom of the screen on phones
-// — the first few nav destinations as icon-only buttons (active one gets
+// A floating liquid-glass pill fixed to the bottom of the screen on phones:
+// the first few nav destinations as icon-only buttons (active one gets
 // a solid circle, same convention as SidebarNav's active pill), plus a
 // trailing "more" button that opens the full labeled nav in a slide-in
 // panel. Replaces the old header hamburger + drawer as the primary way
@@ -65,7 +66,8 @@ export default function MobileNav({ items, drawerContent }: { items: MobileNavIt
           <div className="glass-nav-blur" aria-hidden="true" />
           <div className="relative z-10 flex items-center gap-1">
             {primary.map((item) => {
-              const active = pathname === item.href || pathname.startsWith(item.href + "/");
+              // Same rule as the sidebar: a document page lights up Leads.
+              const active = activeNavHref(pathname, items.map((i) => i.href)) === item.href;
               return (
                 <Link
                   key={item.href}

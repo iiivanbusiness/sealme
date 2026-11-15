@@ -13,6 +13,7 @@ export const WEBHOOK_EVENTS = [
   "contract.signed",
   "contract.declined",
   "contract.expired",
+  "contract.not_signed",
   "lead.created",
   "lead.updated",
   "lead.converted",
@@ -246,13 +247,14 @@ export async function resendWebhookDelivery(deliveryId: string): Promise<void> {
   await attemptDelivery(d.id);
 }
 
-// What lead.created carries: who the person is, where they came from and
-// who has them.
+// What lead.created carries: who the person is, where they came from, where
+// they are (the old stage name, and pipelineStage on the Leads list) and who
+// has them.
 export async function leadWebhookData(workspaceId: string, leadIds: string[]): Promise<Record<string, unknown>[]> {
   if (leadIds.length === 0) return [];
   const leads = await prisma.lead.findMany({
     where: { workspaceId, id: { in: leadIds } },
-    select: { id: true, externalId: true, campaign: true, name: true, company: true, title: true, email: true, phone: true, stage: true, source: true, createdAt: true, owner: { select: { name: true, email: true } } },
+    select: { id: true, externalId: true, campaign: true, name: true, company: true, title: true, email: true, phone: true, stage: true, pipelineStage: true, isClient: true, source: true, createdAt: true, owner: { select: { name: true, email: true } } },
   });
   return leads.map((l) => ({
     leadId: l.id,
@@ -264,6 +266,8 @@ export async function leadWebhookData(workspaceId: string, leadIds: string[]): P
     email: l.email,
     phone: l.phone,
     stage: l.stage,
+    pipelineStage: l.pipelineStage,
+    isClient: l.isClient,
     source: l.source,
     owner: l.owner ? { name: l.owner.name, email: l.owner.email } : null,
     createdAt: l.createdAt.toISOString(),
@@ -286,12 +290,16 @@ export async function dispatchDealCreated(workspaceId: string, dealId: string): 
     await dispatchWebhookEvents(workspaceId, "deal.created", async () => {
       const deal = await prisma.deal.findUnique({
         where: { id: dealId },
-        select: { id: true, status: true, source: true, service: true, feeDisplay: true, createdAt: true, client: { select: { id: true, name: true, company: true } }, owner: { select: { name: true, email: true } } },
+        select: { id: true, kind: true, leadId: true, status: true, source: true, service: true, feeDisplay: true, createdAt: true, client: { select: { id: true, name: true, company: true } }, owner: { select: { name: true, email: true } } },
       });
       if (!deal) return [];
       return [
         {
           dealId: deal.id,
+          // A proposal or a contract, and the lead it's for (the same as the
+          // API's deal), so a receiver doesn't have to fetch the deal.
+          kind: deal.kind,
+          leadId: deal.leadId,
           clientId: deal.client.id,
           clientName: deal.client.name,
           company: deal.client.company,
