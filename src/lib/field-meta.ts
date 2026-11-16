@@ -40,3 +40,32 @@ export function fieldMeta(fieldKey: string): { label: string; groupLabel: string
 export const STANDARD_FIELD_LABELS: { key: string; label: string }[] = Object.entries(FIELD_META)
   .filter(([key]) => key !== "clientEmail")
   .map(([key, meta]) => ({ key, label: meta.label }));
+
+// What the rep can ask on the call to get a term that's still empty, shown
+// under "Ask next" on the contract screen. Said to the client, so plain
+// words, one short question each.
+const FIELD_QUESTIONS: Record<string, string> = {
+  clientName: "What's the full company name we should put on this?",
+  clientEmail: "What's the best email to send this to?",
+  service: "What would you like us to help you with?",
+  startDate: "When would you like to start?",
+  duration: "How long would you like this to run?",
+  deliverables: "What exactly should we deliver for you?",
+  platforms: "Which platforms should we cover?",
+  fee: "What budget did you have in mind?",
+  paymentTerms: "How would you like to handle payment?",
+  cancellation: "How much notice would you need if you wanted to stop?",
+  billingAddress: "What address should the invoices go to?",
+};
+
+// A template's own term gets a question built from its label: "Billing
+// cycle" asks "What should we put for billing cycle?". Short forms keep their
+// capitals ("SDR count" stays "SDR count").
+export function fieldQuestion(key: string, label: string): string {
+  if (Object.hasOwn(FIELD_QUESTIONS, key)) return FIELD_QUESTIONS[key];
+  const name = (label.trim() || humanize(key))
+    .split(/\s+/)
+    .map((w) => (w.length > 1 && w === w.toUpperCase() && /[A-Z]/.test(w) ? w : w.toLowerCase()))
+    .join(" ");
+  return `What should we put for ${name}?`;
+}

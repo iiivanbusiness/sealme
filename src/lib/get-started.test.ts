@@ -36,7 +36,7 @@ describe("getStartedSteps", () => {
 
   it("makes the contract a real step once there's a deal, sent to a deal that's ready", () => {
     const steps = getStartedSteps({ ...fresh, hasDeal: true, readyDealId: "d1", hasTeammate: true });
-    expect(steps.find((s) => s.id === "contract")).toMatchObject({ href: "/deals/d1/contract", cta: "Open the contract" });
+    expect(steps.find((s) => s.id === "contract")).toMatchObject({ href: "/deals/d1", cta: "Open the contract" });
     expect(steps.find((s) => s.id === "contract")?.optional).toBeFalsy();
     expect(steps.some((s) => s.id === "contracts")).toBe(false);
     expect(steps.filter((s) => s.done).map((s) => s.id)).toEqual(["call", "team"]);

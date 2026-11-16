@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { buildContractSnapshot, snapshotDiffers } from "@/lib/contract-snapshot";
+import { buildContractSnapshot, parseContractSnapshot, showsLiveTerms, showsSignatures, snapshotDiffers } from "@/lib/contract-snapshot";
 import LiveDealView, { type ChangesRequestedBy } from "@/components/LiveDealView";
 import { prisma } from "@/lib/db";
 import { requireWorkspaceId, requireWorkspace } from "@/lib/workspace";
@@ -7,7 +7,9 @@ import { currentUserWithRole } from "@/lib/permissions";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import { leadAccess } from "@/lib/lead-visibility";
 import { cookieTimeZone, dayInZone } from "@/lib/viewer-time";
-import { contractExpired } from "@/lib/contract-status";
+import { templateVersion } from "@/lib/deal-live-state";
+import { contractExpired, documentLocksTerms } from "@/lib/contract-status";
+import { NEW_LEAD_NAME, PLACEHOLDER_CLIENT } from "@/lib/cold-call";
 // CHANGES_REQUESTED_ACTIONS: the audit entries that put a contract in
 // changes_requested (the approval rejection is logged against the deal).
 import { CHANGES_REQUESTED_ACTIONS, docusignVoid } from "@/lib/docusign-sync";
@@ -15,13 +17,14 @@ import {
   addDealNote,
   applyVoiceFieldCorrection,
   deleteDealNote,
-  fillMissingFields,
-  generateContract,
+  generateContractAndSend,
   getLiveDealState,
+  makeDocumentDraft,
   retryExtraction,
   sendViaDocusignNow,
+  setDealField,
+  startRenewal,
   toggleActionItem,
-  updateFieldValues,
 } from "./actions";
 import {
   getReviewState,
@@ -82,6 +85,17 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
         template: true,
         contract: {
           include: {
+            // What a send uses: the contract's own template once there is one.
+            template: { select: { id: true, name: true, clauses: true } },
+            // What the client asked to change, shown under each clause until
+            // the next send answers it (review.tsx resolves them).
+            clauseComments: {
+              where: { resolved: false },
+              orderBy: { createdAt: "asc" },
+              select: { id: true, clauseTitle: true, comment: true, fromName: true, createdAt: true },
+            },
+            // Who still has to sign once the client did (partially signed).
+            signers: { where: { status: "pending" }, orderBy: { order: "asc" }, select: { name: true, role: true } },
             reviewSteps: {
               include: {
                 assignee: true,
@@ -103,6 +117,19 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
         // and the proposal a contract was made from.
         derivedDeals: { where: { trashedAt: null, kind: { not: "proposal" } }, select: { id: true }, orderBy: { createdAt: "desc" }, take: 1 },
         sourceDeal: { select: { id: true } },
+        // The call the deal was made on (Start a call): whether it's still
+        // on, who it's with, and what's been said so far.
+        phoneCall: {
+          select: {
+            id: true,
+            status: true,
+            source: true,
+            startedAt: true,
+            endedAt: true,
+            transcript: true,
+            lead: { select: { name: true, title: true, company: true } },
+          },
+        },
       },
     }),
     requireWorkspace(),
@@ -125,11 +152,20 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
   // The way back goes to the lead only when this viewer can open it: a
   // reviewer can see a deal on a lead that isn't theirs.
   const access = await leadAccess(currentUser);
-  const [leadVisible, changesRequested] = await Promise.all([
+  const [leadVisible, changesRequested, markedNotSigned] = await Promise.all([
     deal.leadId && !access.canViewAll
       ? prisma.lead.findFirst({ where: { id: deal.leadId, workspaceId, ...access.where }, select: { id: true } }).then(Boolean)
       : Boolean(deal.leadId),
     deal.contract ? changesRequestedBy({ id: deal.contract.id, dealId: deal.id, status: deal.contract.status }, workspaceId) : undefined,
+    // When the rep marked it not signed: Contract keeps no updatedAt, so it
+    // comes from the audit log.
+    deal.contract?.status === "not_signed" && deal.kind !== "proposal"
+      ? prisma.auditLog.findFirst({
+          where: { workspaceId, action: "contract.marked_not_signed", targetId: { in: [deal.contract.id, deal.id] } },
+          select: { createdAt: true },
+          orderBy: { createdAt: "desc" },
+        })
+      : null,
   ]);
 
   const delegatedAssigneeIds = [...new Set(activeDelegationsToMe.map((d) => d.fromUserId))];
@@ -141,9 +177,10 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
     : [];
   // A proposal stays editable after it went out; this says the client still
   // has the earlier version.
+  const template = deal.contract?.template ?? deal.template;
   const changedSinceSent =
-    isProposal && deal.contract?.status === "sent" && deal.template
-      ? snapshotDiffers(deal.contract.snapshot, buildContractSnapshot(deal.template, { fields: deal.fields, client: deal.client, workspace }))
+    isProposal && deal.contract?.status === "sent" && template
+      ? snapshotDiffers(deal.contract.snapshot, buildContractSnapshot(template, { fields: deal.fields, client: deal.client, workspace }))
       : false;
 
   const historyByKey = new Map<string, typeof deal.fieldChanges>();
@@ -152,16 +189,46 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
     historyByKey.get(change.fieldKey)!.push(change);
   }
 
+  // The text the paper is drawn from. A contract that's with a reviewer or
+  // the client is read-only. While it's with a reviewer it shows the terms
+  // they're approving (the live ones; a snapshot from an earlier send is
+  // stale by then), the same rule as the contract page (showsLiveTerms).
+  // Once it's out with the client it shows what they got, drawn with its
+  // terms marked when that's still the template with today's terms, else as
+  // the plain text that was sent.
+  const termsLocked = documentLocksTerms(deal.contract, deal.kind);
+  const liveText = template ? buildContractSnapshot(template, { fields: deal.fields, client: deal.client, workspace }) : null;
+  const sentText = termsLocked && deal.contract && !showsLiveTerms(deal.contract) ? parseContractSnapshot(deal.contract.snapshot) : null;
+  const plainText = sentText && (!liveText || snapshotDiffers(sentText, liveText)) ? sentText : null;
+  // A signature only sits under the terms that were signed (showsSignatures).
+  const signature =
+    deal.contract && !isProposal && (deal.contract.signedAt || deal.contract.signerName) && showsSignatures({ ...deal.contract, template }, { asTeam: true })
+      ? { signerName: deal.contract.signerName, signedAt: deal.contract.signedAt?.toISOString() ?? null, image: deal.contract.signatureImage }
+      : null;
+  const call = deal.phoneCall;
+  const person = call?.lead && call.lead.name !== NEW_LEAD_NAME ? call.lead : null;
+  // A document made during a cold call goes to a stand-in client until the
+  // call says who it was with.
+  const clientNameKnown = deal.client.name !== PLACEHOLDER_CLIENT && deal.client.name !== NEW_LEAD_NAME;
+  // A signed contract with a term that ends or renews (set when it was
+  // signed): when, and the way to start the next one.
+  const renewal =
+    deal.contract && !isProposal && deal.contract.status === "signed" && deal.contract.renewalDate
+      ? { date: deal.contract.renewalDate.toISOString(), autoRenews: deal.contract.autoRenews, note: deal.contract.renewalNote }
+      : null;
+
   return (
     <LiveDealView
       dealId={deal.id}
       leadId={leadVisible ? deal.leadId : null}
       clientName={deal.client.name}
-      service={deal.service}
-      callLength={deal.callLength}
-      contractViewedAt={deal.contract?.viewedAt ?? null}
-      templateName={deal.template?.name ?? null}
-      templateClauses={deal.template?.clauses ?? null}
+      clientNameKnown={clientNameKnown}
+      client={{ name: deal.client.name, company: deal.client.company }}
+      agencyName={workspace.name}
+      contractViewedAt={deal.contract?.viewedAt?.toISOString() ?? null}
+      template={template ? { id: template.id, version: templateVersion(template), name: template.name, clauses: template.clauses } : null}
+      plainText={plainText}
+      signature={signature}
       hasContract={Boolean(deal.contract)}
       initialStatus={deal.status}
       initialSummary={deal.summary}
@@ -173,16 +240,30 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
         value: f.value,
         status: f.status,
         sourceQuote: f.sourceQuote,
-        history: historyByKey.get(f.fieldKey) ?? [],
+        history: (historyByKey.get(f.fieldKey) ?? []).map((h) => ({ oldValue: h.oldValue, newValue: h.newValue, changedBy: h.changedBy, changedAt: h.changedAt })),
       }))}
-      initialCalls={deal.calls}
-      initialActionItems={deal.actionItems}
-      initialCallHighlights={deal.callHighlights}
+      initialCalls={deal.calls.map((c) => ({ id: c.id, source: c.source, startedAt: c.startedAt, endedAt: c.endedAt, transcript: c.transcript }))}
+      initialActionItems={deal.actionItems.map((a) => ({ id: a.id, description: a.description, ownerType: a.ownerType, dueDate: a.dueDate, status: a.status, sourceQuote: a.sourceQuote }))}
+      initialCallHighlights={deal.callHighlights.map((h) => ({ id: h.id, type: h.type, body: h.body, sourceQuote: h.sourceQuote }))}
+      phoneCall={
+        call
+          ? {
+              id: call.id,
+              status: call.status,
+              source: call.source,
+              startedAt: call.startedAt.toISOString(),
+              endedAt: call.endedAt?.toISOString() ?? null,
+              transcript: call.transcript ?? "",
+              personName: person?.name ?? null,
+              personSub: person?.title?.trim() || person?.company?.trim() || null,
+            }
+          : null
+      }
       getLiveDealStateAction={getLiveDealState}
-      updateFieldsAction={updateFieldValues.bind(null, deal.id)}
+      setFieldAction={setDealField.bind(null, deal.id)}
+      generateAndSendAction={generateContractAndSend.bind(null, deal.id)}
+      makeDraftAction={makeDocumentDraft.bind(null, deal.id)}
       retryExtractionAction={retryExtraction.bind(null, deal.id)}
-      fillMissingFieldsAction={fillMissingFields.bind(null, deal.id)}
-      generateContractAction={generateContract.bind(null, deal.id)}
       toggleActionItemAction={toggleActionItem}
       notes={deal.notes.map((n) => ({ id: n.id, authorName: n.authorName, authorEmail: n.authorEmail, body: n.body, createdAt: n.createdAt.toISOString() }))}
       currentUserEmail={currentUser.email}
@@ -193,7 +274,23 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
       sendForReviewToAction={sendForReviewTo}
       docusignEnabled={Boolean(workspace?.docusignEnabled)}
       contractStatus={deal.contract?.status ?? null}
-      contractSentAt={deal.contract?.sentAt ?? null}
+      contractSentAt={deal.contract?.sentAt?.toISOString() ?? null}
+      contractSignedAt={deal.contract?.signedAt?.toISOString() ?? null}
+      contractSignerName={deal.contract?.signerName ?? null}
+      contractExpiresAt={deal.contract?.expiresAt?.toISOString() ?? null}
+      contractDeliveryMethod={deal.contract?.deliveryMethod ?? null}
+      markedNotSignedAt={markedNotSigned?.createdAt.toISOString() ?? null}
+      pendingSigners={isProposal ? [] : (deal.contract?.signers ?? []).map((s) => ({ name: s.name, role: s.role }))}
+      clauseComments={
+        isProposal
+          ? []
+          : (deal.contract?.clauseComments ?? []).map((c) => ({ id: c.id, clauseTitle: c.clauseTitle, comment: c.comment, fromName: c.fromName, createdAt: c.createdAt.toISOString() }))
+      }
+      renewal={renewal}
+      startRenewalAction={renewal ? startRenewal.bind(null, deal.id) : undefined}
+      // The audit trail holds review decisions and signer IPs, so only
+      // workspace admins export it (the route checks the same).
+      canExportAuditTrail={Boolean(currentUser.role?.canManageWorkspace) && Boolean(deal.contract)}
       trashed={Boolean(deal.trashedAt)}
       contractExpired={contractExpired(deal.contract)}
       docusignVoid={deal.contract ? await docusignVoid({ id: deal.contract.id, dealId: deal.id, status: deal.contract.status, deliveryMethod: deal.contract.deliveryMethod }, workspaceId) : undefined}

@@ -38,7 +38,7 @@ export function getStartedSteps(i: GetStartedInput): GetStartedStep[] {
     title: "Send your first contract",
     hint: "Check the contract SealMe drafted and send it for signature.",
     cta: i.readyDealId ? "Open the contract" : "Go to Leads",
-    href: i.readyDealId ? `/deals/${i.readyDealId}/contract` : "/leads",
+    href: i.readyDealId ? `/deals/${i.readyDealId}` : "/leads",
     done: i.hasSentContract,
   };
   const admin: (GetStartedStep | false)[] = [

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { db, applyExtraction, suggest, runProcessing, addUsage, dispatchCreated, dispatchCompleted, refreshPipeline } = vi.hoisted(() => ({
   db: {
     phoneCall: { findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
-    deal: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    deal: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), count: vi.fn() },
     contractTemplate: { findMany: vi.fn() },
     client: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     dealField: { findMany: vi.fn(), createMany: vi.fn(), count: vi.fn(), deleteMany: vi.fn(), updateMany: vi.fn() },
@@ -55,6 +55,8 @@ beforeEach(() => {
   db.client.create.mockResolvedValue({ id: "c1" });
   db.deal.create.mockResolvedValue({ id: "d1" });
   db.deal.updateMany.mockResolvedValue({ count: 1 });
+  // Still one SealMe may fill in when its turn comes.
+  db.deal.count.mockResolvedValue(1);
   applyExtraction.mockResolvedValue({ hasMissing: true });
   runProcessing.mockResolvedValue(undefined);
   addUsage.mockResolvedValue(undefined);
@@ -136,6 +138,27 @@ describe("Proposal or contract made while the call records", () => {
     // Each reading's model use goes on the call, like its notes.
     expect(addUsage).toHaveBeenCalledWith("pc1", expect.objectContaining({ inputTokens: 3000, outputTokens: 400 }));
     expect(addUsage.mock.calls.filter((c) => c[1].inputTokens > 0)).toHaveLength(2);
+  });
+});
+
+describe("A document sent while the call is still on", () => {
+  it("is left as it went out when it was sent, or thrown away, before its turn to be read", async () => {
+    db.deal.findMany.mockResolvedValue([
+      { id: "d1", kind: "contract", template: { clauses: "" } },
+      { id: "d2", kind: "proposal", template: { clauses: "" } },
+    ]);
+    // d2 went out while d1 was being read.
+    db.deal.count.mockImplementation(async ({ where }: { where: { id: string } }) => (where.id === "d1" ? 1 : 0));
+
+    await refreshLiveDeals("pc1", "Client: Five thousand works.", { final: true });
+
+    expect(applyExtraction).toHaveBeenCalledTimes(1);
+    expect(applyExtraction.mock.calls[0][0]).toBe("d1");
+    // Checked by the same rule that picked the documents: not sent, not in review, not in the trash.
+    const { phoneCallId, ...picked } = db.deal.findMany.mock.calls[0][0].where;
+    expect(phoneCallId).toBe("pc1");
+    expect(db.deal.count.mock.calls[1][0].where).toEqual({ id: "d2", ...picked });
+    expect(picked).toEqual({ trashedAt: null, status: { in: ["processing", "missing_info", "ready"] }, OR: [{ contract: null }, { contract: { status: "draft" } }] });
   });
 });
 

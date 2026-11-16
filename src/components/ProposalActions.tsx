@@ -34,13 +34,16 @@ export default function ProposalActions({
   createDisabled = false,
   compact = false,
   changedSinceSent = false,
+  showSend = true,
+  makeDraftAction,
 }: {
   dealId: string;
   // The proposal's Contract row, which holds the document. null until the
   // proposal is made.
   contractId: string | null;
   contractStatus: string | null;
-  // The document exists and nothing is missing, so it can go out.
+  // Nothing is missing and the document exists (or makeDraftAction can
+  // make it), so it can go out.
   ready: boolean;
   // Why it can't go out yet, shown under the disabled buttons.
   notReadyHint?: string;
@@ -54,9 +57,19 @@ export default function ProposalActions({
   // Sent, then its terms changed: the client still sees the version they
   // got until it's sent again or the link is copied again.
   changedSinceSent?: boolean;
+  // False where the screen already has its own Send button (the deal
+  // page's bar under the paper), so the card doesn't offer it twice.
+  showSend?: boolean;
+  // Makes the document when there's none yet (contractId null), so Copy
+  // link and Download PDF work on a proposal whose blanks were filled in on
+  // the contract screen. Without it they wait for the document.
+  makeDraftAction?: () => Promise<{ error?: string; contractId?: string }>;
 }) {
   const router = useRouter();
   const [copied, setCopied] = useState(false);
+  const [copying, setCopying] = useState(false);
+  // The document made here, until the page renders again with it.
+  const [madeId, setMadeId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   // Set when the browser wouldn't write to the clipboard, so the rep can
   // copy the link by hand.
@@ -90,14 +103,55 @@ export default function ProposalActions({
     sent && !viewedAt && refreshedFor !== shownState
   );
 
+  const docId = contractId ?? madeId;
+  const canMake = !docId && !!makeDraftAction;
+
+  // The document's id, made first when there's none yet.
+  async function ensureDocument(): Promise<{ contractId?: string; error?: string }> {
+    if (docId) return { contractId: docId };
+    if (!makeDraftAction) return { error: "Fill in the missing details to make the proposal first" };
+    try {
+      const result = await makeDraftAction();
+      if (result.error || !result.contractId) return { error: result.error ?? "Couldn't make the proposal. Try again." };
+      setMadeId(result.contractId);
+      return { contractId: result.contractId };
+    } catch {
+      return { error: "Couldn't make the proposal. Try again." };
+    }
+  }
+
   async function handleCopy() {
-    if (!contractId || !ready) return;
+    if (!ready || copying || (!docId && !canMake)) return;
     setCopyError(null);
     setManualLink(null);
-    const url = clientDocumentUrl(contractId, "proposal");
-    // The clipboard write starts before any await: browsers only allow it
-    // inside the click itself.
-    const write = navigator.clipboard?.writeText(url) ?? Promise.reject(new Error("No clipboard"));
+    setCopying(true);
+    try {
+      await copyAndShare();
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  async function copyAndShare() {
+    let url: string;
+    let write: Promise<void>;
+    if (docId) {
+      url = clientDocumentUrl(docId, "proposal");
+      // The clipboard write starts before any await: browsers only allow it
+      // inside the click itself.
+      write = navigator.clipboard?.writeText(url) ?? Promise.reject(new Error("No clipboard"));
+    } else {
+      // No document yet: it's made first. A browser that only takes a
+      // clipboard write inside the click refuses the one after, and the
+      // link is shown to copy by hand instead.
+      const made = await ensureDocument();
+      if (!made.contractId) {
+        setCopyError(made.error ?? "Couldn't make the proposal. Try again.");
+        return;
+      }
+      url = clientDocumentUrl(made.contractId, "proposal");
+      write = navigator.clipboard?.writeText(url) ?? Promise.reject(new Error("No clipboard"));
+    }
     try {
       await write;
       setCopied(true);
@@ -136,9 +190,8 @@ export default function ProposalActions({
         setCreating(false);
         return;
       }
-      // Gaps go to the deal, where they're filled in; a complete one opens
-      // straight on the document.
-      router.push(result.hasMissing ? `/deals/${result.dealId}` : `/deals/${result.dealId}/contract`);
+      // The new contract's screen, where any gaps are filled in on the paper.
+      router.push(`/deals/${result.dealId}`);
     } catch {
       setCreateError("Couldn't make the contract. Try again.");
       setCreating(false);
@@ -147,23 +200,33 @@ export default function ProposalActions({
 
   const body = (
     <>
-      {ready ? (
-        <Link href={`/deals/${dealId}/send`} className={`btn ${sent ? "btn-secondary" : "btn-primary"} w-full justify-center`}>
-          {sent ? "Send again" : "Send by email"}
-        </Link>
-      ) : (
-        <button type="button" disabled className="btn btn-primary w-full justify-center">
-          Send by email
-        </button>
-      )}
+      {showSend &&
+        (ready ? (
+          <Link href={`/deals/${dealId}/send`} className={`btn ${sent ? "btn-secondary" : "btn-primary"} w-full justify-center`}>
+            {sent ? "Send again" : "Send by email"}
+          </Link>
+        ) : (
+          <button type="button" disabled className="btn btn-primary w-full justify-center">
+            Send by email
+          </button>
+        ))}
 
       <div className="flex flex-wrap gap-2">
-        <button type="button" onClick={handleCopy} disabled={!ready || !contractId} className="btn btn-secondary min-w-[120px] flex-1 justify-center">
+        <button type="button" onClick={handleCopy} disabled={!ready || copying || (!docId && !canMake)} aria-busy={copying || undefined} className="btn btn-secondary min-w-[120px] flex-1 justify-center">
           {copied ? "Copied" : "Copy link"}
         </button>
-        {contractId && (
+        {(docId || (canMake && ready)) && (
           <div className="min-w-[120px] flex-1">
-            <DownloadContractButton contractId={contractId} kind="proposal" className="btn btn-secondary w-full justify-center" />
+            <DownloadContractButton
+              contractId={docId}
+              prepare={async () => {
+                const made = await ensureDocument();
+                if (made.contractId) router.refresh();
+                return made;
+              }}
+              kind="proposal"
+              className="btn btn-secondary w-full justify-center"
+            />
           </div>
         )}
       </div>

@@ -329,9 +329,9 @@ export async function dashboardData(o: { workspaceId: string; me: UserWithRole; 
             service: d.service,
             label: d.status === "ready" ? "Ready to send" : status.label,
             chip: d.status === "ready" ? "chip-active" : status.chip,
-            // Blanks are filled in on the deal; the rest is reviewed and sent
-            // from the contract.
-            href: details ? `/deals/${d.id}#missing` : `/deals/${d.id}/contract`,
+            // The contract screen: opened on its terms list when there are
+            // blanks to fill in.
+            href: details ? `/deals/${d.id}#missing` : `/deals/${d.id}`,
             cta: details ? "Fill in details" : "Review and send",
           };
         }),

@@ -71,7 +71,7 @@ export default function SendContractForm({
         return;
       }
       setResult(res);
-      setTimeout(() => router.push(`/deals/${dealId}/contract`), 1600);
+      setTimeout(() => router.push(`/deals/${dealId}`), 1600);
     });
   }
 

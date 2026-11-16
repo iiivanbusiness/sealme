@@ -79,6 +79,35 @@ export function useCaptureSession(): CaptureSession | null {
   return useMemo(() => parseCaptureSession(raw), [raw]);
 }
 
+// The recording a page already shows with its own controls (the deal
+// page's call pill, with End call and Discard), by the session's call or
+// deal id, so the bar at the top doesn't show the same call twice.
+let callOnPage: string | null = null;
+const callOnPageListeners = new Set<() => void>();
+
+function subscribeCallOnPage(onChange: () => void) {
+  callOnPageListeners.add(onChange);
+  return () => {
+    callOnPageListeners.delete(onChange);
+  };
+}
+
+// Says the page shows the session with this id (its phoneCallId, or the
+// dealId of a recording made on a deal) until the returned function runs.
+export function showCaptureOnPage(id: string): () => void {
+  callOnPage = id;
+  callOnPageListeners.forEach((l) => l());
+  return () => {
+    if (callOnPage !== id) return;
+    callOnPage = null;
+    callOnPageListeners.forEach((l) => l());
+  };
+}
+
+export function useCaptureOnPage(): string | null {
+  return useSyncExternalStore(subscribeCallOnPage, () => callOnPage, () => null);
+}
+
 export type CaptureEnd = "finished" | "discarded";
 
 // How the session's call ended, if it was this window or another one that

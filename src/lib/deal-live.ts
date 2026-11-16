@@ -43,8 +43,11 @@ export async function applyExtractionToDeal(
   // wins. Never by length alone: "Record another call" reads a new
   // transcript that starts short, after a long one from the call.
   // One statement, so no other pass can slip in between the check and the
-  // claim; everything after it is quick writes.
-  const claimed = await prisma.$executeRaw`UPDATE "Deal" SET "lastExtractedTranscript" = ${transcript} WHERE id = ${dealId} AND ("lastExtractedTranscript" IS NOT DISTINCT FROM ${deal.lastExtractedTranscript} OR starts_with(${transcript}, COALESCE("lastExtractedTranscript", '')))`;
+  // claim; everything after it is quick writes. The contract is checked
+  // again in it too, by the rule above: the rep can send it while the call
+  // is still on, and a reading that started before must not rewrite terms
+  // an approver or the client already has.
+  const claimed = await prisma.$executeRaw`UPDATE "Deal" SET "lastExtractedTranscript" = ${transcript} WHERE id = ${dealId} AND ("lastExtractedTranscript" IS NOT DISTINCT FROM ${deal.lastExtractedTranscript} OR starts_with(${transcript}, COALESCE("lastExtractedTranscript", ''))) AND NOT EXISTS (SELECT 1 FROM "Contract" WHERE "Contract"."dealId" = ${dealId} AND "Contract"."status" NOT IN ('draft', 'changes_requested'))`;
   if (claimed === 0) {
     const missing = await prisma.dealField.count({ where: { dealId, status: "missing" } });
     return { hasMissing: missing > 0 };

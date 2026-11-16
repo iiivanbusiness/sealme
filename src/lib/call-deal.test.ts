@@ -81,7 +81,7 @@ describe("A proposal or contract from a call", () => {
     expect(prisma.contract.upsert).toHaveBeenCalledWith({ where: { dealId: "d1" }, create: { dealId: "d1", templateId: "t1", status: "draft" }, update: {} });
     expect(requestOrSendReview).not.toHaveBeenCalled();
     // The rep hears it's ready to review and send, not that it went out.
-    expect(createNotification).toHaveBeenCalledWith(expect.objectContaining({ userId: "u1", title: "Contract for Dana Lee is ready", body: "Review it and send it.", linkUrl: "/deals/d1/contract" }));
+    expect(createNotification).toHaveBeenCalledWith(expect.objectContaining({ userId: "u1", title: "Contract for Dana Lee is ready", body: "Review it and send it.", linkUrl: "/deals/d1" }));
     expect(sendContractReadyEmail).toHaveBeenCalledWith(expect.objectContaining({ to: "sam@example.com", subject: "Contract for Dana Lee is ready" }));
   });
 

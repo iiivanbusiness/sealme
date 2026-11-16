@@ -573,3 +573,20 @@ a {
   height: env(safe-area-inset-top);
 }
 
+/* The contract screen (/deals/[id]) puts the paper and its cards side by
+   side, with room on the paper's right for the "Just heard" note, so it
+   takes more of a wide screen than other pages. */
+main:has([data-wide-page]) { max-width: 1560px; }
+
+/* On a phone the contract screen's action bar is fixed above the tab bar,
+   where the help button would sit on its main button: the help button and
+   its panel move up above the bar while the bar is on the page. */
+@media (max-width: 767px) {
+  body:has([data-action-bar]) .faq-launcher {
+    bottom: calc(max(14px, env(safe-area-inset-bottom)) + 136px);
+  }
+  body:has([data-action-bar]) .faq-panel {
+    bottom: calc(max(14px, env(safe-area-inset-bottom)) + 196px);
+    max-height: min(560px, calc(100dvh - max(14px, env(safe-area-inset-bottom)) - 280px));
+  }
+}

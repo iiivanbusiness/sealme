@@ -68,6 +68,9 @@ describe("Overlapping readings of the same call", () => {
     expect(sql.join("?")).toContain('"lastExtractedTranscript" IS NOT DISTINCT FROM ?');
     expect(sql.join("?")).toContain('starts_with(?, COALESCE("lastExtractedTranscript", \'\'))');
     expect(sql.join("?")).not.toContain("length(");
+    // A contract sent while the model was reading is checked in the same statement.
+    expect(sql.join("?")).toContain(`AND NOT EXISTS (SELECT 1 FROM "Contract" WHERE "Contract"."dealId" = ? AND "Contract"."status" NOT IN ('draft', 'changes_requested'))`);
+    expect(executeRaw.mock.calls[0][5]).toBe("d1");
     expect(stored).toBe("Client: Four thousand.");
     expect(readAtStart).toBe("Client: Four thousand.");
     expect(compared).toBe("Client: Four thousand.");
@@ -84,6 +87,37 @@ describe("Overlapping readings of the same call", () => {
     expect(dealFieldChange.create).toHaveBeenCalledWith({ data: expect.objectContaining({ fieldKey: "fee", oldValue: "$5,000", newValue: "$4,000" }) });
     expect(dealField.upsert).toHaveBeenCalledTimes(1);
     expect(deal.update.mock.calls[0][0].data).toMatchObject({ summary: "Older summary", lastExtractedTranscript: "Client: Four thousand." });
+  });
+});
+
+describe("A contract sent while the call is still on", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rows.current = [{ fieldKey: "fee", label: "Fee", groupLabel: "Terms", value: "$4,000", status: "extracted", confidence: 0.9, sourceQuote: "four thousand", orderIndex: 0 }];
+    dealField.findMany.mockResolvedValue([{ fieldKey: "fee", value: "$5,000", status: "extracted" }]);
+    extract.mockResolvedValue({ summary: "Summary", company: "Acme", email: null });
+  });
+
+  it("isn't read at all once a reviewer or the client has it", async () => {
+    for (const status of ["pending_approval", "sent", "partially_signed", "signed", "expired", "not_signed"]) {
+      deal.findUnique.mockResolvedValue({ ...dealWithClientEmail(null), contract: { status } });
+      expect(await applyExtractionToDeal("d1", "Client: Four thousand.", ["fee"])).toEqual({ hasMissing: false });
+    }
+    expect(extract).not.toHaveBeenCalled();
+    expect(executeRaw).not.toHaveBeenCalled();
+  });
+
+  it("keeps the terms it went out with when it was sent while the model was reading", async () => {
+    deal.findUnique.mockResolvedValue({ ...dealWithClientEmail(null), contract: { status: "draft" } });
+    // The claim finds the contract no longer a draft.
+    executeRaw.mockResolvedValueOnce(0);
+    dealField.count.mockResolvedValue(0);
+
+    expect(await applyExtractionToDeal("d1", "Client: Four thousand.", ["fee"])).toEqual({ hasMissing: false });
+    expect(dealField.upsert).not.toHaveBeenCalled();
+    expect(dealFieldChange.create).not.toHaveBeenCalled();
+    expect(deal.update).not.toHaveBeenCalled();
+    expect(client.update).not.toHaveBeenCalled();
   });
 });
 

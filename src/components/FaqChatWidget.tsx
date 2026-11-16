@@ -154,7 +154,7 @@ export default function FaqChatWidget({ prospecting = false }: { prospecting?: b
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label={open ? "Close help" : "Open help"}
-        className="fixed bottom-24 right-5 z-50 flex h-12 w-12 flex-none items-center justify-center rounded-full md:bottom-6 md:right-6"
+        className="faq-launcher fixed bottom-24 right-5 z-50 flex h-12 w-12 flex-none items-center justify-center rounded-full md:bottom-6 md:right-6"
         style={{ background: "var(--primary)", color: "var(--on-primary)", boxShadow: "var(--shadow-pop)" }}
       >
         {open ? (
@@ -169,7 +169,7 @@ export default function FaqChatWidget({ prospecting = false }: { prospecting?: b
       </button>
 
       {open && (
-        <div ref={panelRef} className="card fixed bottom-40 right-5 z-50 flex max-h-[min(560px,70vh)] w-[min(380px,calc(100vw-2.5rem))] flex-col overflow-hidden md:bottom-24 md:right-6">
+        <div ref={panelRef} className="faq-panel card fixed bottom-40 right-5 z-50 flex max-h-[min(560px,70vh)] w-[min(380px,calc(100vw-2.5rem))] flex-col overflow-hidden md:bottom-24 md:right-6">
           <div className="flex flex-none items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--hairline)" }}>
             <div className="flex items-center gap-1 rounded-[10px] p-0.5" style={{ background: "var(--surface-2)" }}>
               <button

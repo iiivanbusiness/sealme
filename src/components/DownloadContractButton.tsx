@@ -4,8 +4,20 @@ import { useState } from "react";
 import { filenameFromDisposition } from "@/lib/download-filename";
 
 // `kind` only names the file when the server doesn't say: a proposal
-// downloads as proposal.pdf, everything else as contract.pdf.
-export default function DownloadContractButton({ contractId, className, kind }: { contractId: string; className?: string; kind?: string | null }) {
+// downloads as proposal.pdf, everything else as contract.pdf. With no
+// contractId yet, `prepare` makes the document first (a proposal filled in
+// on the contract screen) and gives its id, or says why it couldn't.
+export default function DownloadContractButton({
+  contractId,
+  prepare,
+  className,
+  kind,
+}: {
+  contractId: string | null;
+  prepare?: () => Promise<{ contractId?: string; error?: string }>;
+  className?: string;
+  kind?: string | null;
+}) {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -14,7 +26,16 @@ export default function DownloadContractButton({ contractId, className, kind }: 
     setDownloading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/contracts/${contractId}/pdf`);
+      let id = contractId;
+      if (!id) {
+        const made = prepare ? await prepare() : { error: "There's no document to download yet." };
+        if (!made.contractId) {
+          setError(made.error ?? "Couldn't download the PDF. Try again.");
+          return;
+        }
+        id = made.contractId;
+      }
+      const res = await fetch(`/api/contracts/${id}/pdf`);
       if (!res.ok) throw new Error("Failed to download the PDF");
       const filename = filenameFromDisposition(res.headers.get("content-disposition") ?? "", kind === "proposal" ? "proposal.pdf" : "contract.pdf");
 

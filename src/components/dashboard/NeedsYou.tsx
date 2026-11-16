@@ -66,7 +66,7 @@ export default function NeedsYou({ data, phoneNotice, reminders }: { data: Needs
         ) : (
           <>
             {approvals.map((a) => (
-              <Row key={`a-${a.dealId}`} title={`Approve the contract for ${a.name}`} href={`/deals/${a.dealId}/contract`} detail={a.service} chip={{ label: "Approval", cls: "chip-warn" }} action={linkButton(`/deals/${a.dealId}/contract`, "Review")} />
+              <Row key={`a-${a.dealId}`} title={`Approve the contract for ${a.name}`} href={`/deals/${a.dealId}`} detail={a.service} chip={{ label: "Approval", cls: "chip-warn" }} action={linkButton(`/deals/${a.dealId}`, "Review")} />
             ))}
 
             {proposals.rows.map((p) => (

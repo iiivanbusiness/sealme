@@ -7,35 +7,100 @@ import { dispatchDealCreated } from "@/lib/webhooks";
 import { requireWorkspaceId } from "@/lib/workspace";
 import { applyExtractionToDeal, syncCoreDealFields } from "@/lib/deal-live";
 import { documentLocksTerms } from "@/lib/contract-status";
-import { extractPlaceholderKeys } from "@/lib/contract";
+import { contractTerms, extractPlaceholderKeys, type Clause } from "@/lib/contract";
+import { fieldMeta } from "@/lib/field-meta";
 import { auth } from "@/lib/auth";
 import { canSendDocument, requestOrSendReview, type SendSetup } from "@/lib/review";
 import { logAudit } from "@/lib/audit";
 import { dealVisibilityFilter } from "@/lib/deal-visibility";
 import { currentUserWithRole } from "@/lib/permissions";
 import { reportError } from "@/lib/error-report";
+import { templateVersion } from "@/lib/deal-live-state";
 
 const TERMS_LOCKED_ERROR = "This contract is with a reviewer or the client, so its terms can't change";
 // What documentLocksTerms needs to tell a lapsed sign link from a live one.
 const TERMS_LOCK_SELECT = { status: true, deliveryMethod: true, expiresAt: true } as const;
 
-export type LiveDealState = {
+export type LiveFieldChange = { oldValue: string | null; newValue: string | null; changedBy: string; changedAt: Date };
+export type LiveField = {
+  id: string;
+  fieldKey: string;
+  groupLabel: string;
+  label: string;
+  value: string | null;
+  status: string;
+  sourceQuote: string | null;
+  history: LiveFieldChange[];
+};
+
+// The text the document is drawn from: the contract's template once there
+// is a contract (what a send uses), else the deal's. version is
+// templateVersion (deal-live-state.ts): its id and a hash of its text.
+export type LiveTemplate = { id: string; version: string; name: string; clauses: string };
+
+// What a poll says about the template. The clauses run to tens of KB on an
+// uploaded contract, so they only come back when the screen doesn't have
+// them yet: templateKnown (the version the screen has) no longer matches.
+export type LiveTemplateState =
+  // Still the template the screen has; it keeps its own copy.
+  | { templateUnchanged: true; template?: undefined }
+  // A different template (picked again, or edited), or none at all.
+  | { templateUnchanged: false; template: LiveTemplate | null };
+
+export type LiveDealState = LiveTemplateState & {
   status: string;
   summary: string | null;
-  fields: {
-    id: string;
-    fieldKey: string;
-    groupLabel: string;
-    label: string;
-    value: string | null;
-    status: string;
-    sourceQuote: string | null;
-    history: { oldValue: string | null; newValue: string | null; changedBy: string; changedAt: Date }[];
-  }[];
+  fields: LiveField[];
   calls: { id: string; source: string; startedAt: Date; endedAt: Date | null; transcript: string }[];
   actionItems: { id: string; description: string; ownerType: string; dueDate: Date | null; status: string; sourceQuote: string | null }[];
   callHighlights: { id: string; type: string; body: string; sourceQuote: string | null }[];
+  contract: { id: string; status: string; sentAt: string | null; viewedAt: string | null } | null;
+  // The call the deal was made on (Start a call). Its transcript only grows
+  // while it records, so each poll carries what came after the length the
+  // page already has (transcriptKnown); when it got shorter (thrown away),
+  // transcriptReset says transcriptAppend is the whole text instead.
+  phoneCall: {
+    id: string;
+    status: string;
+    startedAt: string;
+    endedAt: string | null;
+    transcriptLength: number;
+    transcriptAppend: string;
+    transcriptReset: boolean;
+  } | null;
 };
+
+type FieldRow = { id: string; fieldKey: string; groupLabel: string; label: string; value: string | null; status: string; sourceQuote: string | null };
+type FieldChangeRow = { fieldKey: string; oldValue: string | null; newValue: string | null; changedBy: string; changedAt: Date };
+
+// Each term with its change history, as the deal page shows it.
+function toLiveFields(fields: FieldRow[], changes: FieldChangeRow[]): LiveField[] {
+  const historyByKey = new Map<string, FieldChangeRow[]>();
+  for (const change of changes) {
+    if (!historyByKey.has(change.fieldKey)) historyByKey.set(change.fieldKey, []);
+    historyByKey.get(change.fieldKey)!.push(change);
+  }
+  return fields.map((f) => ({
+    id: f.id,
+    fieldKey: f.fieldKey,
+    groupLabel: f.groupLabel,
+    label: f.label,
+    value: f.value,
+    status: f.status,
+    sourceQuote: f.sourceQuote,
+    history: (historyByKey.get(f.fieldKey) ?? []).map((h) => ({ oldValue: h.oldValue, newValue: h.newValue, changedBy: h.changedBy, changedAt: h.changedAt })),
+  }));
+}
+
+async function loadLiveFields(dealId: string): Promise<LiveField[]> {
+  const [fields, changes] = await Promise.all([
+    prisma.dealField.findMany({ where: { dealId }, orderBy: { orderIndex: "asc" } }),
+    prisma.dealFieldChange.findMany({ where: { dealId }, orderBy: { changedAt: "asc" } }),
+  ]);
+  return toLiveFields(fields, changes);
+}
+
+const iso = (date: Date | null | undefined) => (date ? date.toISOString() : null);
 
 // Polled by LiveDealView (a client component) every few seconds while a
 // call is actively being recorded, so the extracted terms/summary/action
@@ -45,7 +110,9 @@ export type LiveDealState = {
 // back — the same live-without-reload pattern ReviewPanel already uses for
 // review state (src/app/(app)/deals/[id]/review-actions.ts's
 // getReviewState).
-export async function getLiveDealState(dealId: string): Promise<LiveDealState | null> {
+// templateKnown: the version of the template the page already has, so the
+// clauses can stay out of the answer while it's still the same one.
+export async function getLiveDealState(dealId: string, transcriptKnown = 0, templateKnown: string | null = null): Promise<LiveDealState | null> {
   const { where } = await dealVisibilityFilter();
   const workspaceId = await requireWorkspaceId();
   const deal = await prisma.deal.findFirst({
@@ -56,32 +123,45 @@ export async function getLiveDealState(dealId: string): Promise<LiveDealState | 
       fieldChanges: { orderBy: { changedAt: "asc" } },
       actionItems: { orderBy: { createdAt: "asc" } },
       callHighlights: { orderBy: { createdAt: "asc" } },
+      template: { select: { id: true, name: true, clauses: true } },
+      contract: { select: { id: true, status: true, sentAt: true, viewedAt: true, template: { select: { id: true, name: true, clauses: true } } } },
+      phoneCall: { select: { id: true, status: true, startedAt: true, endedAt: true, transcript: true } },
     },
   });
   if (!deal) return null;
 
-  const historyByKey = new Map<string, typeof deal.fieldChanges>();
-  for (const change of deal.fieldChanges) {
-    if (!historyByKey.has(change.fieldKey)) historyByKey.set(change.fieldKey, []);
-    historyByKey.get(change.fieldKey)!.push(change);
-  }
+  const template = deal.contract?.template ?? deal.template;
+  const version = template ? templateVersion(template) : null;
+  const templateState: LiveTemplateState =
+    version && typeof templateKnown === "string" && templateKnown === version
+      ? { templateUnchanged: true }
+      : { templateUnchanged: false, template: template && version ? { id: template.id, version, name: template.name, clauses: template.clauses } : null };
+  const known = typeof transcriptKnown === "number" && Number.isFinite(transcriptKnown) && transcriptKnown > 0 ? Math.floor(transcriptKnown) : 0;
+  const transcript = deal.phoneCall?.transcript ?? "";
+  // Discarding a recording empties the transcript, so a shorter one is a new
+  // text, not more of the old one.
+  const transcriptReset = transcript.length < known;
 
   return {
+    ...templateState,
     status: deal.status,
     summary: deal.summary,
-    fields: deal.fields.map((f) => ({
-      id: f.id,
-      fieldKey: f.fieldKey,
-      groupLabel: f.groupLabel,
-      label: f.label,
-      value: f.value,
-      status: f.status,
-      sourceQuote: f.sourceQuote,
-      history: (historyByKey.get(f.fieldKey) ?? []).map((h) => ({ oldValue: h.oldValue, newValue: h.newValue, changedBy: h.changedBy, changedAt: h.changedAt })),
-    })),
+    fields: toLiveFields(deal.fields, deal.fieldChanges),
     calls: deal.calls.map((c) => ({ id: c.id, source: c.source, startedAt: c.startedAt, endedAt: c.endedAt, transcript: c.transcript })),
     actionItems: deal.actionItems.map((a) => ({ id: a.id, description: a.description, ownerType: a.ownerType, dueDate: a.dueDate, status: a.status, sourceQuote: a.sourceQuote })),
     callHighlights: deal.callHighlights.map((h) => ({ id: h.id, type: h.type, body: h.body, sourceQuote: h.sourceQuote })),
+    contract: deal.contract ? { id: deal.contract.id, status: deal.contract.status, sentAt: iso(deal.contract.sentAt), viewedAt: iso(deal.contract.viewedAt) } : null,
+    phoneCall: deal.phoneCall
+      ? {
+          id: deal.phoneCall.id,
+          status: deal.phoneCall.status,
+          startedAt: deal.phoneCall.startedAt.toISOString(),
+          endedAt: iso(deal.phoneCall.endedAt),
+          transcriptLength: transcript.length,
+          transcriptAppend: transcriptReset ? transcript : transcript.slice(known),
+          transcriptReset,
+        }
+      : null,
   };
 }
 
@@ -160,7 +240,66 @@ export async function generateContract(dealId: string) {
     await prisma.deal.update({ where: { id: dealId }, data: { status: "ready" } });
   }
 
-  redirect(`/deals/${dealId}/contract`);
+  // The deal page is the contract screen.
+  redirect(`/deals/${dealId}`);
+}
+
+// The draft generateContract would make, for the contract screen, which
+// stays where it is: refused while a term is missing (the way the send
+// itself checks it: an empty row, or a term the text has with no value) and
+// from the trash. Returns the Contract row's id.
+async function makeDraft(dealId: string): Promise<{ error: string } | { contractId: string | null }> {
+  const { where } = await dealVisibilityFilter();
+  const workspaceId = await requireWorkspaceId();
+  const deal = await prisma.deal.findFirst({
+    where: { id: dealId, workspaceId, ...where },
+    include: { fields: true, template: { select: { clauses: true } }, contract: { select: { status: true, template: { select: { clauses: true } } } } },
+  });
+  if (!deal) return { error: "Deal not found" };
+  const doc = deal.kind === "proposal" ? "proposal" : "contract";
+  if (deal.trashedAt) return { error: `This ${doc} is in the trash. Restore it first` };
+
+  const clauses = deal.contract?.template?.clauses ?? deal.template?.clauses;
+  const terms = contractTerms(clauses ? (JSON.parse(clauses) as Clause[]) : [], deal.fields, (key) => fieldMeta(key).label);
+  const missing = terms.filter((t) => t.state === "empty" || deal.fields.some((f) => f.fieldKey === t.key && f.status === "missing"));
+  if (missing.length > 0) {
+    return { error: `Fill in ${missing.map((t) => t.label).join(", ")} before sending. The ${doc} still has blanks` };
+  }
+
+  const contract = await prisma.contract.upsert({
+    where: { dealId },
+    create: { dealId, templateId: deal.templateId, status: "draft" },
+    update: {},
+  });
+
+  // A contract that exists already keeps the deal's status: it may be out
+  // for changes, or past a lapsed link, which "ready" would hide.
+  if (!deal.contract && deal.status !== "sent" && deal.status !== "signed" && deal.status !== "pending_approval") {
+    await prisma.deal.update({ where: { id: dealId }, data: { status: "ready" } });
+  }
+  return { contractId: contract?.id ?? null };
+}
+
+// "Send for signature" on the contract screen when there's no contract yet
+// (a call still on, or a deal never opened as a contract): the draft, then
+// straight to the Send page. Refusals come back as { error }, since a thrown
+// message is hidden in production.
+export async function generateContractAndSend(dealId: string): Promise<{ error?: string }> {
+  const made = await makeDraft(dealId);
+  if ("error" in made) return { error: made.error };
+  redirect(`/deals/${dealId}/send`);
+}
+
+// Copy link and Download PDF on a proposal that has no document yet (one
+// made from a call with blanks, filled in later on the paper): the draft is
+// made right there, so the link and the PDF work without a trip to the Send
+// page. Nothing goes out from here.
+export async function makeDocumentDraft(dealId: string): Promise<{ error?: string; contractId?: string }> {
+  const made = await makeDraft(dealId);
+  if ("error" in made) return { error: made.error };
+  if (!made.contractId) return { error: "Couldn't make it. Try again" };
+  revalidatePath(`/deals/${dealId}`);
+  return { contractId: made.contractId };
 }
 
 export async function fillMissingFields(dealId: string, formData: FormData) {
@@ -191,21 +330,20 @@ export async function fillMissingFields(dealId: string, formData: FormData) {
   redirect(`/deals/${dealId}`);
 }
 
-export async function updateFieldValues(dealId: string, formData: FormData) {
-  const { where } = await dealVisibilityFilter();
-  const workspaceId = await requireWorkspaceId();
-  const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId, ...where }, include: { fields: true, contract: { select: TERMS_LOCK_SELECT } } });
-  if (!deal) throw new Error("Deal not found");
-  if (documentLocksTerms(deal.contract, deal.kind)) throw new Error(TERMS_LOCKED_ERROR);
+type EditableDeal = { id: string; clientId: string; status: string };
+type EditableField = { id: string; fieldKey: string; value: string | null; status: string };
 
+// The rep's own values for some of a deal's terms. A cleared term is missing
+// again: it shows up to be filled in and the contract can't go out with a raw
+// "{fee}" in it. A changed value keeps the old one in the history. Then the
+// copies on the deal and client follow, and the deal moves between "missing
+// info" and "ready". Returns the deal's status after.
+async function saveFieldEdits(deal: EditableDeal, edits: { field: EditableField; value: string }[]): Promise<string> {
+  const dealId = deal.id;
   const changed: { fieldKey: string; value: string }[] = [];
-  for (const field of deal.fields) {
-    // The contract page edits only one clause's fields; absent ones stay as-is.
-    if (!formData.has(field.id)) continue;
-    const value = String(formData.get(field.id) ?? "").trim();
+  for (const { field, value: raw } of edits) {
+    const value = raw.trim();
     if (!value) {
-      // A cleared term is missing again: it shows up to be filled in and the
-      // contract can't go out with a raw "{fee}" in it.
       if (field.status === "missing") continue;
       if (field.value) {
         await prisma.dealFieldChange.create({
@@ -234,15 +372,78 @@ export async function updateFieldValues(dealId: string, formData: FormData) {
   const stillMissing = await prisma.dealField.count({ where: { dealId, status: "missing" } });
   if (stillMissing === 0 && deal.status === "missing_info") {
     await prisma.deal.update({ where: { id: dealId }, data: { status: "ready" } });
-  } else if (stillMissing > 0 && deal.status === "ready") {
+    return "ready";
+  }
+  if (stillMissing > 0 && deal.status === "ready") {
     await prisma.deal.update({ where: { id: dealId }, data: { status: "missing_info" } });
+    return "missing_info";
   }
+  return deal.status;
+}
 
-  if (formData.get("returnTo") === "contract") {
-    revalidatePath(`/deals/${dealId}`);
-    redirect(`/deals/${dealId}/contract?updated=1`);
-  }
+export async function updateFieldValues(dealId: string, formData: FormData) {
+  const { where } = await dealVisibilityFilter();
+  const workspaceId = await requireWorkspaceId();
+  const deal = await prisma.deal.findFirst({ where: { id: dealId, workspaceId, ...where }, include: { fields: true, contract: { select: TERMS_LOCK_SELECT } } });
+  if (!deal) throw new Error("Deal not found");
+  if (documentLocksTerms(deal.contract, deal.kind)) throw new Error(TERMS_LOCKED_ERROR);
+
+  // A form may edit only some of the fields; absent ones stay as-is.
+  const edits = deal.fields.filter((field) => formData.has(field.id)).map((field) => ({ field, value: String(formData.get(field.id) ?? "") }));
+  await saveFieldEdits(deal, edits);
+
+  // Every way in ends on the deal page, the one contract screen (a form
+  // that still says returnTo=contract included).
+  revalidatePath(`/deals/${dealId}`);
   redirect(`/deals/${dealId}`);
+}
+
+// One term typed in on the contract screen (on the paper, or in the list of
+// terms), saved without leaving the page: the screen shows it at once and
+// takes the terms and status that come back. Same checks and writes as
+// updateFieldValues; an empty value makes the term missing again. A term
+// the text has but the deal has no row for (the template changed after the
+// deal was made) gets its row here. Refusals come back as { error }, since a
+// thrown message is hidden in production.
+export async function setDealField(dealId: string, fieldKey: string, value: string): Promise<{ error?: string; fields?: LiveField[]; status?: string }> {
+  if (typeof fieldKey !== "string" || !/^\w+$/.test(fieldKey)) return { error: "This deal has no such term" };
+  const text = typeof value === "string" ? value : "";
+
+  const { where } = await dealVisibilityFilter();
+  const workspaceId = await requireWorkspaceId();
+  const deal = await prisma.deal.findFirst({
+    where: { id: dealId, workspaceId, ...where },
+    include: { fields: true, template: { select: { clauses: true } }, contract: { select: { ...TERMS_LOCK_SELECT, template: { select: { clauses: true } } } } },
+  });
+  if (!deal) return { error: "Deal not found" };
+  if (documentLocksTerms(deal.contract, deal.kind)) return { error: TERMS_LOCKED_ERROR };
+
+  try {
+    let field: EditableField | undefined = deal.fields.find((f) => f.fieldKey === fieldKey);
+    if (!field) {
+      const clauses = deal.contract?.template?.clauses ?? deal.template?.clauses;
+      const keys = clauses ? extractPlaceholderKeys(clauses) : [];
+      if (!keys.includes(fieldKey)) return { error: "This deal has no such term anymore" };
+      // Nothing to clear on a term that was never filled in.
+      if (!text.trim()) return { fields: await loadLiveFields(dealId), status: deal.status };
+      const meta = fieldMeta(fieldKey);
+      // Made empty first, so the edit below writes it the one usual way
+      // (and a row a reading of the call made meanwhile is edited, not doubled).
+      field = await prisma.dealField.upsert({
+        where: { dealId_fieldKey: { dealId, fieldKey } },
+        create: { dealId, fieldKey, label: meta.label, groupLabel: meta.groupLabel, value: null, status: "missing", orderIndex: keys.indexOf(fieldKey) },
+        update: {},
+      });
+    }
+
+    const status = await saveFieldEdits(deal, [{ field, value: text }]);
+    revalidatePath(`/deals/${dealId}`);
+    revalidatePath(`/deals/${dealId}/contract`);
+    return { fields: await loadLiveFields(dealId), status };
+  } catch (err) {
+    await reportError(err, "Saving a deal term", { dealId, fieldKey });
+    return { error: "Couldn't save that. Try again" };
+  }
 }
 
 // Applies exactly one field change the rep already confirmed after hearing
@@ -410,7 +611,7 @@ export async function startRenewal(dealId: string) {
   });
   await dispatchDealCreated(workspaceId, newDeal.id);
 
-  redirect(`/deals/${newDeal.id}/contract`);
+  redirect(`/deals/${newDeal.id}`);
 }
 
 export async function toggleActionItem(dealId: string, itemId: string): Promise<{ error?: string }> {

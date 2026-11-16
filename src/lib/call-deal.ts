@@ -139,7 +139,7 @@ async function tellRep(o: { workspaceId: string; user: { id: string; email: stri
   const What = what[0].toUpperCase() + what.slice(1);
   const n = o.hasMissing
     ? { title: `${What} for ${o.clientName} needs a few details`, body: `Fill in what the call didn't cover, then send the ${what}.`, path: `/deals/${o.dealId}`, action: "Fill in the details" }
-    : { title: `${What} for ${o.clientName} is ready`, body: "Review it and send it.", path: `/deals/${o.dealId}/contract`, action: `Review the ${what}` };
+    : { title: `${What} for ${o.clientName} is ready`, body: "Review it and send it.", path: `/deals/${o.dealId}`, action: `Review the ${what}` };
   await createNotification({ workspaceId: o.workspaceId, userId: o.user.id, type: "contract.ready", title: n.title, body: n.body, linkUrl: n.path }).catch((err) =>
     reportError(err, "Contract-ready notification", { dealId: o.dealId }),
   );

@@ -1,12 +1,23 @@
 "use client";
 
-import { useState } from "react";
-import { useVisibleInterval } from "@/lib/use-visible-interval";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, useTransition, type ReactNode } from "react";
 import Link from "next/link";
-import ContractPreview from "./ContractPreview";
+import { useRouter } from "next/navigation";
+import { useVisibleInterval } from "@/lib/use-visible-interval";
+import { documentLocksTerms } from "@/lib/contract-status";
+import { canMarkNotSigned, dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
+import { contractParty, contractTerms, type Clause, type ContractTerm } from "@/lib/contract";
+import { fieldMeta, fieldQuestion } from "@/lib/field-meta";
+import { parseTranscript } from "@/lib/transcript-lines";
+import { callInProgress, callIsRecent, dealIsLive, dealTranscript, justHeard } from "@/lib/deal-live-state";
+import { discardCapture, showCaptureOnPage, stopCapture, useCaptureSession } from "@/lib/live-capture-client";
+import { useInDesktopApp } from "@/lib/native-shell";
+import { filenameFromDisposition } from "@/lib/download-filename";
+import { clientDocumentUrl } from "@/lib/document-links";
+import { restoreDeal } from "@/app/(app)/deals/bulk-actions";
+import type { LiveDealState, LiveField, LiveTemplate } from "@/app/(app)/deals/[id]/actions";
 import NothingHeardYet from "./NothingHeardYet";
 import MicSilentWarning from "./MicSilentWarning";
-import DealTermsCard from "./DealTermsCard";
 import ContinueCallButton from "./ContinueCallButton";
 import ActionItemsCard from "./ActionItemsCard";
 import CallHighlightsOverlay from "./CallHighlightsOverlay";
@@ -17,30 +28,55 @@ import ClientText from "./ClientText";
 import ReviewPanel from "./ReviewPanel";
 import ProposalActions from "./ProposalActions";
 import MarkNotSignedButton from "./MarkNotSignedButton";
-import RestoreFromTrashButton from "./RestoreFromTrashButton";
-import { documentLocksTerms } from "@/lib/contract-status";
-import { canMarkNotSigned, dealStatusChip, dealStatusLabel } from "@/lib/deal-status";
+import AuditTrailButton from "./AuditTrailButton";
+import ContractPaper, { revealField, type PaperComment, type PaperSignature, type PlainClause } from "./contract/ContractPaper";
+import TermsCard from "./contract/TermsCard";
+import NextCard, { CardButton, WaitingDots } from "./contract/NextCard";
+import TranscriptCard from "./contract/TranscriptCard";
+import CallPill from "./contract/CallPill";
+import ActionBar, { ActionBarSpacer, BarButton } from "./contract/ActionBar";
+import MissingDialog from "./contract/MissingDialog";
+import PreviewModal from "./contract/PreviewModal";
+import MoreSection from "./contract/MoreSection";
+import CopyLinkButton from "./contract/CopyLinkButton";
+import RenewalCard from "./contract/RenewalCard";
+import { DownloadIcon, EyeIcon, RestoreIcon, SendIcon } from "./contract/icons";
+import { nextToAsk, renewalCountdown, termsBadge, transcriptHighlights } from "./contract/paper-utils";
+import { useAskedKeys } from "./contract/use-asked-keys";
+import s from "./contract/contract.module.css";
 
 const POLL_INTERVAL_MS = 4000;
+// How long a term the call just filled in stays marked as just heard.
+const HEARD_MS = 8000;
 
-type FieldChange = { oldValue: string | null; newValue: string | null; changedBy: string; changedAt: Date };
-type FieldItem = { id: string; fieldKey: string; groupLabel: string; label: string; value: string | null; status: string; sourceQuote: string | null; history: FieldChange[] };
-type CallItem = { id: string; source: string; startedAt: Date; endedAt: Date | null; transcript: string };
-type ActionItemT = { id: string; description: string; ownerType: string; dueDate: Date | null; status: string; sourceQuote: string | null };
-type CallHighlightItem = { id: string; type: string; body: string; sourceQuote: string | null };
-// secondary sits under the main button, for a less common way out.
-type NextStep = { title: string; detail: string; action?: React.ReactNode; secondary?: React.ReactNode };
+type CallItem = LiveDealState["calls"][number];
+type ActionItemT = LiveDealState["actionItems"][number];
+type CallHighlightItem = LiveDealState["callHighlights"][number];
+type SetFieldResult = { error?: string; fields?: LiveField[]; status?: string };
 // Who put the contract in changes_requested, from the audit trail.
 export type ChangesRequestedBy = { by: "reviewer" | "client" | "signer"; name: string | null };
+// A client's open change request from the sign page, on the clause it names.
+export type ClientClauseComment = PaperComment & { createdAt: string };
+// A signed contract's term: when it ends or renews.
+export type ContractRenewal = { date: string; autoRenews: boolean; note: string | null };
 
-type LiveDealState = {
+// The call the deal was made on (Start a call), with who it's with: the
+// lead's name (null while SealMe hasn't put one to it yet) and their title,
+// else their company.
+export type DealPhoneCall = {
+  id: string;
   status: string;
-  summary: string | null;
-  fields: FieldItem[];
-  calls: CallItem[];
-  actionItems: ActionItemT[];
-  callHighlights: CallHighlightItem[];
+  source: string;
+  startedAt: string;
+  endedAt: string | null;
+  transcript: string;
+  personName: string | null;
+  personSub: string | null;
 };
+
+// The text exactly as it went out, for a sent contract whose terms or
+// template changed since: drawn as plain text.
+export type SentText = { templateName: string; agencyName: string; clientName: string; clauses: PlainClause[] };
 
 type ReviewStepItem = {
   id: string;
@@ -60,6 +96,8 @@ type ReviewStepItem = {
 };
 type TeammateOption = { id: string; name: string };
 type NoteItem = { id: string; authorName: string; authorEmail: string; body: string; createdAt: string };
+type NextView = { eyebrow: ReactNode; title: ReactNode; text?: ReactNode; quote?: string | null; tone?: "default" | "done" | "warn" | "dark"; actions?: ReactNode };
+type Toast = { id: number; text: string; tone: "ok" | "error" };
 
 const CALL_SOURCE_LABEL: Record<string, string> = {
   local: "Recorded locally",
@@ -75,21 +113,19 @@ function callPreview(transcript: string): string {
 }
 
 // A local recording's transcript is two channels merged into "Speaker: ..."
-// lines (system audio = "Client", mic = "You" — see deepgram.ts). Neither
-// the native capture nor the transcription pipeline has any amplitude/
-// silence check, so if the system-audio channel goes dead for the whole
-// call (a known real-world failure mode with some headset/output setups),
-// nothing errors anywhere — it looks exactly like a call where the client
-// just didn't say anything. This is the one place that distinction becomes
-// visible to the person who recorded it.
+// lines (system audio = "Client", mic = "You", see deepgram.ts). Neither the
+// native capture nor the transcription pipeline has any silence check, so if
+// one channel goes dead for the whole call nothing errors anywhere: it looks
+// exactly like a call where that side said nothing. This screen is the one
+// place that becomes visible to the person who recorded it.
 function channelHasWords(transcript: string, label: string): boolean {
   return transcript
     .split("\n")
-    .some((line) => line.startsWith(`${label}:`) && line.slice(label.length + 1).trim().length > 0);
+    .some((line) => line.trim().startsWith(`${label}:`) && line.trim().slice(label.length + 1).trim().length > 0);
 }
 
-function timeAgo(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+function timeAgo(date: Date | string): string {
+  const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -99,25 +135,72 @@ function timeAgo(date: Date): string {
   return `${days}d ago`;
 }
 
-// A call still being recorded (local capture or a live Recall bot) writes
-// new extracted terms/summary/action items to the DB every ~minute in the
-// background — see src/app/api/local-capture/transcribe/route.ts. Server
-// components only render once per navigation, so without this, the page a
-// rep is actually watching mid-call would just sit there showing the state
-// from whenever it first loaded, no matter how much the AI has extracted
-// since — the rep would have to leave and re-enter to see anything new.
-// This polls a lean snapshot of just the live-relevant fields (same
-// pattern as ReviewPanel's review-state polling) and stops once the call
-// is over and the deal has left "processing".
+// "Fill in deliverables", but "Fill in SDR count".
+function lowerLabel(label: string): string {
+  return label
+    .split(/\s+/)
+    .map((w) => (w.length > 1 && w === w.toUpperCase() && /[A-Z]/.test(w) ? w : w.toLowerCase()))
+    .join(" ");
+}
+
+function parseClauses(json: string | null | undefined): Clause[] {
+  if (!json) return [];
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? (parsed as Clause[]).filter((c) => c && typeof c.body === "string").map((c) => ({ ...c, title: typeof c.title === "string" ? c.title : "" })) : [];
+  } catch {
+    return [];
+  }
+}
+
+// The rep's own values on top of what the server last said, while their
+// saves are on the way: the screen shows a typed term at once.
+function withPending(fields: LiveField[], pending: Record<string, string>): LiveField[] {
+  const keys = Object.keys(pending);
+  if (keys.length === 0) return fields;
+  const out = fields.map((f) => {
+    if (!Object.hasOwn(pending, f.fieldKey)) return f;
+    const value = pending[f.fieldKey].trim();
+    return { ...f, value: value || null, status: value ? (f.status === "missing" ? "confirmed" : "user_edited") : "missing" };
+  });
+  for (const key of keys) {
+    const value = pending[key].trim();
+    if (value && !fields.some((f) => f.fieldKey === key)) {
+      out.push({ id: `pending:${key}`, fieldKey: key, groupLabel: "", label: fieldMeta(key).label, value, status: "confirmed", sourceQuote: null, history: [] });
+    }
+  }
+  return out;
+}
+
+const subscribeNothing = () => () => {};
+// False on the server and while hydrating, so dates in the viewer's own
+// format only show once the page runs in the browser.
+function useIsClient(): boolean {
+  return useSyncExternalStore(subscribeNothing, () => true, () => false);
+}
+
+function isRedirect(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "digest" in err && String((err as { digest: unknown }).digest).startsWith("NEXT_REDIRECT");
+}
+
+// The contract screen: the document drawn as one sheet of paper, the terms
+// it needs beside it, and the one thing to do next. The same screen serves
+// a call that's still on (terms fill in as they're said, the transcript
+// runs, the rep can type over anything) and a contract or proposal opened
+// later. While the call is on (or SealMe is still reading it) the screen
+// asks the server for what's new every few seconds; server components only
+// render once per navigation.
 export default function LiveDealView({
   dealId,
   leadId,
   clientName,
-  service,
-  callLength,
+  clientNameKnown = true,
+  client,
+  agencyName,
   contractViewedAt,
-  templateName,
-  templateClauses,
+  template: initialTemplate,
+  plainText,
+  signature,
   hasContract,
   initialStatus,
   initialSummary,
@@ -125,11 +208,12 @@ export default function LiveDealView({
   initialCalls,
   initialActionItems,
   initialCallHighlights,
+  phoneCall: initialPhoneCall,
   getLiveDealStateAction,
-  updateFieldsAction,
+  setFieldAction,
+  generateAndSendAction,
+  makeDraftAction,
   retryExtractionAction,
-  fillMissingFieldsAction,
-  generateContractAction,
   toggleActionItemAction,
   notes,
   currentUserEmail,
@@ -141,6 +225,16 @@ export default function LiveDealView({
   docusignEnabled,
   contractStatus: initialContractStatus,
   contractSentAt = null,
+  contractSignedAt = null,
+  contractSignerName = null,
+  contractExpiresAt = null,
+  contractDeliveryMethod = null,
+  markedNotSignedAt = null,
+  pendingSigners = [],
+  clauseComments = [],
+  renewal = null,
+  startRenewalAction,
+  canExportAuditTrail = false,
   trashed = false,
   contractExpired: initialContractExpired,
   docusignVoid,
@@ -160,24 +254,39 @@ export default function LiveDealView({
   // The lead the deal is on, for the way back; null when the viewer can't open it.
   leadId: string | null;
   clientName: string;
-  service: string;
-  callLength: string | null;
-  contractViewedAt: Date | null;
-  templateName: string | null;
-  // The template's clauses (JSON), for the contract preview before there's a contract.
-  templateClauses: string | null;
+  // False while the client is a stand-in ("New client", a document made
+  // during a cold call before anyone said who it's with): the screen then
+  // says "the client" instead of a made-up first name.
+  clientNameKnown?: boolean;
+  // Who the document is with, for the parties line (contractParty).
+  client: { name: string; company: string | null };
+  agencyName: string;
+  contractViewedAt: string | null;
+  // The template the text comes from: the contract's once there is one.
+  template: LiveTemplate | null;
+  plainText: SentText | null;
+  // The client's signature, shown under the terms they signed.
+  signature: PaperSignature | null;
   hasContract: boolean;
   initialStatus: string;
   initialSummary: string | null;
-  initialFields: FieldItem[];
+  initialFields: LiveField[];
   initialCalls: CallItem[];
   initialActionItems: ActionItemT[];
   initialCallHighlights: CallHighlightItem[];
-  getLiveDealStateAction: (dealId: string) => Promise<LiveDealState | null>;
-  updateFieldsAction: (formData: FormData) => void;
+  phoneCall: DealPhoneCall | null;
+  // transcriptKnown: how much of the call's transcript the page has;
+  // templateKnown: the version of the template it has (its clauses stay
+  // out of the answer while that still matches).
+  getLiveDealStateAction: (dealId: string, transcriptKnown?: number, templateKnown?: string | null) => Promise<LiveDealState | null>;
+  // One term typed in, saved without leaving the page.
+  setFieldAction: (fieldKey: string, value: string) => Promise<SetFieldResult>;
+  // Makes the draft when there's none yet and goes to the Send page.
+  generateAndSendAction: () => Promise<{ error?: string }>;
+  // Makes the draft without leaving the page (a proposal's Copy link and
+  // Download PDF before it has a document).
+  makeDraftAction: () => Promise<{ error?: string; contractId?: string }>;
   retryExtractionAction: () => void;
-  fillMissingFieldsAction: (formData: FormData) => void;
-  generateContractAction: () => void;
   toggleActionItemAction: (dealId: string, itemId: string) => Promise<{ error?: string }>;
   notes: NoteItem[];
   currentUserEmail: string;
@@ -190,7 +299,25 @@ export default function LiveDealView({
   contractStatus: string | null;
   // When the contract went to the client, if it did: changes asked for
   // after that can still be marked not signed (canMarkNotSigned).
-  contractSentAt?: Date | null;
+  contractSentAt?: string | null;
+  contractSignedAt?: string | null;
+  // Who signed it for the client, once they did.
+  contractSignerName?: string | null;
+  // When the SealMe sign link runs (or ran) out.
+  contractExpiresAt?: string | null;
+  // "sealme" (the client signs at /sign/{id}) or "docusign".
+  contractDeliveryMethod?: string | null;
+  // When the rep marked it not signed, from the audit log.
+  markedNotSignedAt?: string | null;
+  // Who still has to sign after the client (partially signed).
+  pendingSigners?: { name: string; role: string }[];
+  // What the client asked to change, shown under each clause.
+  clauseComments?: ClientClauseComment[];
+  // A signed contract's term, and the way to start its renewal.
+  renewal?: ContractRenewal | null;
+  startRenewalAction?: () => void | Promise<void>;
+  // Workspace admins can export the audit trail (under More).
+  canExportAuditTrail?: boolean;
   // In the trash: nothing goes out from it until it's restored.
   trashed?: boolean;
   // The SealMe sign link ran out (contractExpired in contract-status.ts),
@@ -247,6 +374,8 @@ export default function LiveDealView({
   // The viewer's current day (YYYY-MM-DD), for overdue action items.
   today: string;
 }) {
+  const router = useRouter();
+  const isClient = useIsClient();
   const [status, setStatus] = useState(initialStatus);
   const [summary, setSummary] = useState(initialSummary);
   const [fields, setFields] = useState(initialFields);
@@ -255,19 +384,41 @@ export default function LiveDealView({
   const [callHighlights, setCallHighlights] = useState(initialCallHighlights);
   const [contractStatus, setContractStatus] = useState(initialContractStatus);
   const [contractExpired, setContractExpired] = useState(initialContractExpired);
-  const [live, setLive] = useState(() => isLive(initialStatus, initialCalls));
+  const [viewedAt, setViewedAt] = useState(contractViewedAt);
+  const [sentAt, setSentAt] = useState(contractSentAt);
+  const [template, setTemplate] = useState(initialTemplate);
+  const [call, setCall] = useState(initialPhoneCall);
   const [docusignNowStarted, setDocusignNowStarted] = useState(false);
+  // Terms typed by the rep whose save hasn't come back yet.
+  const [pending, setPending] = useState<Record<string, string>>({});
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [heard, setHeard] = useState<{ key: string; quote: string | null } | null>(null);
+  const [missingOpen, setMissingOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  // A failed PDF download from inside the preview, shown there: the toast
+  // would sit under the modal.
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
+  // The call this screen ended, shown as ended until the server says so.
+  const [endedCall, setEndedCall] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  // A term changed here after changes were asked for: the next step is
+  // sending this version.
+  const [updatedAfterRequest, setUpdatedAfterRequest] = useState(false);
+  const [sending, startSending] = useTransition();
+  const [restoring, startRestoring] = useTransition();
+  const [asked, markAsked] = useAskedKeys(dealId);
+  const session = useCaptureSession();
+  const inDesktop = useInDesktopApp();
 
-  // Next keeps this component mounted when a server action redirects back
-  // to this same page (Save & continue, Save changes), so the fresh props it
-  // renders with would never reach the state above on their own. Every
-  // server render sends new arrays, which is how fresh props are told apart.
-  // serverRender also closes the Deal terms editor once a save comes back.
+  // Next keeps this component mounted when the page renders again on the
+  // server (a saved term revalidates it, router.refresh, a redirect back
+  // here), so the fresh props would never reach the state above on their
+  // own. Every server render sends new arrays, which is how fresh props are
+  // told apart. What the rep is typing, and their saves on the way, stay.
   const [propsFields, setPropsFields] = useState(initialFields);
-  const [serverRender, setServerRender] = useState(0);
   if (initialFields !== propsFields) {
     setPropsFields(initialFields);
-    setServerRender(serverRender + 1);
     setStatus(initialStatus);
     setSummary(initialSummary);
     setFields(initialFields);
@@ -276,17 +427,198 @@ export default function LiveDealView({
     setCallHighlights(initialCallHighlights);
     setContractStatus(initialContractStatus);
     setContractExpired(initialContractExpired);
-    setLive(isLive(initialStatus, initialCalls));
+    setViewedAt(contractViewedAt);
+    setSentAt(contractSentAt);
+    setTemplate(initialTemplate);
+    setCall(initialPhoneCall);
   }
 
-  // ReviewPanel polls its own review state independently (contractStatus/
-  // dealStatus), but the call-progress poll above only runs while a call is
-  // actually live — once it's over (the normal case for reviewing/sending a
-  // contract), it never fires again, so this page's own `status` (the top
-  // badge, the generate/send-to-docusign gating) would otherwise stay frozen
-  // at whatever it was on page load even as the review moves through its
-  // whole lifecycle. ReviewPanel calls this on every one of its own polls so
-  // this page's status tracks the review's without needing a second timer.
+  const isProposal = kind === "proposal";
+  const doc = isProposal ? "proposal" : "contract";
+  // The same rule the server actions enforce: the terms are what a reviewer
+  // or the client is looking at, so they can't be edited, unless the sign
+  // link expired or the rep marked it not signed (a status that never
+  // locks) and the contract has to go out again anyway.
+  const termsLocked = !contractExpired && documentLocksTerms(contractStatus, kind);
+  const editable = !termsLocked;
+  const plain = termsLocked && plainText ? plainText : null;
+
+  const shownFields = useMemo(() => withPending(fields, pending), [fields, pending]);
+  const clauses = useMemo(() => parseClauses(template?.clauses), [template?.clauses]);
+  const terms = useMemo(() => contractTerms(clauses, shownFields, (key) => fieldMeta(key).label), [clauses, shownFields]);
+  const termsByKey = useMemo(() => new Map(terms.map((t) => [t.key, t])), [terms]);
+  // What a send would leave blank: an empty term, or one the text has with
+  // no row behind it. The server refuses to send with any of these.
+  const missing = useMemo(() => terms.filter((t) => t.state === "empty"), [terms]);
+  const partyName = plain?.clientName ?? contractParty(shownFields, client);
+  // The client's name as the call heard it, before the client is renamed
+  // (that happens once the call is written up).
+  const heardClientName = shownFields.find((f) => f.fieldKey === "clientName")?.value?.trim() || null;
+  const knownClientName = clientNameKnown ? clientName : heardClientName;
+  const firstName = knownClientName ? knownClientName.split(/\s+/)[0] || knownClientName : null;
+  // In the middle of a sentence, and at its start.
+  const who = firstName ?? "the client";
+  const Who = firstName ?? "The client";
+  // A stand-in client's party name is the stand-in too, unless the call or
+  // the lead gave a real one (the client's name, or their company).
+  const partyKnown = !!plain || clientNameKnown || partyName !== clientName;
+
+  // The call this screen is on: the one the deal was made on (Start a
+  // call), or a recording made on the deal itself that's still going.
+  const lastCall = calls[calls.length - 1];
+  const pill = call && (call.status === "recording" || call.status === "processing")
+    ? {
+        id: call.id,
+        state: call.status === "recording" && endedCall !== call.id ? ("live" as const) : ("ended" as const),
+        startedAt: call.startedAt,
+        desktop: call.source === "desktop",
+        ours: !!session?.phoneCallId && session.phoneCallId === call.id,
+      }
+    : lastCall && callInProgress(lastCall)
+      ? {
+          id: lastCall.id,
+          state: endedCall === lastCall.id ? ("ended" as const) : ("live" as const),
+          startedAt: new Date(lastCall.startedAt).toISOString(),
+          desktop: lastCall.source === "local",
+          ours: session?.dealId === dealId,
+        }
+      : null;
+  const callLive = pill?.state === "live";
+  // The live screen keeps to the call (what to ask, the transcript) and
+  // leaves out what's for later: Mark as not signed, the proposal's
+  // sharing card. Not for a recording on the deal this page can't stop: one
+  // that's left without its end looks just like one that's on.
+  const callFocus = callLive && (pill.id === call?.id || pill.ours);
+  // Who the call is with; null while nobody knows (the pill says "New
+  // lead", the transcript "Client").
+  const personName = call?.personName || heardClientName || (clientNameKnown ? clientName : null);
+  const clientFirstName = personName?.split(/\s+/)[0] || null;
+
+  // Polls while the call records or is being written up, while SealMe
+  // reads it, or right after a recording on the deal ended.
+  const polling = dealIsLive({ status, calls, phoneCallStatus: call?.status ?? null });
+
+  const transcriptText = dealTranscript(call, calls);
+  const lines = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
+  const heardTerm = heard ? termsByKey.get(heard.key) : undefined;
+  const heardKey = heard && heardTerm?.state === "filled" ? heard.key : null;
+  const heardQuote = heardKey ? (heard?.quote ?? heardTerm?.sourceQuote ?? null) : null;
+  const highlights = useMemo(() => transcriptHighlights(lines, terms, heardKey, heardQuote), [lines, terms, heardKey, heardQuote]);
+
+  // What the poll, the saves and the PDF download read after an await: the
+  // state as of the last render.
+  const latest = useRef({ fields, call, calls, contractStatus, template, hasContract, previewOpen });
+  useEffect(() => {
+    latest.current = { fields, call, calls, contractStatus, template, hasContract, previewOpen };
+  });
+  const pollBusy = useRef(false);
+  // Each save bumps the counter and notes it per term, so a poll that left
+  // before a save can't put the term's old value back.
+  const saveSeq = useRef(0);
+  const savedAt = useRef(new Map<string, number>());
+  const transcriptOff = useRef(false);
+  const toastSeq = useRef(0);
+
+  function showToast(text: string, tone: Toast["tone"] = "ok") {
+    toastSeq.current += 1;
+    setToast({ id: toastSeq.current, text, tone });
+  }
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(null), toast.tone === "error" ? 6000 : 3200);
+    return () => window.clearTimeout(id);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!heard) return;
+    const id = window.setTimeout(() => setHeard(null), HEARD_MS);
+    return () => window.clearTimeout(id);
+  }, [heard]);
+
+  // Once the call is over and written up, the page renders once more on
+  // the server for everything that came of it (the contract, the notes,
+  // the review panel).
+  const wasPolling = useRef(polling);
+  useEffect(() => {
+    if (wasPolling.current && !polling) router.refresh();
+    wasPolling.current = polling;
+  }, [polling, router]);
+
+  async function poll() {
+    if (pollBusy.current) return;
+    pollBusy.current = true;
+    try {
+      const seqAtStart = saveSeq.current;
+      const before = latest.current;
+      const phoneText = before.call?.transcript ?? "";
+      const known = before.call && !transcriptOff.current ? phoneText.length : 0;
+      const data = await getLiveDealStateAction(dealId, known, before.template?.version ?? null);
+      if (!data) return;
+
+      // The transcript only grows: each poll brings what came after what
+      // the page has. When the two don't add up, the next poll asks for all
+      // of it.
+      let nextCall = before.call;
+      let needsRender = false;
+      if (data.phoneCall) {
+        const pc = data.phoneCall;
+        if (!before.call || before.call.id !== pc.id) {
+          needsRender = true;
+        } else {
+          const text = (pc.transcriptReset ? "" : phoneText.slice(0, known)) + pc.transcriptAppend;
+          transcriptOff.current = text.length !== pc.transcriptLength;
+          nextCall = { ...before.call, status: pc.status, startedAt: pc.startedAt, endedAt: pc.endedAt, transcript: text };
+          setCall(nextCall);
+        }
+      }
+
+      // A term saved since this poll left keeps what the save brought back
+      // (the state as it is now, not as it was when the poll left).
+      const savedSince = (key: string) => (savedAt.current.get(key) ?? -1) > seqAtStart;
+      const keepSaved = (current: LiveField[]) => {
+        const out = data.fields.map((f) => (savedSince(f.fieldKey) ? (current.find((c) => c.fieldKey === f.fieldKey) ?? f) : f));
+        for (const c of current) if (savedSince(c.fieldKey) && !out.some((f) => f.fieldKey === c.fieldKey)) out.push(c);
+        return out;
+      };
+      const nextTranscript = dealTranscript(nextCall, data.calls);
+      // Only what the call filled in counts as just heard, never a term
+      // the rep typed.
+      const heardNow = justHeard(before.fields, keepSaved(before.fields), parseTranscript(nextTranscript));
+      setFields(keepSaved);
+      if (heardNow && !savedSince(heardNow)) setHeard({ key: heardNow, quote: data.fields.find((f) => f.fieldKey === heardNow)?.sourceQuote?.trim() || null });
+
+      setStatus(data.status);
+      setSummary(data.summary);
+      setCalls(data.calls);
+      setActionItems(data.actionItems);
+      setCallHighlights(data.callHighlights);
+      // The clauses only come back when the template isn't the one the page
+      // has (picked again, or edited); otherwise the page keeps its copy.
+      if (!data.templateUnchanged && data.template?.version !== before.template?.version) setTemplate(data.template);
+      setViewedAt(data.contract?.viewedAt ?? null);
+      setSentAt(data.contract?.sentAt ?? null);
+      // A contract made or sent meanwhile (the end of the call makes the
+      // draft): the page renders again for everything that goes with it.
+      const nextContractStatus = data.contract?.status ?? null;
+      if (nextContractStatus !== before.contractStatus || Boolean(data.contract) !== before.hasContract) {
+        setContractStatus(nextContractStatus);
+        setContractExpired(nextContractStatus === "expired");
+        needsRender = true;
+      }
+      if (needsRender) router.refresh();
+    } catch {
+      // A missed poll just waits for the next one.
+    } finally {
+      pollBusy.current = false;
+    }
+  }
+
+  useVisibleInterval(() => void poll(), POLL_INTERVAL_MS, polling);
+
+  // ReviewPanel polls its own review state, so this page's status (the top
+  // chip, what's next, the send gating) follows the review through its
+  // whole lifecycle without a second timer here.
   function handleReviewSync(nextContractStatus: string, dealStatus: string) {
     setStatus(dealStatus);
     // A new contract status means it moved on (the cron marked the link
@@ -295,393 +627,802 @@ export default function LiveDealView({
     setContractStatus(nextContractStatus);
   }
 
-  function isLive(s: string, callList: CallItem[]): boolean {
-    if (s === "processing") return true;
-    const last = callList[callList.length - 1];
-    if (!last) return false;
-    if (!last.endedAt) return true;
-    // Action items and highlights are extracted in the background right
-    // after a call ends, so keep polling briefly until they land.
-    return Date.now() - new Date(last.endedAt).getTime() < 2 * 60 * 1000;
+  async function saveField(key: string, value: string) {
+    const label = termsByKey.get(key)?.label ?? fieldMeta(key).label;
+    saveSeq.current += 1;
+    savedAt.current.set(key, saveSeq.current);
+    setPending((p) => ({ ...p, [key]: value }));
+    if (heard?.key === key) setHeard(null);
+    let message: { text: string; tone: Toast["tone"] };
+    try {
+      const result = await setFieldAction(key, value);
+      if (result.error) {
+        message = { text: result.error, tone: "error" };
+      } else {
+        if (result.fields) setFields(result.fields);
+        if (result.status) setStatus(result.status);
+        if (latest.current.contractStatus === "changes_requested") setUpdatedAfterRequest(true);
+        message = { text: value.trim() ? `${label} updated` : `${label} cleared`, tone: "ok" };
+      }
+    } catch {
+      message = { text: "Couldn't save that. Try again", tone: "error" };
+    }
+    setPending((p) => {
+      if (p[key] !== value) return p;
+      const next = { ...p };
+      delete next[key];
+      return next;
+    });
+    showToast(message.text, message.tone);
   }
 
-  useVisibleInterval(
-    async () => {
-      const data = await getLiveDealStateAction(dealId);
-      if (!data) return;
-      setStatus(data.status);
-      setSummary(data.summary);
-      setFields(data.fields);
-      setCalls(data.calls);
-      setActionItems(data.actionItems);
-      setCallHighlights(data.callHighlights);
-      setLive(isLive(data.status, data.calls));
-    },
-    POLL_INTERVAL_MS,
-    live
-  );
-
-  const groups = new Map<string, FieldItem[]>();
-  for (const field of fields) {
-    if (!groups.has(field.groupLabel)) groups.set(field.groupLabel, []);
-    groups.get(field.groupLabel)!.push(field);
+  function commitEdit(key: string, value: string) {
+    setEditingKey(null);
+    void saveField(key, value);
   }
-  const missing = fields.filter((f) => f.status === "missing");
-  const isProposal = kind === "proposal";
-  const canSendToDocusignNow = !trashed && !isProposal && docusignEnabled && status === "ready" && contractStatus === "draft" && clientHasEmail;
-  // The same rule the server actions enforce: the terms are what a reviewer
-  // or the client is looking at, so they can't be edited, unless the sign
-  // link expired or the rep marked it not signed (a status that never locks)
-  // and the contract has to go out again anyway.
-  const termsLocked = !contractExpired && documentLocksTerms(contractStatus, kind);
-  const firstName = clientName.split(/\s+/)[0] || clientName;
+
+  // Opens a term for typing: on the paper where it first appears, or in
+  // the list for a term the text doesn't have (the client's email). A
+  // document that can't be edited just shows where the term is.
+  function startEditing(key: string) {
+    if (!editable) {
+      revealField(key);
+      return;
+    }
+    setEditingKey(key);
+    if (termsByKey.get(key)?.onPaper === false) {
+      window.requestAnimationFrame(() => document.getElementById("missing")?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+    }
+  }
+
+  function handleSend() {
+    if (missing.length > 0) {
+      setMissingOpen(true);
+      return;
+    }
+    if (hasContract) {
+      router.push(`/deals/${dealId}/send`);
+      return;
+    }
+    startSending(async () => {
+      try {
+        const result = await generateAndSendAction();
+        if (result?.error) showToast(result.error, "error");
+      } catch (err) {
+        // Making the draft ends in a redirect to the Send page, which Next
+        // carries out by itself.
+        if (!isRedirect(err)) showToast(`Couldn't open the ${doc} to send. Try again`, "error");
+      }
+    });
+  }
+
+  function restore() {
+    startRestoring(async () => {
+      try {
+        await restoreDeal(dealId);
+        router.refresh();
+      } catch {
+        showToast("Couldn't restore it. Try again from Trash.", "error");
+      }
+    });
+  }
+
+  // A blob, not a link to the PDF: the desktop app would open a plain link
+  // in its own viewer with no way back to the app.
+  async function downloadPdf() {
+    if (!contractId || downloading) return;
+    setDownloading(true);
+    setPreviewError(null);
+    try {
+      const res = await fetch(`/api/contracts/${contractId}/pdf`);
+      if (!res.ok) throw new Error("Failed to download the PDF");
+      const filename = filenameFromDisposition(res.headers.get("content-disposition") ?? "", isProposal ? "proposal.pdf" : "contract.pdf");
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      const text = "Couldn't download the PDF. Try again.";
+      // Over the open preview (a modal) a toast can't be seen, so the
+      // preview says it itself.
+      if (latest.current.previewOpen) setPreviewError(text);
+      else showToast(text, "error");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  // End call and Discard work only from the desktop app that's recording
+  // this call (its own session); anywhere else the pill just says where.
+  const canStop = !!pill && pill.state === "live" && pill.ours && inDesktop === true && !!session;
+  async function endCall() {
+    if (!session || !pill) return;
+    const { error } = await stopCapture(session);
+    if (error) throw new Error(error);
+    setEndedCall(pill.id);
+    // A recording made on the deal itself plays a short spoken recap, as
+    // its Stop & finish always did. Nothing plays when there's none.
+    if (session.dealId !== undefined) new Audio(`/api/deals/${session.dealId}/call-recap`).play().catch(() => {});
+    showToast("Call ended. SealMe is finishing the notes.");
+    router.refresh();
+  }
+  async function discardCall() {
+    if (!session) return;
+    const { error } = await discardCapture(session);
+    if (error) throw new Error(error);
+    // A call from Start a call takes its drafts to the trash with it, this
+    // one included. A recording made on the deal leaves the deal as it was.
+    if (session.phoneCallId) router.push("/leads");
+    else router.refresh();
+  }
+
+  // The bar at the top of the app shows the same recording; this page has
+  // it in the pill, so the bar steps aside while the page is open.
+  const captureOnPage = pill?.ours && session ? (session.phoneCallId ?? session.dealId) : null;
+  useEffect(() => {
+    if (!captureOnPage) return;
+    return showCaptureOnPage(captureOnPage);
+  }, [captureOnPage]);
+
   // Wherever the contract screen offers it too: still out, past its link,
   // or changes asked for after it went out. Not from the trash, which the
   // server refuses.
-  const markNotSigned = !trashed && canMarkNotSigned(contractStatus ? { status: contractStatus, sentAt: contractSentAt } : null, kind)
-    ? <MarkNotSignedButton dealId={dealId} clientName={clientName} inverted />
-    : undefined;
-  // Every send refuses the trash, so the next step is getting it back out.
-  const trashedNextStep: NextStep = {
-    title: "In the trash",
-    detail: `Nothing goes to ${firstName} from the trash. Restore it to carry on.`,
-    action: <RestoreFromTrashButton dealId={dealId} inverted />,
-  };
+  const markNotSigned = !trashed && canMarkNotSigned(contractStatus ? { status: contractStatus, sentAt } : null, kind);
 
-  // A proposal goes Draft, Sent, Viewed, then on to its contract. It's never
-  // signed, reviewed or expired, so none of the contract's steps apply.
-  function proposalNextStep(): NextStep {
-    if (status === "processing") return { title: "SealMe is reading the call", detail: "The terms fill in by themselves in a moment." };
-    if (status === "extraction_failed") return { title: "Reading the call failed", detail: "Try again; nothing is lost.", action: <form action={retryExtractionAction}><NextButton>Try again</NextButton></form> };
-    if (missing.length > 0) {
+  const sendable =
+    !trashed &&
+    editable &&
+    missing.length === 0 &&
+    (isProposal
+      ? !hasContract || (contractStatus === "draft" && !derivedContractId)
+      : (!hasContract || contractStatus === "draft") && status !== "pending_approval" && status !== "changes_requested" && status !== "sent" && status !== "signed");
+
+  // A signed contract's renewal, shown in its own card under the next step.
+  const showRenewal = renewal && !isProposal && !trashed && contractStatus === "signed" ? renewal : null;
+  const sendAgain = <CardButton variant="primary" href={`/deals/${dealId}/send`}>Send again</CardButton>;
+  const readyTitle = terms.length > 1 ? `All ${terms.length} terms are in` : "Everything's in";
+  // Dates in the viewer's own format, once the page runs in the browser.
+  const dateText = (iso: string | null) => (iso && isClient ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null);
+  const signerName = signature?.signerName ?? contractSignerName;
+  // The client signs a SealMe contract at its own link, which the rep can
+  // copy and share while it's out (a DocuSign one is signed on DocuSign's
+  // page). Built at the click, so it falls back to this page's origin.
+  const signLink =
+    !isProposal && contractId && contractDeliveryMethod === "sealme" && !contractExpired && (contractStatus === "sent" || contractStatus === "partially_signed") ? (
+      <CopyLinkButton link={() => clientDocumentUrl(contractId, "contract")} />
+    ) : null;
+  const downloadButton = contractId ? (
+    <CardButton onClick={downloadPdf} busy={downloading}>
+      {downloading ? "Downloading..." : "Download PDF"}
+    </CardButton>
+  ) : null;
+
+  // Brings the first client comment on the paper into view and moves focus
+  // there, so a keyboard or screen reader lands on it too.
+  function showComments() {
+    const el = document.querySelector<HTMLElement>('[data-contract-paper="work"] [data-client-comment]');
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    el.focus({ preventScroll: true });
+  }
+
+  // The one thing this deal needs next. During the call that's what to ask;
+  // once everything's in, sending it; otherwise where it stands.
+  function nextStep(): NextView {
+    if (trashed) {
       return {
-        title: missing.length === 1 ? `Fill in ${missing[0].label.toLowerCase()}` : `Fill in ${missing.length} details`,
-        detail: "The call didn't cover them. Then the proposal is ready to send.",
-        action: <a href="#missing" className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Fill them in</a>,
+        eyebrow: "Next step",
+        title: "In the trash",
+        text: `Nothing goes to ${who} from the trash. Restore it to carry on.`,
+        actions: (
+          <>
+            <CardButton variant="primary" onClick={restore} busy={restoring}>{restoring ? "Restoring..." : "Restore"}</CardButton>
+            {downloadButton}
+          </>
+        ),
       };
     }
-    if (!hasContract) return { title: "Make the proposal", detail: `Everything's in. SealMe drafts it on the ${templateName ?? "default"} template.`, action: <form action={generateContractAction}><NextButton>Make the proposal</NextButton></form> };
-    if (derivedContractId) return { title: "Contract made", detail: "Carry on from the contract.", action: <Link href={`/deals/${derivedContractId}`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open contract</Link> };
-    if (contractStatus === "sent") {
-      return contractViewedAt
-        ? { title: `${firstName} opened it ${timeAgo(contractViewedAt)}`, detail: "Make the contract when they're ready to go ahead." }
-        : { title: `Sent to ${firstName}`, detail: "They haven't opened it yet." };
+    if (callLive && editable && missing.length > 0) {
+      const next = nextToAsk(terms, asked)!;
+      const askedAlready = asked.has(next.key);
+      return {
+        eyebrow: askedAlready ? (
+          <>
+            Listening for the answer
+            <WaitingDots />
+          </>
+        ) : (
+          "Ask next"
+        ),
+        title: next.label,
+        quote: fieldQuestion(next.key, next.label),
+        actions: askedAlready ? (
+          <CardButton onClick={() => startEditing(next.key)}>Type it in</CardButton>
+        ) : (
+          <CardButton onClick={() => markAsked(next.key)}>Mark as asked</CardButton>
+        ),
+      };
     }
-    return { title: "Check the proposal and send it", detail: "Send it by email or copy the link. Nothing goes out until you do.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Review and send</Link> };
+    const ready: NextView = {
+      eyebrow: "Ready to send",
+      title: readyTitle,
+      tone: "done",
+      text: callLive
+        ? `Send it now, while ${who} is still on the call.`
+        : isProposal
+          ? "Send it by email or copy the link. Nothing goes out until you do."
+          : `${Who} gets it to sign as soon as you send.`,
+      actions: (
+        <CardButton variant="primary" onClick={handleSend} busy={sending}>
+          Review and send
+        </CardButton>
+      ),
+    };
+    if (callLive && sendable) return ready;
+    if (status === "processing") return { eyebrow: "Next step", title: "SealMe is reading the call", text: "The terms fill in by themselves in a moment." };
+    if (status === "extraction_failed") {
+      return {
+        eyebrow: "Next step",
+        title: "Reading the call failed",
+        tone: "warn",
+        text: "Try again; nothing is lost. If it keeps failing, check your AI extraction setup (e.g. Anthropic billing).",
+        actions: (
+          <form action={retryExtractionAction}>
+            <CardButton type="submit" variant="primary">Try again</CardButton>
+          </form>
+        ),
+      };
+    }
+    if (editable && missing.length > 0) {
+      const n = missing.length;
+      return {
+        eyebrow: "Still empty",
+        title: n === 1 ? "1 term still empty" : `${n} terms still empty`,
+        text: `Click an empty field in the ${doc} to type it in.`,
+        actions: <CardButton onClick={() => startEditing(missing[0].key)}>Fill in {lowerLabel(missing[0].label)}</CardButton>,
+      };
+    }
+    if (sendable) return ready;
+    const reviewAndSend = (
+      <CardButton variant="primary" onClick={handleSend} busy={sending}>
+        Review and send
+      </CardButton>
+    );
+
+    // A proposal goes Draft, Sent, Viewed, then on to its contract. It's
+    // never signed, reviewed or expired, so none of the contract's steps apply.
+    if (isProposal) {
+      if (derivedContractId) {
+        return { eyebrow: "Next step", title: "Contract made", text: "Carry on from the contract.", actions: <CardButton variant="primary" href={`/deals/${derivedContractId}`}>Open contract</CardButton> };
+      }
+      if (contractStatus === "sent") {
+        return viewedAt
+          ? { eyebrow: "Next step", title: <span suppressHydrationWarning>{`${Who} opened it ${timeAgo(viewedAt)}`}</span>, text: "Make the contract when they're ready to go ahead." }
+          : { eyebrow: "Next step", title: `Sent to ${who}`, text: "They haven't opened it yet." };
+      }
+      return { eyebrow: "Next step", title: "Check the proposal and send it", text: "Send it by email or copy the link. Nothing goes out until you do.", actions: reviewAndSend };
+    }
+
+    // Checked on the contract: marking it leaves the deal at "sent".
+    if (contractStatus === "not_signed") {
+      const on = dateText(markedNotSignedAt);
+      return {
+        eyebrow: "Next step",
+        title: "Not signed",
+        text: on ? `Marked as not signed on ${on}. Send it again if ${who} wants to go ahead.` : `${Who} didn't sign it. Send it again whenever they're ready.`,
+        actions: sendAgain,
+      };
+    }
+    if (status === "pending_approval") {
+      // The review card right under this says who has it.
+      return { eyebrow: "Next step", title: "Waiting for approval", text: `It goes to ${who} as soon as it's approved.` };
+    }
+    if (status === "changes_requested") {
+      // Changed here since: what's left is sending this version.
+      if (updatedAfterRequest) {
+        return {
+          eyebrow: "Next step",
+          title: "Contract updated",
+          tone: "done",
+          text: changesRequestedBy?.by === "reviewer" ? "Send it again when you're ready." : `Send it again so ${who} gets this version.`,
+        };
+      }
+      if (docusignVoid) {
+        return { eyebrow: "Next step", title: "Voided in DocuSign", tone: "warn", text: `${docusignVoid.reason ? `${docusignVoid.reason}. ` : ""}Make any changes, then send it again.` };
+      }
+      // Not from contractSentAt: it stays set from an earlier round when a
+      // new one goes to review, so a reviewer's or counter-signer's no
+      // would read as the client's.
+      if (changesRequestedBy?.by === "signer") {
+        return { eyebrow: "Next step", title: "Declined to sign", tone: "warn", text: `${changesRequestedBy.name ?? "A signer"} declined to sign. Make any changes, then send it again.` };
+      }
+      // The client's comments sit on the paper, under the clauses they're about.
+      const comments = clauseComments.length > 0;
+      const text =
+        changesRequestedBy?.by === "client" || (!changesRequestedBy && comments)
+          ? comments
+            ? `${Who} asked for changes. Their comments are under the clauses. Make the changes, then send it again.`
+            : `${Who} asked for changes. Make them, then send it again.`
+          : changesRequestedBy?.by === "reviewer"
+            ? "A reviewer asked for changes before it goes out."
+            : "Changes were asked for. Make them, then send it again.";
+      return {
+        eyebrow: "Next step",
+        title: "Make the requested changes",
+        tone: "warn",
+        text,
+        actions: comments ? <CardButton onClick={showComments}>{clauseComments.length === 1 ? "Show the comment" : "Show the comments"}</CardButton> : undefined,
+      };
+    }
+    if (status === "sent" && contractExpired) {
+      const on = dateText(contractExpiresAt);
+      return {
+        eyebrow: "Next step",
+        title: "Sign link expired",
+        tone: "warn",
+        text: on ? `The sign link expired on ${on}. Send it again so ${who} can sign.` : `${Who} can't sign it anymore. Send it again for a new link.`,
+        actions: sendAgain,
+      };
+    }
+    // The client signed; a counter-signer still has to.
+    if (contractStatus === "partially_signed") {
+      const waitingOn = pendingSigners.map((p) => (p.role ? `${p.name} (${p.role})` : p.name)).join(", ");
+      return {
+        eyebrow: "Next step",
+        title: `Signed by ${signerName ?? who}`,
+        text: `Waiting on ${waitingOn || "the other signers"}.`,
+        actions: signLink,
+      };
+    }
+    if (status === "sent") {
+      return {
+        eyebrow: "Next step",
+        title: `Waiting for ${who} to sign`,
+        // Only SealMe's own sign page records a view; DocuSign's doesn't tell us.
+        text: viewedAt ? (
+          <span suppressHydrationWarning>{`They opened it ${timeAgo(viewedAt)}.`}</span>
+        ) : contractDeliveryMethod === "sealme" ? (
+          "They haven't opened it yet."
+        ) : contractDeliveryMethod === "docusign" ? (
+          "Sent through DocuSign."
+        ) : undefined,
+        actions: signLink,
+      };
+    }
+    if (status === "signed") {
+      const on = dateText(signature?.signedAt ?? contractSignedAt);
+      const by = signerName ? `Signed by ${signerName}${on ? ` on ${on}` : ""}.` : on ? `Signed on ${on}.` : "";
+      // With a renewal card under this one there's still that to do.
+      if (showRenewal) {
+        const soon = isClient && renewalCountdown(showRenewal.date).soon;
+        const text = [by, soon ? "The renewal is below." : ""].filter(Boolean).join(" ");
+        return { eyebrow: "Next step", title: "Signed", tone: "done", text: text || undefined };
+      }
+      return { eyebrow: "Next step", title: "Signed", tone: "done", text: `${by ? `${by} ` : ""}Nothing left to do on this deal.` };
+    }
+    return { eyebrow: "Next step", title: "Check the contract and send it", text: `${Who} gets it to sign as soon as you send.`, actions: reviewAndSend };
   }
 
-  // Not from contractSentAt: it stays set from an earlier round when a new
-  // one goes to review, so a reviewer's or counter-signer's no would read as
-  // the client's.
-  function changesRequestedStep(): NextStep {
-    const action = <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link>;
-    if (changesRequestedBy?.by === "signer") {
-      return { title: "Declined to sign", detail: `${changesRequestedBy.name ?? "A signer"} declined to sign. Make any changes, then send it again.`, action };
-    }
-    const detail =
-      changesRequestedBy?.by === "client"
-        ? `${firstName} asked for changes. Make them, then send it again.`
-        : changesRequestedBy?.by === "reviewer"
-          ? "A reviewer asked for changes before it goes out."
-          : "Changes were asked for. Make them, then send it again.";
-    return { title: "Make the requested changes", detail, action };
-  }
-
-  // The one thing this deal needs next, said at the top so nobody has to
-  // hunt for the button.
-  const stepNow: NextStep = trashed
-    ? trashedNextStep
-    : isProposal
-    ? proposalNextStep()
-    : status === "processing"
-      ? { title: "SealMe is reading the call", detail: "The terms fill in by themselves in a moment." }
-      : status === "extraction_failed"
-        ? { title: "Reading the call failed", detail: "Try again; nothing is lost.", action: <form action={retryExtractionAction}><NextButton>Try again</NextButton></form> }
-        : missing.length > 0
-          ? {
-              title: missing.length === 1 ? `Fill in ${missing[0].label.toLowerCase()}` : `Fill in ${missing.length} details`,
-              detail: "The call didn't cover them. Then the contract is ready to send.",
-              action: <a href="#missing" className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Fill them in</a>,
-            }
-          : !hasContract
-            ? { title: "Make the contract", detail: `Everything's in. SealMe drafts it on the ${templateName ?? "default"} template.`, action: <form action={generateContractAction}><NextButton>Make the contract</NextButton></form> }
-            // Checked on the contract: marking it leaves the deal at "sent".
-            : contractStatus === "not_signed"
-              ? { title: "Not signed", detail: `${firstName} didn't sign it. Send it again whenever they're ready.`, action: <Link href={`/deals/${dealId}/send`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Send again</Link> }
-            : status === "pending_approval"
-              ? { title: "Waiting for approval", detail: "It goes to the client as soon as it's approved.", action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
-              : status === "changes_requested"
-                ? docusignVoid
-                  ? { title: "Voided in DocuSign", detail: `${docusignVoid.reason ? `${docusignVoid.reason}. ` : ""}Make any changes, then send it again.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Open the contract</Link> }
-                  : changesRequestedStep()
-                : status === "sent" && contractExpired
-                  ? { title: "Sign link expired", detail: `${firstName} can't sign it anymore. Send it again for a new link.`, action: <Link href={`/deals/${dealId}/send`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Send again</Link> }
-                  : status === "sent"
-                    ? { title: `Waiting for ${firstName} to sign`, detail: contractViewedAt ? `They opened it ${timeAgo(contractViewedAt)}.` : "They haven't opened it yet." }
-                    : status === "signed"
-                      ? { title: "Signed", detail: "Nothing left to do on this deal." }
-                      : { title: "Check the contract and send it", detail: `${firstName} gets it to sign as soon as you send.`, action: <Link href={`/deals/${dealId}/contract`} className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>Review and send</Link> };
+  const step = nextStep();
   // Mark as not signed rides along whatever the step says, wherever
-  // canMarkNotSigned allows it (still out, past its link, changes asked for
-  // after it went out, or a sent one still missing a detail), the same as
-  // on the contract screen.
-  const next: NextStep = markNotSigned && !stepNow.secondary ? { ...stepNow, secondary: markNotSigned } : stepNow;
+  // canMarkNotSigned allows it, the same as on the contract screen.
+  const stepActions =
+    markNotSigned && !callFocus ? (
+      <>
+        {step.actions}
+        <div style={{ flexBasis: "100%", minWidth: 0 }}>
+          <MarkNotSignedButton dealId={dealId} clientName={clientName} />
+        </div>
+      </>
+    ) : (
+      step.actions
+    );
+
+  // The line under the parties: where the document stands.
+  function paperMeta(): { text: string; live: boolean } {
+    if (callLive && editable && !plain) return { text: "Draft, filling in during the call", live: true };
+    const sent = dateText(sentAt);
+    const sentLine = sent ? `Sent on ${sent}` : "Sent";
+    if (isProposal) {
+      if (contractStatus !== "sent") return { text: "Draft", live: false };
+      return { text: changedSinceSent ? `${sentLine}, changed since` : sentLine, live: false };
+    }
+    if (contractStatus === "signed") {
+      const on = dateText(signature?.signedAt ?? contractSignedAt);
+      const by = signature?.signerName ? ` by ${signature.signerName}` : "";
+      return { text: on ? `Signed on ${on}${by}` : `Signed${by}`, live: false };
+    }
+    if (contractStatus === "not_signed") return { text: `${sentLine}, not signed`, live: false };
+    if (contractExpired) return { text: `${sentLine}, sign link expired`, live: false };
+    if (contractStatus === "partially_signed") return { text: signerName ? `${sentLine}, signed by ${signerName}` : `${sentLine}, partly signed`, live: false };
+    if (contractStatus === "sent") return { text: sentLine, live: false };
+    if (contractStatus === "pending_approval") return { text: "Waiting for approval", live: false };
+    if (contractStatus === "changes_requested") return { text: "Draft, changes requested", live: false };
+    return { text: "Draft", live: false };
+  }
+  const meta = paperMeta();
+
+  const reviewVisible =
+    !!reviewPanel &&
+    !isProposal &&
+    (reviewPanel.initialSteps.length > 0 || status === "pending_approval" || status === "changes_requested" || contractStatus === "pending_approval" || contractStatus === "changes_requested");
+  const reviewPanelNode = reviewPanel && !isProposal && (
+    <ReviewPanel
+      dealId={dealId}
+      clientName={clientName}
+      initialContractStatus={reviewPanel.initialContractStatus}
+      initialDealStatus={status}
+      initialContractCreatedAt={reviewPanel.initialContractCreatedAt}
+      initialContractSentAt={reviewPanel.initialContractSentAt}
+      initialContractSignedAt={reviewPanel.initialContractSignedAt}
+      initialSteps={reviewPanel.initialSteps}
+      teammates={reviewPanel.teammates}
+      currentUserId={reviewPanel.currentUserId}
+      currentUserEmail={currentUserEmail}
+      currentUserName={currentUserName}
+      delegatedAssigneeIds={reviewPanel.delegatedAssigneeIds}
+      currentUserCanManageWorkspace={reviewPanel.currentUserCanManageWorkspace}
+      getReviewStateAction={reviewPanel.getReviewStateAction}
+      sendToAction={sendForReviewToAction}
+      decideAction={reviewPanel.decideAction}
+      addChecklistItemAction={reviewPanel.addChecklistItemAction}
+      toggleChecklistItemAction={reviewPanel.toggleChecklistItemAction}
+      removeChecklistItemAction={reviewPanel.removeChecklistItemAction}
+      addCommentAction={reviewPanel.addCommentAction}
+      deleteCommentAction={reviewPanel.deleteCommentAction}
+      updateStepMetaAction={reviewPanel.updateStepMetaAction}
+      onSync={handleReviewSync}
+    />
+  );
+
+  // With no document yet (a proposal made from a call with blanks the rep
+  // filled in here), Copy link and Download PDF make it first.
+  const proposalReady = (hasContract ? Boolean(contractId) : true) && missing.length === 0 && status !== "processing" && status !== "extraction_failed";
+
+  const canSendToDocusignNow = !trashed && !isProposal && docusignEnabled && status === "ready" && contractStatus === "draft" && clientHasEmail;
+  const history = shownFields.filter((f) => f.history.length > 0);
+  const voiceFix = !termsLocked && shownFields.some((f) => f.status !== "missing");
+
+  // What a recording on this screen might have missed: nothing heard at
+  // all, or only one side. At the top while the call is on (it can still be
+  // saved) or just ended; for a call long over, under More with the calls.
+  const micNow: ReactNode[] = [];
+  const micPast: ReactNode[] = [];
+  const watchMic = (key: string, transcript: string, startedAt: Date | string, endedAt: Date | string | null, inProgress: boolean, recent: boolean) => {
+    const into = recent ? micNow : micPast;
+    const start = new Date(startedAt);
+    const end = endedAt ? new Date(endedAt) : null;
+    if (inProgress && !transcript.trim()) into.push(<NothingHeardYet key={`${key}-quiet`} startedAt={start} />);
+    // A call over in its first minute says nothing (MicSilentWarning's own
+    // rule), so a past one is left out here rather than as an empty card.
+    const longEnough = recent || !end || end.getTime() - start.getTime() > 60_000;
+    if (longEnough && channelHasWords(transcript, "Client") && !channelHasWords(transcript, "You")) into.push(<MicSilentWarning key={`${key}-mic`} startedAt={start} endedAt={end} />);
+    if (end && channelHasWords(transcript, "You") && !channelHasWords(transcript, "Client")) {
+      into.push(
+        <div key={`${key}-other`} className="rounded-[8px] px-3 py-2 text-[12px]" style={{ background: "var(--surface-2)", color: "#c0392b" }}>
+          We didn&apos;t pick up anything from the other side of this call. Only your own mic came through. If you were on headphones or an external mic, try switching back to your Mac&apos;s built-in speakers and microphone and recording again.
+        </div>,
+      );
+    }
+  };
+  if (call?.source === "desktop") {
+    const onPill = pill?.id === call.id;
+    // The call's own status says whether it's on; the pill shows it while it records or is written up.
+    const recent = onPill || (!!call.endedAt && callIsRecent({ startedAt: call.startedAt, endedAt: call.endedAt }));
+    watchMic(`pc-${call.id}`, call.transcript, call.startedAt, call.endedAt, call.status === "recording", recent);
+  }
+  for (const c of calls) {
+    if (c.source !== "local") continue;
+    const inProgress = c.id === lastCall?.id && callInProgress(c);
+    watchMic(`call-${c.id}`, c.transcript, c.startedAt, c.endedAt, inProgress, inProgress || callIsRecent(c));
+  }
+
+  const moreHint = [summary ? "Summary" : null, actionItems.length ? "action items" : null, "notes", history.length ? "history" : null, calls.length ? "calls" : null]
+    .filter(Boolean)
+    .join(", ");
+
+  // The main button under the paper, by where the document stands.
+  const badge = termsBadge(missing.length, terms.length);
+  let primary: ReactNode;
+  if (trashed) {
+    primary = (
+      <BarButton variant="primary" icon={<RestoreIcon />} onClick={restore} busy={restoring}>
+        {restoring ? "Restoring..." : "Restore"}
+      </BarButton>
+    );
+  } else if (isProposal) {
+    primary = (
+      <BarButton variant="primary" icon={<SendIcon />} badge={badge} onClick={handleSend} busy={sending}>
+        {contractStatus === "sent" ? "Send again" : "Send proposal"}
+      </BarButton>
+    );
+  } else if (contractStatus === "pending_approval") {
+    primary = (
+      <BarButton variant="primary" disabled>
+        Waiting for approval
+      </BarButton>
+    );
+  } else if (termsLocked) {
+    primary = (
+      <BarButton variant="primary" icon={<DownloadIcon />} onClick={downloadPdf} busy={downloading} disabled={!contractId}>
+        {downloading ? "Downloading..." : "Download PDF"}
+      </BarButton>
+    );
+  } else {
+    // Back to the client: past its link, marked not signed, or changes asked for.
+    const again = contractStatus === "not_signed" || contractExpired || contractStatus === "changes_requested";
+    primary = (
+      <BarButton variant="primary" icon={<SendIcon />} badge={badge} onClick={handleSend} busy={sending}>
+        {again ? "Send again" : "Send for signature"}
+      </BarButton>
+    );
+  }
+
+  const paperProps = {
+    kind,
+    agencyName: plain?.agencyName ?? agencyName,
+    partyName,
+    templateName: plain?.templateName ?? template?.name ?? "",
+    clauses,
+    plainClauses: plain ? plain.clauses : undefined,
+    terms,
+    metaText: meta.text,
+    signature: isProposal ? null : signature,
+  };
 
   return (
-    <>
-      <Link href={leadId ? `/leads/${leadId}` : "/leads"} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
-        ← {leadId ? clientName : "Leads"}
-      </Link>
-
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-[23px] font-medium" style={{ letterSpacing: "-0.6px" }}>{clientName}</h1>
-          <div className="mt-1 text-[13.5px]" style={{ color: "var(--ink-muted)" }}>
-            {service}
-            {callLength ? ` · from a ${callLength}` : ""}
-          </div>
-          {!isProposal && sourceDealId && (
-            <Link href={`/deals/${sourceDealId}`} className="mt-1 inline-block text-[12.5px] font-medium" style={{ color: "var(--accent-blue)" }}>
-              Made from a proposal →
-            </Link>
-          )}
-        </div>
-        <div className="flex flex-none flex-col items-end gap-1.5">
-          <span className={`chip ${dealStatusChip(status, contractExpired, kind, contractStatus)}`}>
-            <span className="chip-dot" />
-            {dealStatusLabel(status, contractExpired, kind, contractStatus)}
-          </span>
-          {contractViewedAt && (
-            <span className="text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
-              👁 Viewed <ClientText text={() => timeAgo(contractViewedAt)} />
+    <div className={s.screen} data-wide-page="">
+      <header className={s.head}>
+        <div className={s.headMain}>
+          {/* Back to the person it's for, opened on the call it came from. */}
+          <Link href={leadId ? `/leads/${leadId}${call ? `?call=${call.id}` : ""}` : "/leads"} className={s.back}>
+            ← {leadId ? clientName : "Leads"}
+          </Link>
+          <div className={s.titleRow}>
+            <h1 className={s.title}>{clientName}</h1>
+            <span className={`chip ${dealStatusChip(status, contractExpired, kind, contractStatus)}`}>
+              <span className="chip-dot" />
+              {dealStatusLabel(status, contractExpired, kind, contractStatus)}
             </span>
-          )}
-        </div>
-      </div>
-
-      <section className="mb-[18px] flex flex-col gap-3 rounded-[20px] p-5 sm:flex-row sm:items-center sm:justify-between" style={{ background: "var(--surface-inverted)", color: "var(--on-surface-inverted)" }}>
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="text-[11px] font-semibold" style={{ letterSpacing: "1px", color: "var(--on-surface-inverted-muted)" }}>NEXT STEP</span>
-          {/* The title and detail can say "opened it 5m ago", and the clock moves
-              between the server render and the browser's, so the browser's text wins. */}
-          <h2 className="break-words text-[19px] font-semibold" style={{ letterSpacing: "-0.3px" }} suppressHydrationWarning>{next.title}</h2>
-          <div className="text-[13px]" style={{ color: "var(--on-surface-inverted-muted)" }} suppressHydrationWarning>{next.detail}</div>
-        </div>
-        {(next.action || next.secondary) && (
-          <div className="flex w-full flex-none flex-col gap-2 sm:w-[220px]">
-            {next.action}
-            {next.secondary}
+            {/* Only while it's waiting on them; once it's signed, closed or
+                back with the rep, when they last opened it is beside the point. */}
+            {viewedAt && !contractExpired && (contractStatus === "sent" || contractStatus === "partially_signed") && (
+              <span className={s.headMeta}>
+                Viewed <ClientText text={() => timeAgo(viewedAt)} />
+              </span>
+            )}
+            {!isProposal && sourceDealId && (
+              <Link href={`/deals/${sourceDealId}`} className={s.headLink}>
+                Made from a proposal →
+              </Link>
+            )}
           </div>
+        </div>
+        {pill && (
+          <CallPill
+            key={pill.id}
+            state={pill.state}
+            startedAt={pill.startedAt}
+            name={personName}
+            sub={call?.personSub ?? null}
+            documentLabel={doc}
+            onEnd={canStop ? endCall : undefined}
+            onDiscard={canStop ? discardCall : undefined}
+            hint={pill.desktop ? "Recording in the desktop app" : null}
+          />
         )}
-      </section>
+      </header>
 
-      <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-[1fr_300px]">
-        <div className="flex flex-col gap-[18px]">
-          {summary && (
-            <div className="card p-5">
-              <div className="mb-1.5 flex items-center justify-between gap-3">
-                <h2 className="text-[12px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)" }}>
-                  Call summary
-                </h2>
-                {callHighlights.length > 0 && <CallHighlightsOverlay items={callHighlights} />}
-              </div>
-              <p className="text-[13.5px] leading-relaxed">{summary}</p>
-            </div>
-          )}
-          <DealTermsCard
-            key={serverRender}
-            groups={[...groups.entries()].filter(([label]) => label !== "Missing")}
-            updateAction={updateFieldsAction}
-            listening={status === "processing"}
-            locked={termsLocked}
+      {micNow.length > 0 && <div className={s.warnings}>{micNow}</div>}
+
+      <div className={s.layout}>
+        <div className={s.paperCol}>
+          <ContractPaper
+            {...paperProps}
+            editable={editable}
+            metaLive={meta.live}
+            heardKey={heardKey}
+            heardQuote={heardQuote}
+            askedKeys={asked}
+            editingKey={editingKey}
+            onStartEdit={setEditingKey}
+            onCommit={commitEdit}
+            onCancel={() => setEditingKey(null)}
+            comments={isProposal ? undefined : clauseComments}
+            animateIn
           />
-
-          {!hasContract && templateClauses && fields.length > 0 && (
-            <ContractPreview templateName={templateName} clausesJson={templateClauses} fields={fields} live={status === "processing"} kind={kind} />
-          )}
-
-          {calls.length > 0 && (
-            <div className="card p-5">
-              <h2 className="mb-3 text-[12px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)" }}>
-                Negotiation timeline
-              </h2>
-              <div className="flex flex-col gap-3">
-                {calls.map((call, i) => (
-                  <div key={call.id} className="border-b pb-3 last:border-b-0 last:pb-0" style={{ borderColor: "var(--hairline-soft)" }}>
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <span className="text-[13px] font-medium">Call {i + 1} - {CALL_SOURCE_LABEL[call.source] ?? call.source}</span>
-                      <span className="text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
-                        <ClientText text={() => new Date(call.startedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })} />
-                        {!call.endedAt && call.id === calls[calls.length - 1].id ? " · in progress" : ""}
-                      </span>
-                    </div>
-                    <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--ink-muted)" }}>
-                      {callPreview(call.transcript)}
-                    </p>
-                    {call.source === "local" && !call.endedAt && !call.transcript.trim() && <NothingHeardYet startedAt={call.startedAt} />}
-                    {call.source === "local" && channelHasWords(call.transcript, "Client") && !channelHasWords(call.transcript, "You") && (
-                      <MicSilentWarning startedAt={call.startedAt} endedAt={call.endedAt} />
-                    )}
-                    {call.source === "local" && call.endedAt && channelHasWords(call.transcript, "You") && !channelHasWords(call.transcript, "Client") && (
-                      <div className="mt-2 rounded-[8px] px-3 py-2 text-[12px]" style={{ background: "var(--surface-2)", color: "#c0392b" }}>
-                        We didn&apos;t pick up anything from the other side of this call. Only your own mic came through. If you were on headphones or an external mic, try switching back to your Mac&apos;s built-in speakers and microphone and recording again.
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <ActionItemsCard dealId={dealId} items={actionItems} today={today} toggleAction={toggleActionItemAction} />
-
-          <DealNotes
-            dealId={dealId}
-            notes={notes}
-            currentUserEmail={currentUserEmail}
-            currentUserName={currentUserName}
-            addAction={addNoteAction}
-            deleteAction={deleteNoteAction}
-          />
+          <ActionBar alignWithNotes={meta.live} label={isProposal ? "Proposal actions" : "Contract actions"}>
+            <BarButton icon={<EyeIcon />} onClick={() => setPreviewOpen(true)}>
+              Preview
+            </BarButton>
+            {primary}
+          </ActionBar>
         </div>
 
-        <div className="flex flex-col gap-4">
-          {status !== "signed" && <ContinueCallButton dealId={dealId} />}
+        <aside className={s.side} aria-label={isProposal ? "Proposal terms and next step" : "Contract terms and next step"}>
+          <TermsCard
+            title={isProposal ? "Proposal terms" : "Contract terms"}
+            terms={terms}
+            askedKeys={asked}
+            onPick={startEditing}
+            editingKey={editingKey}
+            onCommit={commitEdit}
+            onCancel={() => setEditingKey(null)}
+            editable={editable}
+            heardKey={heardKey}
+          />
 
-          {/* Its changes would be refused while the terms are locked. */}
-          {!termsLocked && fields.some((f) => f.status !== "missing") && (
-            <VoiceCorrectionButton dealId={dealId} applyAction={applyVoiceFieldCorrectionAction} reviewAction={isProposal ? refuseProposalReview : sendForReviewToAction} />
-          )}
+          <NextCard eyebrow={step.eyebrow} title={step.title} text={step.text} quote={step.quote} tone={step.tone} actions={stepActions} />
 
-          {reviewPanel && !isProposal && (
-            <ReviewPanel
-              dealId={dealId}
-              clientName={clientName}
-              initialContractStatus={reviewPanel.initialContractStatus}
-              initialDealStatus={status}
-              initialContractCreatedAt={reviewPanel.initialContractCreatedAt}
-              initialContractSentAt={reviewPanel.initialContractSentAt}
-              initialContractSignedAt={reviewPanel.initialContractSignedAt}
-              initialSteps={reviewPanel.initialSteps}
-              teammates={reviewPanel.teammates}
-              currentUserId={reviewPanel.currentUserId}
-              currentUserEmail={currentUserEmail}
-              currentUserName={currentUserName}
-              delegatedAssigneeIds={reviewPanel.delegatedAssigneeIds}
-              currentUserCanManageWorkspace={reviewPanel.currentUserCanManageWorkspace}
-              getReviewStateAction={reviewPanel.getReviewStateAction}
-              sendToAction={sendForReviewToAction}
-              decideAction={reviewPanel.decideAction}
-              addChecklistItemAction={reviewPanel.addChecklistItemAction}
-              toggleChecklistItemAction={reviewPanel.toggleChecklistItemAction}
-              removeChecklistItemAction={reviewPanel.removeChecklistItemAction}
-              addCommentAction={reviewPanel.addCommentAction}
-              deleteCommentAction={reviewPanel.deleteCommentAction}
-              updateStepMetaAction={reviewPanel.updateStepMetaAction}
-              onSync={handleReviewSync}
-            />
-          )}
+          {showRenewal && <RenewalCard date={showRenewal.date} autoRenews={showRenewal.autoRenews} note={showRenewal.note} startAction={startRenewalAction} />}
 
-          {status === "processing" ? (
-            <div className="card flex items-center gap-2.5 px-5 py-4 text-[13.5px] font-medium" style={{ color: "var(--ink-muted)" }}>
-              <span className="chip-dot h-1.5 w-1.5 rounded-full" style={{ background: "var(--ink-muted)" }} />
-              Analyzing the call. Terms appear here live as they&apos;re mentioned.
-            </div>
-          ) : status === "extraction_failed" ? (
-            <div className="card" style={{ borderColor: "rgba(245,185,77,.28)" }}>
-              <div className="rounded-t-[20px] border-b px-5 py-4" style={{ background: "var(--warn-soft)", borderColor: "rgba(245,185,77,.2)" }}>
-                <h2 className="text-[15px] font-medium" style={{ color: "var(--warn)" }}>Couldn&apos;t process this call</h2>
-              </div>
-              <div className="px-5 py-4">
-                <p className="mb-3 text-[13px]" style={{ color: "var(--ink-muted)" }}>
-                  Something went wrong while extracting deal terms. Check your AI extraction setup (e.g. Anthropic billing) and try again.
-                </p>
-                <form action={retryExtractionAction}>
-                  <button type="submit" className="btn btn-primary w-full justify-center">
-                    Try again
-                  </button>
-                </form>
-              </div>
-            </div>
-          ) : missing.length > 0 ? (
-            <div id="missing" className="card scroll-mt-24" style={{ borderColor: "rgba(245,185,77,.28)" }}>
-              <div className="rounded-t-[20px] border-b px-5 py-4" style={{ background: "var(--warn-soft)", borderColor: "rgba(245,185,77,.2)" }}>
-                <h2 className="text-[15px] font-medium" style={{ color: "var(--warn)" }}>Missing information</h2>
-              </div>
-              <form action={fillMissingFieldsAction} className="px-5 py-3">
-                {missing.map((m) => (
-                  <div key={m.id} className="border-b py-3 last:border-b-0" style={{ borderColor: "var(--hairline-soft)" }}>
-                    <label className="text-[13px] font-medium" htmlFor={m.id}>{m.label}</label>
-                    <div className="mb-2 mt-0.5 text-[12px]" style={{ color: "var(--ink-muted)" }}>Not mentioned in the call. Add it below.</div>
-                    <input id={m.id} name={m.id} required placeholder={`Add ${m.label.toLowerCase()}…`} className="input w-full" style={{ fontSize: "13px", padding: "8px 11px" }} />
-                  </div>
-                ))}
-                <button type="submit" className="btn btn-primary mt-3 w-full justify-center">
-                  Save &amp; continue
-                </button>
-              </form>
-            </div>
-          ) : (
-            <div className="card flex items-center gap-2 px-5 py-4 text-[13.5px] font-medium" style={{ color: "var(--success)" }}>
-              ✓ All required information captured
-            </div>
-          )}
-
-          {trashed ? (
-            <div className="card flex flex-col gap-2.5 p-5">
-              <div className="rounded-[10px] px-3 py-2.5 text-[12.5px]" style={{ border: "1px solid var(--hairline)", background: "var(--canvas)", color: "var(--ink-muted)" }}>
-                In the trash. Restore it to send it.
-              </div>
-              {hasContract && (
-                <Link href={`/deals/${dealId}/contract`} className="btn btn-secondary w-full justify-center">
-                  {isProposal ? "View proposal" : "View contract"}
-                </Link>
-              )}
-            </div>
-          ) : isProposal ? (
+          {isProposal && !trashed && !callFocus && (
             <ProposalActions
               dealId={dealId}
               contractId={contractId}
               contractStatus={contractStatus}
-              ready={hasContract && Boolean(contractId) && missing.length === 0 && status !== "processing" && status !== "extraction_failed"}
-              notReadyHint={
-                status === "processing" || status === "extraction_failed"
-                  ? "Ready once SealMe has read the call."
-                  : missing.length > 0
-                    ? "Fill in the missing details first."
-                    : "Make the proposal first."
-              }
-              viewedAt={contractViewedAt ? new Date(contractViewedAt).toISOString() : null}
+              ready={proposalReady}
+              makeDraftAction={hasContract ? undefined : makeDraftAction}
+              notReadyHint={status === "processing" || status === "extraction_failed" ? "Ready once SealMe has read the call." : "Fill in the empty terms first."}
+              viewedAt={viewedAt}
               derivedContractId={derivedContractId}
               contractTemplates={contractTemplates}
               changedSinceSent={changedSinceSent}
               createDisabled={status === "processing"}
+              showSend={false}
             />
-          ) : (
-          <div className="card flex flex-col gap-2.5 p-5">
-            {hasContract ? (
-              <Link href={`/deals/${dealId}/contract`} className="btn btn-primary w-full justify-center">
-                View contract
-              </Link>
-            ) : (
-              <form action={generateContractAction}>
-                <button type="submit" disabled={missing.length > 0 || status === "processing" || status === "extraction_failed"} className="btn btn-primary w-full justify-center">
-                  Generate contract
-                </button>
-              </form>
-            )}
-            <span className="text-center text-[12px]" style={{ color: "var(--ink-muted)" }}>
-              Uses the {templateName ?? "default"} template
-            </span>
-          </div>
           )}
 
           {(canSendToDocusignNow || docusignNowStarted) && (
             <SendToDocusignButton dealId={dealId} sendAction={sendViaDocusignNowAction} onStart={() => setDocusignNowStarted(true)} />
           )}
-        </div>
+
+          {reviewVisible && reviewPanelNode}
+
+          <TranscriptCard lines={lines} live={callLive} clientFirstName={clientFirstName} highlights={highlights} />
+
+          <MoreSection hint={moreHint ? moreHint[0].toUpperCase() + moreHint.slice(1) : null}>
+            {summary && (
+              <div className="card p-5">
+                <div className="mb-1.5 flex items-center justify-between gap-3">
+                  <h2 className="text-[12px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)" }}>
+                    Call summary
+                  </h2>
+                  {callHighlights.length > 0 && <CallHighlightsOverlay items={callHighlights} />}
+                </div>
+                <p className="text-[13.5px] leading-relaxed">{summary}</p>
+              </div>
+            )}
+
+            <ActionItemsCard dealId={dealId} items={actionItems} today={today} toggleAction={toggleActionItemAction} />
+
+            <DealNotes dealId={dealId} notes={notes} currentUserEmail={currentUserEmail} currentUserName={currentUserName} addAction={addNoteAction} deleteAction={deleteNoteAction} />
+
+            {history.length > 0 && <TermHistory fields={history} />}
+
+            {micPast.length > 0 && (
+              <div className="card p-5">
+                <h2 className="mb-1 text-[12px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)" }}>
+                  Call recording
+                </h2>
+                <div className="flex flex-col gap-2">{micPast}</div>
+              </div>
+            )}
+
+            {calls.length > 0 && (
+              <div className="card p-5">
+                <h2 className="mb-3 text-[12px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)" }}>
+                  Calls
+                </h2>
+                <div className="flex flex-col gap-3">
+                  {calls.map((c, i) => (
+                    <div key={c.id} className="border-b pb-3 last:border-b-0 last:pb-0" style={{ borderColor: "var(--hairline-soft)" }}>
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <span className="text-[13px] font-medium">
+                          Call {i + 1} - {CALL_SOURCE_LABEL[c.source] ?? c.source}
+                        </span>
+                        <span className="flex-none text-[11.5px]" style={{ color: "var(--ink-muted)" }}>
+                          <ClientText text={() => new Date(c.startedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })} />
+                          {!c.endedAt && c.id === lastCall?.id ? " · in progress" : ""}
+                        </span>
+                      </div>
+                      <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--ink-muted)", overflowWrap: "anywhere" }}>
+                        {callPreview(c.transcript)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {!reviewVisible && reviewPanelNode}
+
+            {/* Its changes would be refused while the terms are locked. */}
+            {voiceFix && (
+              <VoiceCorrectionButton dealId={dealId} applyAction={applyVoiceFieldCorrectionAction} reviewAction={isProposal ? refuseProposalReview : sendForReviewToAction} />
+            )}
+
+            {status !== "signed" && <ContinueCallButton dealId={dealId} />}
+
+            {canExportAuditTrail && (
+              <div className={s.moreLinks}>
+                <AuditTrailButton dealId={dealId} className={s.moreLink} />
+              </div>
+            )}
+          </MoreSection>
+        </aside>
       </div>
-    </>
+
+      <MissingDialog
+        open={missingOpen}
+        missing={missing.map((t: ContractTerm) => ({ key: t.key, label: t.label }))}
+        partyName={partyKnown ? partyName : null}
+        documentLabel={doc}
+        live={callLive}
+        onFill={(key) => {
+          setMissingOpen(false);
+          startEditing(key);
+        }}
+        onClose={() => setMissingOpen(false)}
+      />
+
+      <PreviewModal
+        open={previewOpen}
+        onClose={() => {
+          setPreviewOpen(false);
+          setPreviewError(null);
+        }}
+        subtitle={`This is what ${partyKnown && partyName ? partyName : "the client"} will see.`}
+        actions={downloadButton}
+        notice={previewError}
+      >
+        <ContractPaper {...paperProps} editable={false} mode="preview" />
+      </PreviewModal>
+
+      {toast && (
+        <div key={toast.id} className={s.toast} data-tone={toast.tone} role={toast.tone === "error" ? "alert" : "status"}>
+          <i aria-hidden="true" />
+          <span>{toast.text}</span>
+        </div>
+      )}
+
+      <ActionBarSpacer />
+    </div>
+  );
+}
+
+// Every term the rep or a later call changed, old value to new, under More.
+function TermHistory({ fields }: { fields: LiveField[] }) {
+  return (
+    <div className="card p-5">
+      <h2 className="mb-3 text-[12px] font-medium uppercase tracking-wide" style={{ color: "var(--ink-muted)" }}>
+        Change history
+      </h2>
+      <div className="flex flex-col gap-3">
+        {fields.map((f) => (
+          <div key={f.fieldKey} className="flex flex-col gap-1.5">
+            <span className="text-[13px] font-medium">{f.label}</span>
+            {f.history.map((change, i) => (
+              <div key={i} className="flex items-start justify-between gap-3 text-[12.5px]" style={{ color: "var(--ink-muted)" }}>
+                <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
+                  {change.oldValue ? <span style={{ textDecoration: "line-through" }}>{change.oldValue}</span> : <span>Empty</span>}
+                  {" → "}
+                  <span style={{ color: "var(--ink)" }}>{change.newValue ?? "Cleared"}</span>
+                </span>
+                <span className="flex-none text-[11px]">
+                  {change.changedBy === "manual" ? "edited" : change.changedBy === "voice" ? "by voice" : "on call"} ·{" "}
+                  <ClientText text={() => new Date(change.changedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })} />
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -689,14 +1430,4 @@ export default function LiveDealView({
 // review" ask is turned down instead of starting a chain.
 async function refuseProposalReview(): Promise<{ error?: string }> {
   return { error: "A proposal doesn't go through review. Send it by email or copy the link." };
-}
-
-const NEXT_BUTTON_STYLE: React.CSSProperties = { height: 46, fontSize: 15, background: "var(--on-surface-inverted)", color: "var(--surface-inverted)" };
-
-function NextButton({ children }: { children: React.ReactNode }) {
-  return (
-    <button type="submit" className="btn w-full justify-center" style={NEXT_BUTTON_STYLE}>
-      {children}
-    </button>
-  );
 }

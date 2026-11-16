@@ -136,9 +136,11 @@ export async function startLiveDeal(phoneCallId: string, kind: DealKind, options
 
 // The documents on a live call that SealMe may still fill in: not sent, not
 // in review, not in the trash.
+const FILLABLE = { trashedAt: null, status: { in: ["processing", "missing_info", "ready"] }, OR: [{ contract: null }, { contract: { status: "draft" } }] };
+
 async function liveDeals(phoneCallId: string) {
   return prisma.deal.findMany({
-    where: { phoneCallId, trashedAt: null, status: { in: ["processing", "missing_info", "ready"] }, OR: [{ contract: null }, { contract: { status: "draft" } }] },
+    where: { phoneCallId, ...FILLABLE },
     select: {
       id: true,
       kind: true,
@@ -210,6 +212,11 @@ export async function refreshLiveDeals(phoneCallId: string, transcript: string, 
         if (count === 0) continue;
       }
       try {
+        // The rep can send a document while the call is still on (Send for
+        // signature on the contract screen), or throw it away. The list was
+        // read before the readings of the documents ahead of this one, so
+        // look again: terms an approver or the client has stay as they went out.
+        if ((await prisma.deal.count({ where: { id: deal.id, ...FILLABLE } })) === 0) continue;
         const clauses = (await repickTemplate(deal, transcript, call?.templateId ?? null)) ?? deal.template.clauses;
         await applyExtractionToDeal(deal.id, transcript, extractPlaceholderKeys(clauses));
       } catch (err) {

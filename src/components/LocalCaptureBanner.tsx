@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { LOCAL_CAPTURE_STORAGE_KEY, LOCAL_CAPTURE_EVENT, readCaptureSession, type CaptureSession } from "./LocalCaptureForm";
 import { createLiveDocument } from "@/app/(app)/deals/new/live-actions";
-import { stopCapture, discardCapture, captureEndedAs, useLiveCallState, useElapsed, docProgress } from "@/lib/live-capture-client";
+import { stopCapture, discardCapture, captureEndedAs, useLiveCallState, useElapsed, docProgress, useCaptureOnPage } from "@/lib/live-capture-client";
 
 // The bar at the top of the app while the desktop app records a call: how
 // long it's been going, Stop & finish, and Discard. For a call on a lead it
@@ -22,6 +22,7 @@ export default function LocalCaptureBanner() {
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const live = useLiveCallState(session?.phoneCallId, bump);
   const elapsed = useElapsed(session?.startedAt);
+  const onPage = useCaptureOnPage();
   // For a call ended in the floating panel while this window shows its lead
   // (see leaveEndedLead below). Refs, since the listeners are set up once.
   const sessionRef = useRef<CaptureSession | null>(null);
@@ -165,6 +166,9 @@ export default function LocalCaptureBanner() {
   }
 
   if (!session) return null;
+  // The page shows this call with its own End call and Discard (the deal
+  // page's call pill), so the bar would only say it twice.
+  if (onPage !== null && onPage === (session.phoneCallId ?? session.dealId)) return null;
 
   const docs = live?.docs ?? [];
   const title = session.phoneCallId ? `Recording${live?.leadName ? ` · ${live.leadName}` : ""}` : "Recording your call locally";

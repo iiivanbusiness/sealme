@@ -27,9 +27,10 @@ export default async function SendContractPage({
     requireWorkspace(),
   ]);
   if (!deal || !deal.contract || !deal.template) notFound();
-  // Already with a reviewer or the client (e.g. Back after sending). A sent
-  // proposal can go again, so "Send again" lands here.
-  if (!canSendDocument(deal.contract, deal.kind)) redirect(`/deals/${deal.id}/contract`);
+  // Already with a reviewer or the client (e.g. Back after sending): back to
+  // the contract screen. A sent proposal can go again, so "Send again" lands
+  // here.
+  if (!canSendDocument(deal.contract, deal.kind)) redirect(`/deals/${deal.id}`);
 
   const docusignAvailable = Boolean(workspace?.docusignEnabled);
 
@@ -55,8 +56,8 @@ export default async function SendContractPage({
 
   return (
     <>
-    <Link href={`/deals/${deal.id}/contract`} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
-      {isProposal ? "← Proposal" : "← Contract review"}
+    <Link href={`/deals/${deal.id}`} className="mb-3.5 inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: "var(--ink-muted)" }}>
+      {isProposal ? "← Back to the proposal" : "← Back to the contract"}
     </Link>
 
     <div className="mb-6 max-w-[560px]">

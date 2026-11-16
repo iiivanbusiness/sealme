@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prisma, requestOrSendReview } = vi.hoisted(() => ({
   prisma: {
-    deal: { findFirst: vi.fn(), update: vi.fn() },
-    dealField: { update: vi.fn(), count: vi.fn() },
-    dealFieldChange: { create: vi.fn() },
+    deal: { findFirst: vi.fn(), update: vi.fn(), create: vi.fn() },
+    dealField: { update: vi.fn(), count: vi.fn(), findMany: vi.fn(), upsert: vi.fn() },
+    dealFieldChange: { create: vi.fn(), findMany: vi.fn() },
     client: { update: vi.fn() },
-    contract: { update: vi.fn() },
+    contract: { update: vi.fn(), upsert: vi.fn() },
     contractSigner: { deleteMany: vi.fn(), createMany: vi.fn() },
   },
   requestOrSendReview: vi.fn(),
@@ -38,7 +38,21 @@ vi.mock("@/lib/hubspot", () => ({}));
 vi.mock("@/lib/salesforce", () => ({}));
 vi.mock("@/lib/review", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/review")>()), requestOrSendReview }));
 
-import { applyVoiceFieldCorrection, sendContractEmail, sendViaDocusignNow, updateFieldValues } from "./actions";
+import { revalidatePath } from "next/cache";
+import { currentUserWithRole } from "@/lib/permissions";
+import { templateVersion } from "@/lib/deal-live-state";
+import {
+  applyVoiceFieldCorrection,
+  generateContract,
+  generateContractAndSend,
+  getLiveDealState,
+  makeDocumentDraft,
+  sendContractEmail,
+  sendViaDocusignNow,
+  setDealField,
+  startRenewal,
+  updateFieldValues,
+} from "./actions";
 
 function form(entries: [string, string][]) {
   const fd = new FormData();
@@ -268,5 +282,277 @@ describe("Send via DocuSign now, on a proposal", () => {
     expect(await sendViaDocusignNow("d1")).toEqual({ error: "Proposals go out by email or link, not DocuSign" });
     expect(prisma.contract.update).not.toHaveBeenCalled();
     expect(requestOrSendReview).not.toHaveBeenCalled();
+  });
+});
+
+describe("Typing one term in on the contract screen", () => {
+  const changedAt = new Date("2026-11-16T10:00:00Z");
+  const row = (fieldKey: string, value: string | null, status: string, over: object = {}) => ({ id: `f-${fieldKey}`, fieldKey, groupLabel: "Terms", label: fieldKey, value, status, sourceQuote: null, ...over });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prisma.dealField.findMany.mockResolvedValue([row("fee", "$4,000", "confirmed")]);
+    prisma.dealFieldChange.findMany.mockResolvedValue([{ fieldKey: "fee", oldValue: "$3,000", newValue: "$4,000", changedBy: "manual", changedAt }]);
+  });
+
+  it("saves it without leaving the page and hands back the terms and status", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "missing_info", kind: "contract", contract: { status: "draft" }, template: null, fields: [row("fee", null, "missing")] });
+    prisma.dealField.count.mockResolvedValue(0);
+
+    const result = await setDealField("d1", "fee", "  $4,000 ");
+
+    expect(prisma.dealField.update).toHaveBeenCalledWith({ where: { id: "f-fee" }, data: { value: "$4,000", status: "confirmed" } });
+    expect(prisma.dealFieldChange.create).not.toHaveBeenCalled();
+    // The fee's copy on the deal follows, and nothing missing makes it ready.
+    expect(prisma.deal.update).toHaveBeenCalledWith({ where: { id: "d1" }, data: { feeDisplay: "$4,000" } });
+    expect(prisma.deal.update).toHaveBeenCalledWith({ where: { id: "d1" }, data: { status: "ready" } });
+    expect(revalidatePath).toHaveBeenCalledWith("/deals/d1");
+    expect(revalidatePath).toHaveBeenCalledWith("/deals/d1/contract");
+    expect(result).toEqual({
+      status: "ready",
+      fields: [{ ...row("fee", "$4,000", "confirmed"), history: [{ oldValue: "$3,000", newValue: "$4,000", changedBy: "manual", changedAt }] }],
+    });
+  });
+
+  it("keeps the old value in the history when it changes, and marks it edited", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "ready", kind: "contract", contract: null, template: null, fields: [row("paymentTerms", "Net 30", "extracted")] });
+    prisma.dealField.count.mockResolvedValue(0);
+
+    expect(await setDealField("d1", "paymentTerms", "Net 15")).toMatchObject({ status: "ready" });
+    expect(prisma.dealFieldChange.create).toHaveBeenCalledWith({ data: { dealId: "d1", fieldKey: "paymentTerms", oldValue: "Net 30", newValue: "Net 15", changedBy: "manual" } });
+    expect(prisma.dealField.update).toHaveBeenCalledWith({ where: { id: "f-paymentTerms" }, data: { value: "Net 15", status: "user_edited" } });
+  });
+
+  it("makes a cleared term missing again, and the deal no longer ready", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "ready", kind: "proposal", contract: { status: "sent" }, template: null, fields: [row("fee", "$4,000", "extracted")] });
+    prisma.dealField.count.mockResolvedValue(1);
+
+    // A proposal that went out stays editable.
+    expect(await setDealField("d1", "fee", "   ")).toMatchObject({ status: "missing_info" });
+    expect(prisma.dealFieldChange.create).toHaveBeenCalledWith({ data: { dealId: "d1", fieldKey: "fee", oldValue: "$4,000", newValue: null, changedBy: "manual" } });
+    expect(prisma.dealField.update).toHaveBeenCalledWith({ where: { id: "f-fee" }, data: { value: null, status: "missing" } });
+    expect(prisma.deal.update).toHaveBeenCalledWith({ where: { id: "d1" }, data: { status: "missing_info" } });
+  });
+
+  it("says why instead of throwing once a reviewer or the client has the contract", async () => {
+    for (const status of ["pending_approval", "sent", "partially_signed", "signed"]) {
+      prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "sent", kind: "contract", contract: { status }, template: null, fields: [row("fee", "$5,000", "extracted")] });
+      expect(await setDealField("d1", "fee", "$8,000")).toEqual({ error: expect.stringContaining("can't change") });
+    }
+    prisma.deal.findFirst.mockResolvedValue(null);
+    expect(await setDealField("d1", "fee", "$8,000")).toEqual({ error: "Deal not found" });
+    expect(await setDealField("d1", "{fee}", "$8,000")).toEqual({ error: "This deal has no such term" });
+    expect(prisma.dealField.update).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("gives a term the contract's text has its own row, the first time it's typed in", async () => {
+    prisma.deal.findFirst.mockResolvedValue({
+      id: "d1",
+      clientId: "c1",
+      status: "ready",
+      kind: "contract",
+      template: { clauses: JSON.stringify([{ title: "Old", body: "{fee}" }]) },
+      // The contract's template wins over the deal's.
+      contract: { status: "draft", template: { clauses: JSON.stringify([{ title: "Fees", body: "{fee} for {billingCycle}" }]) } },
+      fields: [row("fee", "$4,000", "extracted")],
+    });
+    prisma.dealField.upsert.mockResolvedValue({ id: "f-new", fieldKey: "billingCycle", value: null, status: "missing" });
+    prisma.dealField.count.mockResolvedValue(0);
+
+    await setDealField("d1", "billingCycle", "Monthly");
+
+    expect(prisma.dealField.upsert).toHaveBeenCalledWith({
+      where: { dealId_fieldKey: { dealId: "d1", fieldKey: "billingCycle" } },
+      create: { dealId: "d1", fieldKey: "billingCycle", label: "Billing cycle", groupLabel: "Deal details", value: null, status: "missing", orderIndex: 1 },
+      update: {},
+    });
+    expect(prisma.dealField.update).toHaveBeenCalledWith({ where: { id: "f-new" }, data: { value: "Monthly", status: "confirmed" } });
+  });
+
+  it("won't make up a term the text doesn't have, and clears nothing that was never there", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "ready", kind: "contract", contract: null, template: { clauses: JSON.stringify([{ title: "Fees", body: "{fee}" }]) }, fields: [] });
+    expect(await setDealField("d1", "seats", "12")).toEqual({ error: "This deal has no such term anymore" });
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "missing_info", kind: "contract", contract: null, template: { clauses: JSON.stringify([{ title: "Fees", body: "{fee}" }]) }, fields: [] });
+    expect(await setDealField("d1", "fee", "")).toMatchObject({ status: "missing_info", fields: expect.any(Array) });
+    expect(prisma.dealField.upsert).not.toHaveBeenCalled();
+    expect(prisma.dealField.update).not.toHaveBeenCalled();
+  });
+
+  it("says it couldn't save when the write fails", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "ready", kind: "contract", contract: null, template: null, fields: [row("fee", "$4,000", "extracted")] });
+    prisma.dealField.update.mockRejectedValueOnce(new Error("db down"));
+    expect(await setDealField("d1", "fee", "$5,000")).toEqual({ error: "Couldn't save that. Try again" });
+  });
+});
+
+describe("Send for signature with no contract yet", () => {
+  const row = (fieldKey: string, value: string | null, status: string, label = fieldKey) => ({ id: `f-${fieldKey}`, fieldKey, label, value, status });
+  const template = { clauses: JSON.stringify([{ title: "Fees", body: "{fee} from {startDate}" }]) };
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("refuses while a term is missing, counting one the text has with no row", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "missing_info", kind: "contract", templateId: "t1", template, contract: null, fields: [row("fee", "$4,000", "extracted", "Fee"), row("clientEmail", null, "missing", "Client email")] });
+    expect(await generateContractAndSend("d1")).toEqual({ error: "Fill in Start date, Client email before sending. The contract still has blanks" });
+    expect(prisma.contract.upsert).not.toHaveBeenCalled();
+  });
+
+  it("makes the draft and goes to the Send page", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "missing_info", kind: "contract", templateId: "t1", template, contract: null, fields: [row("fee", "$4,000", "extracted"), row("startDate", "March 1", "confirmed")] });
+    await expect(generateContractAndSend("d1")).rejects.toThrow("redirect /deals/d1/send");
+    expect(prisma.contract.upsert).toHaveBeenCalledWith({ where: { dealId: "d1" }, create: { dealId: "d1", templateId: "t1", status: "draft" }, update: {} });
+    expect(prisma.deal.update).toHaveBeenCalledWith({ where: { id: "d1" }, data: { status: "ready" } });
+  });
+
+  it("leaves the status of a deal that has a contract already", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "changes_requested", kind: "contract", templateId: "t1", template: null, contract: { status: "changes_requested", template }, fields: [row("fee", "$4,000", "user_edited"), row("startDate", "March 1", "extracted")] });
+    await expect(generateContractAndSend("d1")).rejects.toThrow("redirect /deals/d1/send");
+    expect(prisma.deal.update).not.toHaveBeenCalled();
+  });
+
+  it("won't start one from the trash, or for a deal it can't see", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "ready", kind: "proposal", trashedAt: new Date(), templateId: "t1", template, contract: null, fields: [] });
+    expect(await generateContractAndSend("d1")).toEqual({ error: "This proposal is in the trash. Restore it first" });
+    prisma.deal.findFirst.mockResolvedValue(null);
+    expect(await generateContractAndSend("d1")).toEqual({ error: "Deal not found" });
+    expect(prisma.contract.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("Making a proposal's document for its link and PDF", () => {
+  const row = (fieldKey: string, value: string | null, status: string, label = fieldKey) => ({ id: `f-${fieldKey}`, fieldKey, label, value, status });
+  const template = { clauses: JSON.stringify([{ title: "Fees", body: "{fee} from {startDate}" }]) };
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("makes the draft where the rep is, with no trip to the Send page", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "missing_info", kind: "proposal", templateId: "t1", template, contract: null, fields: [row("fee", "$4,000", "extracted"), row("startDate", "March 1", "confirmed")] });
+    prisma.contract.upsert.mockResolvedValueOnce({ id: "c9" });
+    expect(await makeDocumentDraft("d1")).toEqual({ contractId: "c9" });
+    expect(prisma.contract.upsert).toHaveBeenCalledWith({ where: { dealId: "d1" }, create: { dealId: "d1", templateId: "t1", status: "draft" }, update: {} });
+    expect(prisma.deal.update).toHaveBeenCalledWith({ where: { id: "d1" }, data: { status: "ready" } });
+    expect(revalidatePath).toHaveBeenCalledWith("/deals/d1");
+  });
+
+  it("refuses while a term is still empty, and from the trash", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "missing_info", kind: "proposal", templateId: "t1", template, contract: null, fields: [row("fee", "$4,000", "extracted", "Fee")] });
+    expect(await makeDocumentDraft("d1")).toEqual({ error: "Fill in Start date before sending. The proposal still has blanks" });
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", status: "ready", kind: "proposal", trashedAt: new Date(), templateId: "t1", template, contract: null, fields: [] });
+    expect(await makeDocumentDraft("d1")).toEqual({ error: "This proposal is in the trash. Restore it first" });
+    expect(prisma.contract.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("Polling a deal while its call is on", () => {
+  const startedAt = new Date("2026-11-16T10:00:00Z");
+  const deal = (over: object = {}) => ({
+    id: "d1",
+    status: "missing_info",
+    summary: null,
+    fields: [{ id: "f1", fieldKey: "fee", groupLabel: "Terms", label: "Fee", value: null, status: "missing", sourceQuote: null }],
+    fieldChanges: [],
+    calls: [],
+    actionItems: [],
+    callHighlights: [],
+    template: { id: "t-deal", name: "Deal template", clauses: "[]" },
+    contract: null,
+    phoneCall: { id: "pc1", status: "recording", startedAt, endedAt: null, transcript: "\nClient: Hello.\nYou: Hi." },
+    ...over,
+  });
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("sends the text it's drawn from, the contract, and the call with only the new words", async () => {
+    const contractTemplate = { id: "t-contract", name: "Contract template", clauses: "[1]" };
+    prisma.deal.findFirst.mockResolvedValue(deal({ contract: { id: "k1", status: "sent", sentAt: startedAt, viewedAt: null, template: contractTemplate } }));
+    const state = await getLiveDealState("d1", "\nClient: Hello.".length);
+    expect(state).toMatchObject({
+      templateUnchanged: false,
+      template: { id: "t-contract", version: templateVersion(contractTemplate), name: "Contract template", clauses: "[1]" },
+      contract: { id: "k1", status: "sent", sentAt: "2026-11-16T10:00:00.000Z", viewedAt: null },
+      phoneCall: { id: "pc1", status: "recording", startedAt: "2026-11-16T10:00:00.000Z", endedAt: null, transcriptLength: "\nClient: Hello.\nYou: Hi.".length, transcriptAppend: "\nYou: Hi.", transcriptReset: false },
+    });
+    expect(state?.fields).toEqual([{ id: "f1", fieldKey: "fee", groupLabel: "Terms", label: "Fee", value: null, status: "missing", sourceQuote: null, history: [] }]);
+    expect(prisma.deal.findFirst.mock.calls[0][0].include).toMatchObject({ phoneCall: expect.any(Object), template: expect.any(Object), contract: expect.any(Object) });
+  });
+
+  it("sends the whole transcript at first, and again when it got shorter", async () => {
+    prisma.deal.findFirst.mockResolvedValue(deal());
+    expect((await getLiveDealState("d1"))?.phoneCall).toMatchObject({ transcriptAppend: "\nClient: Hello.\nYou: Hi.", transcriptReset: false });
+    expect((await getLiveDealState("d1", "\nClient: Hello.\nYou: Hi.".length))?.phoneCall).toMatchObject({ transcriptAppend: "", transcriptReset: false });
+    expect((await getLiveDealState("d1", 400))?.phoneCall).toMatchObject({ transcriptAppend: "\nClient: Hello.\nYou: Hi.", transcriptReset: true });
+    expect((await getLiveDealState("d1", -3))?.phoneCall).toMatchObject({ transcriptAppend: "\nClient: Hello.\nYou: Hi.", transcriptReset: false });
+
+    prisma.deal.findFirst.mockResolvedValue(deal({ phoneCall: { id: "pc1", status: "discarded", startedAt, endedAt: startedAt, transcript: null } }));
+    expect((await getLiveDealState("d1", 25))?.phoneCall).toMatchObject({ endedAt: "2026-11-16T10:00:00.000Z", transcriptLength: 0, transcriptAppend: "", transcriptReset: true });
+  });
+
+  it("leaves the clauses out while the page has the same template, and sends them again once it changed", async () => {
+    const template = { id: "t-deal", name: "Deal template", clauses: '[{"title":"Fees","body":"{fee}"}]' };
+    prisma.deal.findFirst.mockResolvedValue(deal({ template }));
+    const known = templateVersion(template);
+
+    const same = await getLiveDealState("d1", 0, known);
+    expect(same).toMatchObject({ templateUnchanged: true });
+    expect(same?.template).toBeUndefined();
+    expect(JSON.stringify(same)).not.toContain("{fee}");
+
+    // Picked again: another template.
+    const picked = { id: "t-other", name: "Other", clauses: "[2]" };
+    prisma.deal.findFirst.mockResolvedValue(deal({ template: picked }));
+    expect(await getLiveDealState("d1", 0, known)).toMatchObject({ templateUnchanged: false, template: { id: "t-other", clauses: "[2]" } });
+
+    // The same template, edited meanwhile.
+    const edited = { ...template, clauses: '[{"title":"Fees","body":"{fee} a month"}]' };
+    prisma.deal.findFirst.mockResolvedValue(deal({ template: edited }));
+    expect(await getLiveDealState("d1", 0, known)).toMatchObject({ templateUnchanged: false, template: { id: "t-deal", clauses: edited.clauses } });
+
+    // A key that isn't a string counts as none.
+    prisma.deal.findFirst.mockResolvedValue(deal({ template }));
+    expect(await getLiveDealState("d1", 0, 42 as unknown as string)).toMatchObject({ templateUnchanged: false, template: { id: "t-deal" } });
+  });
+
+  it("has no call or text when the deal has none", async () => {
+    prisma.deal.findFirst.mockResolvedValue(deal({ phoneCall: null, template: null }));
+    expect(await getLiveDealState("d1")).toMatchObject({ phoneCall: null, templateUnchanged: false, template: null, contract: null });
+    // Nothing to match a known version against.
+    expect(await getLiveDealState("d1", 0, "t-deal:abc")).toMatchObject({ templateUnchanged: false, template: null });
+    prisma.deal.findFirst.mockResolvedValue(null);
+    expect(await getLiveDealState("d1")).toBeNull();
+  });
+});
+
+describe("Everything ends on the one contract screen", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("opens a new draft on the deal page", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", kind: "contract", status: "missing_info", templateId: "t1", fields: [{ status: "confirmed" }] });
+    await expect(generateContract("d1")).rejects.toThrow(/^redirect \/deals\/d1$/);
+    expect(prisma.contract.upsert).toHaveBeenCalled();
+  });
+
+  it("comes back to the deal page after a form edit, even one that asked for the old contract page", async () => {
+    prisma.deal.findFirst.mockResolvedValue({ id: "d1", clientId: "c1", status: "changes_requested", contract: { status: "changes_requested" }, fields: [{ id: "f1", fieldKey: "fee", value: "$5,000", status: "extracted" }] });
+    prisma.dealField.count.mockResolvedValue(0);
+    await expect(updateFieldValues("d1", form([["f1", "$6,000"], ["returnTo", "contract"]]))).rejects.toThrow(/^redirect \/deals\/d1$/);
+    expect(revalidatePath).toHaveBeenCalledWith("/deals/d1");
+  });
+
+  it("opens a renewal on the new deal's own screen", async () => {
+    vi.mocked(currentUserWithRole).mockResolvedValue({ id: "u1", teamId: null } as never);
+    prisma.deal.findFirst.mockResolvedValue({
+      id: "d1",
+      kind: "contract",
+      clientId: "c1",
+      leadId: "l1",
+      templateId: "t1",
+      service: "SEO",
+      feeDisplay: "$5,000",
+      contract: { status: "signed" },
+      fields: [{ groupLabel: "Terms", label: "Fee", fieldKey: "fee", value: "$5,000", orderIndex: 0 }],
+    });
+    prisma.deal.create.mockResolvedValue({ id: "d2" });
+    await expect(startRenewal("d1")).rejects.toThrow(/^redirect \/deals\/d2$/);
   });
 });
