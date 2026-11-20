@@ -594,7 +594,7 @@ export default function ReviewPanel({
                           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItem(); } }}
                           placeholder="Add a checklist item…"
                           disabled={isPending}
-                          className="input flex-1"
+                          className="input min-w-0 flex-1"
                           style={{ fontSize: "12.5px", padding: "6px 9px" }}
                         />
                         <button type="button" disabled={isPending || !newItemLabel.trim()} onClick={addItem} className="btn btn-secondary btn-sm">
@@ -631,7 +631,7 @@ export default function ReviewPanel({
                         onChange={(e) => setCommentDraft(e.target.value)}
                         placeholder="Leave a comment…"
                         rows={2}
-                        className="input flex-1"
+                        className="input min-w-0 flex-1"
                         style={{ fontSize: "12.5px", padding: "6px 9px" }}
                       />
                       <button type="button" disabled={!commentDraft.trim()} onClick={addComment} className="btn btn-secondary btn-sm self-end">
